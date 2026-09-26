@@ -6,6 +6,7 @@ import { createEmptyState } from '../src/state.js';
 import {
   createRoundState, initRounds, updateRounds, zombiesForRound, pauseSpawning,
   skipToRound, pickSpawnPoint, setSpawnFunction, spawnIntervalForRound,
+  endRoundNow, isRoundZombie,
 } from '../src/waves.js';
 
 // Fake spawner: emits zombie:spawned like zombie.js would.
@@ -227,4 +228,144 @@ test('updateRounds spawns only from active points', () => {
   for (let i = 0; i < 400 && spawned.length < 5; i++) step(s, 0.1);
   assert.ok(spawned.length >= 5);
   for (const z of spawned) assert.equal(z.spawnPointId, 2);
+});
+
+// ---------------- WO5 3.3 ----------------
+
+test('WO5: rounds.suspended freezes spawning, timers and the round-end check', () => {
+  const s = setup(21);
+  assert.equal(s.rounds.suspended, false);
+  // break timer frozen
+  s.rounds.suspended = true;
+  const t0 = s.rounds.timer;
+  for (let i = 0; i < 100; i++) step(s, 0.1);
+  assert.equal(s.rounds.timer, t0);
+  assert.equal(s.rounds.round, 0);
+  // active round: no spawns, spawn timer frozen, no round:end even with toSpawn 0 / alive 0
+  s.rounds.suspended = false;
+  s.rounds.timer = 0;
+  step(s, 0.01);
+  assert.equal(s.rounds.phase, 'active');
+  const n = spawned.length;
+  s.rounds.suspended = true;
+  s.rounds.spawnTimer = 1;
+  for (let i = 0; i < 100; i++) step(s, 0.1);
+  assert.equal(spawned.length, n);
+  assert.equal(s.rounds.spawnTimer, 1);
+  const ends = [];
+  events.on('round:end', (p) => ends.push(p));
+  s.rounds.toSpawn = 0;
+  while (s.zombies.length) killOne(s);
+  step(s, 0.1);
+  assert.equal(ends.length, 0);
+  assert.equal(s.rounds.phase, 'active');
+  s.rounds.suspended = false;
+  step(s, 0.1);
+  assert.equal(ends.length, 1);
+});
+
+test('WO5: zombiesForRound applies ceil(base * countMult)', () => {
+  for (const r of [1, 2, 5, 9, 10, 20]) {
+    const base = zombiesForRound(r);
+    assert.equal(zombiesForRound(r, undefined), base);
+    assert.equal(zombiesForRound(r, { countMult: 1 }), base);
+    assert.equal(zombiesForRound(r, { countMult: 1.25 }), Math.ceil(base * 1.25));
+  }
+  assert.equal(zombiesForRound(1, { countMult: 1.25 }), Math.ceil(ROUNDS.earlyCounts[0] * 1.25));
+  assert.equal(zombiesForRound(10, { countMult: 1.25 }), 37); // ceil(29 * 1.25) = ceil(36.25)
+  assert.equal(zombiesForRound(10, { countMult: 2 }), 58);   // exact product stays exact
+  assert.equal(zombiesForRound(10, { countMult: NaN }), 29);
+});
+
+test('WO5: round start reads countMult from state.level.difficulty', () => {
+  const s = setup(22);
+  s.level = { index: 1, loop: 0, difficulty: { healthMult: 1.5, speedMult: 1.1, countMult: 1.25, sprintShift: 3 } };
+  s.rounds.timer = 0;
+  step(s, 0.01);
+  assert.equal(s.rounds.round, 1);
+  assert.equal(s.rounds.toSpawn + spawned.length, Math.ceil(ROUNDS.earlyCounts[0] * 1.25));
+});
+
+test('WO5: boss and minions never touch alive / killedThisRound', () => {
+  const s = setup(23);
+  assert.equal(isRoundZombie(undefined), true);
+  assert.equal(isRoundZombie({}), true);
+  assert.equal(isRoundZombie({ kind: 'normal' }), true);
+  assert.equal(isRoundZombie({ kind: 'boss' }), false);
+  assert.equal(isRoundZombie({ kind: 'minion' }), false);
+  const boss = { id: 90, kind: 'boss' };
+  const minion = { id: 91, kind: 'minion' };
+  const normal = { id: 92, kind: 'normal' };
+  for (const zombie of [boss, minion, normal]) events.emit('zombie:spawned', { zombie });
+  assert.equal(s.rounds.alive, 1);
+  events.emit('zombie:killed', { zombie: minion, cause: 'weapon' });
+  events.emit('zombie:killed', { zombie: boss, cause: 'weapon' });
+  assert.equal(s.rounds.alive, 1);
+  assert.equal(s.rounds.killedThisRound, 0);
+  events.emit('zombie:killed', { zombie: normal, cause: 'weapon' });
+  assert.equal(s.rounds.alive, 0);
+  assert.equal(s.rounds.killedThisRound, 1);
+});
+
+test('WO5: endRoundNow ends an active round when no normal zombie is alive', () => {
+  const s = setup(24);
+  const ends = [];
+  events.on('round:end', (p) => ends.push(p));
+  s.rounds.phase = 'active';
+  s.rounds.round = 4;
+  s.rounds.toSpawn = 7;
+  s.rounds.alive = 3; // stale count
+  s.zombies = [
+    { kind: 'boss', mode: 'dying', _killed: true },
+    { kind: 'minion', mode: 'chasing' },
+    { kind: 'normal', mode: 'dying', _killed: true },
+  ];
+  assert.equal(endRoundNow(s), true);
+  assert.equal(s.rounds.toSpawn, 0);
+  assert.equal(s.rounds.alive, 0);
+  assert.deepEqual(ends, [{ round: 4 }]);
+  assert.equal(s.rounds.phase, 'break');
+  assert.equal(s.rounds.timer, ROUNDS.breakSeconds);
+});
+
+test('WO5: endRoundNow with live normal zombies waits for them, then updateRounds ends it', () => {
+  const s = setup(25);
+  const ends = [];
+  events.on('round:end', (p) => ends.push(p));
+  s.rounds.phase = 'active';
+  s.rounds.round = 2;
+  s.rounds.toSpawn = 5;
+  s.zombies = [{ id: 1, mode: 'chasing' }, { id: 2, kind: 'normal', mode: 'tearing' }];
+  assert.equal(endRoundNow(s), false);
+  assert.equal(s.rounds.toSpawn, 0);
+  assert.equal(s.rounds.alive, 2);
+  assert.equal(ends.length, 0);
+  killOne(s); killOne(s);
+  step(s, 0.1);
+  assert.deepEqual(ends, [{ round: 2 }]);
+});
+
+test('WO5: endRoundNow during a break emits nothing', () => {
+  const s = setup(26);
+  const ends = [];
+  events.on('round:end', (p) => ends.push(p));
+  s.rounds.phase = 'break';
+  s.rounds.timer = 3;
+  assert.equal(endRoundNow(s), false);
+  assert.equal(ends.length, 0);
+  assert.equal(s.rounds.phase, 'break');
+  assert.equal(s.rounds.timer, 3);
+  assert.equal(endRoundNow({}), false);
+});
+
+test('WO5: the default spawner is called with kind normal', () => {
+  const s = setup(27);
+  const calls = [];
+  setSpawnFunction((st, sp, opts) => { calls.push(opts); });
+  s.rounds.timer = 0;
+  step(s, 0.01);
+  step(s, 0.01);
+  assert.ok(calls.length >= 1);
+  for (const o of calls) assert.deepEqual(o, { kind: 'normal' });
+  setSpawnFunction(fakeSpawn);
 });

@@ -169,3 +169,34 @@ taken, and the barricade hold repairs and pays. The skip is based on
   canAfford and doorId; buy deducts/opens/emits/pushes the text effect; a repeat does nothing;
   denied when broke; refund on an unknown id. One real-map `updateShop` test skips itself until
   `map.loadMap().doors` exists, and returns early if another interactable is nearer than the door.
+
+## WO5 (Agent G, WORK_ORDER_5 3.3): mega door and stairs
+
+- Prompt `kind: 'megadoor'` (hit from `map.nearestInteractable`, ref `map.megaDoor`): `null` when
+  the mega door is open or sealed. `blocked = !allDoorsOpen(map)`; blocked text
+  `'MEGA DOOR — open all doors first'` (`MEGA_BLOCKED_TEXT`), otherwise
+  `'Press F to open MEGA DOOR [250]'`. `cost = DOORS.megaCost`, `canAfford`, `doorId` (`'mega'`
+  if the ref has no id). `allDoorsOpen` is `map.allDoorsOpen` when map.js exports it, else
+  every `map.doors[]` entry is open.
+- Prompt `kind: 'stairs'` (ref `map.stairs`, only when `open`): `'Press F to descend'`
+  (`STAIRS_TEXT`), cost 0, never blocked.
+- `buyMegaDoor(state)`: false (no charge, no event) when there is no mega door, it is open or
+  sealed, a transition is running, or a normal door is still closed (blocked). Broke:
+  `purchase:denied { kind: 'megadoor', cost, have }`. Otherwise `spendPoints(DOORS.megaCost)`,
+  `map.openMegaDoor(state.map)` (test injection: `state.map.openMegaDoor` wins, like
+  `openDoor`), refund with no event if it returns `false`, then
+  `purchase:made { kind: 'megadoor', id: 'mega', cost }` and a `'MEGA DOOR OPENED'` text effect
+  at the door centre (same style as `DOOR OPENED`).
+- `useStairs(state)`: needs `map.stairs.open` and no running transition, then
+  `level.beginDescent(state)` (namespace import, guarded). Returns a bool.
+- `updateShop`: while `state.transition` is set the prompt is `null`, `repairTimer` is reset and
+  nothing else runs (the box timer does not tick either). Interact dispatches `megadoor` ->
+  `buyMegaDoor`, `stairs` -> `useStairs` (prompt cleared once the descent starts).
+- Box weights: `boxWeights()` now defaults its wall list to `weapons.BOX_WALL_WEIGHT_IDS`
+  (level-1 wall guns) when weapons.js exports it, so the level-2 wall guns keep the boxOnly
+  weight 2 as Agent D's `weapons.BOX_WEIGHTS` expects (the existing parity test was failing).
+- New exports: `buyMegaDoor`, `useStairs`, `MEGA_BLOCKED_TEXT`, `MEGA_TEXT`, `STAIRS_TEXT`.
+- Tests (fake maps only): blocked/unblocked prompt text and cost, open/sealed -> null, purchase
+  spends/opens/emits/pushes text, repeat refused, broke -> denied, blocked -> no charge and no
+  `openMegaDoor` call, stairs prompt only when open, `useStairs` starts one descent, and no
+  prompt / no purchase during a transition.

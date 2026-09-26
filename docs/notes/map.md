@@ -174,3 +174,46 @@ in `WALLBUY_MAP` but not placed (box-only in practice).
 - Other test files: full `npm test` was green (280/280) with this layout at the time of writing,
   so no test outside map.test.js needed adjusting. Note for others: `spawnPoints[0]` / barricade 1
   is now the bunker window (inactive at start), and the hub windows are ids 3 and 5.
+
+## WO5: mega door, arena, stairs, level defs (Agent B)
+- `map.js` imports `./levels/levels.js` (`LEVELS`) and `./levels/level1.js` (`LEVEL1`). Legacy
+  exports: `MAP_ASCII = LEVEL1.ascii`, `WALLBUY_MAP = LEVEL1.wallbuys` (same objects).
+- `loadMap(levelOrAscii = LEVELS[0], opts = {})`: a level def (`{ id, name, ascii, wallbuys,
+  theme }`) or a raw ascii array (legacy: level-1 wall buys, theme, id and name). `opts.wallbuys`
+  / `opts.theme` override. Wall-buy letters are resolved through the level's own table (a letter
+  not in it throws "unknown tile char"). New fields: `levelId, name, theme, wallbuyMap, megaDoor,
+  bossSpawn, arenaSpawns, arenaTiles, stairs`.
+- Legend: `M` -> code 7 (`TILE_DOOR`), one 4-connected group (else throws), stored in
+  `map.megaDoor = { id: 'mega', letter: 'M', cost: DOORS.megaCost, open, sealed, tiles, x, y, w,
+  h, cx, cy, axis }`, NOT in `map.doors`. `Z` -> floor, `map.bossSpawn` = tile centre (more than
+  one Z throws). `T` -> code 9 (`TILE_STAIRS`), one connected group, `map.stairs = { tiles, x, y,
+  w, h, cx, cy, open }`; blocks movement (both movers) and rays like a wall.
+- **Decision: `X` tiles are stored as code 0 (floor)**, positions in `map.arenaSpawns = [{ id, x,
+  y, tx, ty }]` (row-major, ids from 1). `TILE_ARENA_SPAWN = 8` stays exported for reference and
+  `isWalkable` treats a hand-set 8 as walkable (it never blocks rays), but loadMap never writes
+  it. Reason: pathfinding.js only walks codes 0/2/3/6, so no pathfinding change is needed. Same
+  for the stairs and mega door: every open transition writes code 0.
+- `arenaTiles`: tile indices reachable from Z over codes 0/6/8 at load (mega door and stairs
+  closed). Empty Set when there is no Z. `inArena(map, x, y)` looks the tile up (false for null
+  maps / no arena / out of bounds).
+- `allDoorsOpen` (every `map.doors[]` open; true for a map with no doors, false for null),
+  `megaDoorUnlockable` (mega door exists, !open, !sealed, all doors open), `openMegaDoor`,
+  `sealMegaDoor` (tiles -> 7, open false, sealed true; false if already sealed),
+  `unsealMegaDoor` (tiles -> 0, open true, sealed false; false if already open and unsealed),
+  `openStairs` (tiles -> 0, open true). All return bool, bump `map.version` once per change, and
+  recompute active spawns; all are null-safe (no mega door / stairs / map -> false).
+  `isBossActiveBlocking(map)` = `megaDoor.sealed`.
+- `nearestInteractable` adds `'megadoor'` while `!open && !sealed` (even when locked, so the shop
+  can show "open all doors first") and `'stairs'` once `stairs.open`. Tie order: wall buys, box,
+  doors, mega door, stairs, barricades.
+- Arena spawns are not spawn points; `recomputeActiveSpawns` only looks at `map.spawnPoints`, so
+  they are never active. `map.walls` still holds only code-1 tiles (stairs are not in it; render
+  should draw code 9 itself).
+- Tests (7 new, 31 total): inline 14x5 fixture for parsing, walkability/rays, mega-door
+  lock/open/seal/unseal, stairs, null safety, legacy exports / level-def loading; plus a
+  registry check that runs for every `LEVELS` entry with a `Z` (arena free of W/S/O/B/wall buys
+  and not adjacent to windows/box/wall buys, 4-6 X inside, M and T border the arena, no spawn
+  point inside, arena reachable only after the mega door opens). It is skipped per level while
+  the level has no arena. The older WO4 tests keep a few hard-coded level-1 coordinates (bunker
+  corner (3,3), west pocket (1,26), wall (5,1)); they still hold as long as the arena is added
+  away from the north-west / west edge.

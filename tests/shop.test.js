@@ -11,7 +11,10 @@ import {
   initShop, updateShop, buyWallWeapon, buyAmmo, spinBox, takeBoxWeapon, boxPrice,
   boxWeights, pickBoxWeapon, tickBox, buildPrompt, heldWeaponIds, REPAIR_INTERVAL,
   buyDoor, DOOR_TEXT,
+  buyMegaDoor, useStairs, MEGA_BLOCKED_TEXT, STAIRS_TEXT,
 } from '../src/shop.js';
+import { DOORS, LEVELS_CFG } from '../src/config.js';
+import * as level from '../src/level.js';
 
 const isStubFn = (fn) => typeof fn !== 'function' || String(fn).includes('not implemented');
 const weaponsStub = isStubFn(weapons.createWeapon) || isStubFn(weapons.ammoCost) ||
@@ -387,3 +390,126 @@ test('updateShop interact on a real closed door opens it (skips until map.js has
     assert.equal(door.open, true);
     assert.equal(s.player.points, 10);
   });
+
+// ---------------- WO5 3.3: mega door + stairs (fake maps) ----------------
+
+function megaState(points, { doorsOpen = true } = {}) {
+  const s = baseState();
+  s.player.points = points;
+  const calls = [];
+  s.map = {
+    doors: [{ id: 1, open: true }, { id: 2, open: doorsOpen }],
+    megaDoor: { id: 'mega', cost: DOORS.megaCost, open: false, sealed: false,
+      x: 400, y: 400, w: 120, h: 40, cx: 460, cy: 420 },
+    stairs: { open: false, cx: 900, cy: 900 },
+    openMegaDoor(m) {
+      calls.push(m);
+      if (m.megaDoor.open || m.megaDoor.sealed || !m.doors.every((d) => d.open)) return false;
+      m.megaDoor.open = true;
+      return true;
+    },
+  };
+  return { s, calls };
+}
+
+function recordEv(name) {
+  const out = [];
+  events.on(name, (p) => out.push(p));
+  return out;
+}
+
+test('WO5: mega door prompt is blocked while a normal door is closed', () => {
+  const { s } = megaState(1000, { doorsOpen: false });
+  const p = buildPrompt(s, { kind: 'megadoor', ref: s.map.megaDoor, dist: 5 });
+  assert.equal(p.kind, 'megadoor');
+  assert.equal(p.blocked, true);
+  assert.equal(p.text, 'MEGA DOOR — open all doors first');
+  assert.equal(p.text, MEGA_BLOCKED_TEXT);
+  assert.equal(p.cost, DOORS.megaCost);
+});
+
+test('WO5: mega door prompt offers the buy once all doors are open', () => {
+  const { s } = megaState(100);
+  const p = buildPrompt(s, { kind: 'megadoor', ref: s.map.megaDoor, dist: 5 });
+  assert.equal(p.blocked, false);
+  assert.equal(p.text, `Press F to open MEGA DOOR [${DOORS.megaCost}]`);
+  assert.equal(p.text, 'Press F to open MEGA DOOR [250]');
+  assert.equal(p.canAfford, false);
+  s.player.points = 250;
+  assert.equal(buildPrompt(s, { kind: 'megadoor', ref: s.map.megaDoor }).canAfford, true);
+  s.map.megaDoor.open = true;
+  assert.equal(buildPrompt(s, { kind: 'megadoor', ref: s.map.megaDoor }), null);
+  s.map.megaDoor.open = false;
+  s.map.megaDoor.sealed = true;
+  assert.equal(buildPrompt(s, { kind: 'megadoor', ref: s.map.megaDoor }), null);
+});
+
+test('WO5: buyMegaDoor spends, opens, emits purchase:made', () => {
+  const { s, calls } = megaState(400);
+  const made = recordEv('purchase:made');
+  assert.equal(buyMegaDoor(s), true);
+  assert.equal(s.player.points, 400 - DOORS.megaCost);
+  assert.equal(s.map.megaDoor.open, true);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(made, [{ kind: 'megadoor', id: 'mega', cost: DOORS.megaCost }]);
+  assert.ok(s.effects.some((e) => e.type === 'text' && e.x === 460 && e.y === 420));
+  assert.equal(buyMegaDoor(s), false); // already open
+  assert.equal(s.player.points, 400 - DOORS.megaCost);
+  assert.equal(made.length, 1);
+});
+
+test('WO5: buyMegaDoor denied when broke, refused (no charge, no event) when blocked', () => {
+  const { s, calls } = megaState(100);
+  const denied = recordEv('purchase:denied');
+  const made = recordEv('purchase:made');
+  assert.equal(buyMegaDoor(s), false);
+  assert.deepEqual(denied, [{ kind: 'megadoor', cost: DOORS.megaCost, have: 100 }]);
+  assert.equal(s.player.points, 100);
+  const b = megaState(1000, { doorsOpen: false });
+  assert.equal(buyMegaDoor(b.s), false);
+  assert.equal(b.s.player.points, 1000);
+  assert.equal(b.s.map.megaDoor.open, false);
+  assert.equal(b.calls.length, 0);
+  assert.equal(calls.length, 0);
+  assert.equal(made.length, 0);
+});
+
+test('WO5: stairs prompt only when the stairs are open', () => {
+  const { s } = megaState(0);
+  assert.equal(buildPrompt(s, { kind: 'stairs', ref: s.map.stairs }), null);
+  s.map.stairs.open = true;
+  const p = buildPrompt(s, { kind: 'stairs', ref: s.map.stairs });
+  assert.equal(p.kind, 'stairs');
+  assert.equal(p.text, 'Press F to descend');
+  assert.equal(p.text, STAIRS_TEXT);
+  assert.equal(p.blocked, false);
+});
+
+test('WO5: useStairs starts the descent once (level.beginDescent)', () => {
+  const { s } = megaState(0);
+  s.level = level.createLevelState(0);
+  const desc = recordEv('level:descend');
+  assert.equal(useStairs(s), false); // closed stairs
+  assert.equal(s.transition, null);
+  s.map.stairs.open = true;
+  assert.equal(useStairs(s), true);
+  assert.equal(s.transition.nextIndex, 1);
+  assert.equal(s.transition.dur, LEVELS_CFG.fadeSeconds);
+  assert.deepEqual(desc, [{ from: 0, to: 1 }]);
+  assert.equal(useStairs(s), false);
+  assert.equal(desc.length, 1);
+});
+
+test('WO5: no prompts and no purchases while a transition runs', () => {
+  const { s } = megaState(1000);
+  s.map.stairs.open = true;
+  s.shop.prompt = { kind: 'stairs' };
+  s.player.repairTimer = 0.5;
+  s.transition = { t: 0, dur: 1.2, nextIndex: 1, swapped: false };
+  updateShop(s, { interact: true }, 1 / 60);
+  assert.equal(s.shop.prompt, null);
+  assert.equal(s.player.repairTimer, 0);
+  assert.equal(buyMegaDoor(s), false);
+  assert.equal(s.player.points, 1000);
+});
+

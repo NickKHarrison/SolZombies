@@ -14,9 +14,15 @@ export function createEmptyState(seed = Date.now()) {
     effects: [],              // transient visuals { type, ttl, maxTtl, ... }
     flow: null,               // pathfinding flow field
     rounds: null,             // waves.createRoundState()
+                              // WO5: rounds.suspended (bool, default false/absent) — while true
+                              // updateRounds does no spawning and no round-end check (boss fight).
     powerups: { items: [], active: {}, dropsThisRound: 0, nuke: null },
     shop: { prompt: null, box: { state: 'idle', timer: 0, weaponId: null } },
     stats: { kills: 0, shotsFired: 0, shotsHit: 0, pointsEarned: 0, roundReached: 0 },
     debug: false,
+    // WO5
+    level: null,              // level.createLevelState(): { index, loop, def, difficulty, name }
+    boss: null,               // boss.createBossState(): { phase, bossId, name, hp, maxHp, ... }
+    transition: null,         // level.beginDescent(): { t, dur, nextIndex, swapped } while fading
   };
 }

@@ -97,6 +97,8 @@ const MOUTHS = ['neutral', 'frown', 'grit', 'grin', 'pain', 'slack'];
 const GUN_NOMINAL = {
   pistol: [8, 4], smg: [12, 5], ar: [16, 5], shotgun: [16, 5], sniper: [20, 4], lmg: [18, 7],
   raygun: [14, 8], thundergun: [20, 8], deathmachine: [18, 9], default: [12, 5],
+  // WO5 3.4 (Agent D): level-2 guns (keys = weapon ids)
+  manowar: [20, 9], xr2: [22, 6], weevil: [14, 7], marshal16: [14, 6], gorgon: [26, 9], dredge48: [24, 10],
 };
 
 /** Every grid-derived sprite in soldier.js, guns.js and face.js, with its expected size. */
@@ -365,6 +367,27 @@ test('guns: every weapons.WEAPONS def resolves to a gun sprite; wonder/special g
       assert.equal(g, GUN_SPRITES[d.cls], `WEAPONS.${id} (cls ${d.cls}) should use GUN_SPRITES.${d.cls}`);
     }
   }
+});
+
+test('guns WO5: level-2 gun sprites are distinct, muzzle on the right edge, grip on the barrel line', async () => {
+  const { WEAPONS } = await import('../src/weapons.js');
+  const ids = ['manowar', 'xr2', 'weevil', 'marshal16', 'gorgon', 'dredge48'];
+  const seen = new Set();
+  for (const id of ids) {
+    const g = GUN_SPRITES[id];
+    assert.ok(g, `GUN_SPRITES.${id} missing`);
+    assert.equal(WEAPONS[id].sprite, id);
+    assert.equal(gunSpriteFor(WEAPONS[id]), g);
+    assert.equal(g.muzzle.x, g.sprite.w, `${id} muzzle.x === w`);
+    assert.equal(g.grip.y, g.muzzle.y, `${id} grip on the barrel axis`);
+    assert.equal(g.pose, WEAPONS[id].cls === 'lmg' ? 'heavy' : 'twohand');
+    const key = g.sprite.rows.join('/');
+    assert.ok(!seen.has(key), `${id} duplicates another sprite`);
+    seen.add(key);
+    for (const other of ['smg', 'ar', 'shotgun', 'lmg']) assert.notEqual(key, GUN_SPRITES[other].sprite.rows.join('/'));
+  }
+  assert.ok(GUN_SPRITES.gorgon.sprite.w > GUN_SPRITES.lmg.sprite.w, 'Gorgon is the long LMG');
+  assert.ok(GUN_SPRITES.marshal16.sprite.w < GUN_SPRITES.shotgun.sprite.w, 'Marshal 16 is short');
 });
 
 // ---------------------------------------------------------------------------------------------

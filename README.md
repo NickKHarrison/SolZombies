@@ -21,6 +21,25 @@ doors (BO3 style): stand next to a door and press F to open it for points (75-15
 unlocks a new zone with its own wall guns and zombie spawns; zombies only spawn in zones you have
 opened, and the mystery box is two doors deep.
 
+Mega door and boss: once all five doors on a level are open, the iron **mega door** in the deepest
+zone can be bought for 250 (before that its prompt reads "MEGA DOOR — open all doors first").
+It leads into the boss arena. Stepping inside seals the door behind you and starts the boss fight:
+normal rounds pause, a boss bar appears, and the boss (THE WARDEN on level 1, THE BONE PRIEST on
+level 2) hunts you, telegraphs a charge (it flashes white, then dashes; it is stunned if it hits a
+wall) and summons fast, small minions every 12 s (up to 10 alive). Power-ups are weaker against
+the boss: Insta-Kill hits deal 5 % of its health, a Nuke 10 %, and the Thundergun 15 % up close
+plus a knockback. The boss is worth 200 points and always drops a Max Ammo. Its death unseals the
+mega door, ends the round and opens the **staircase** ("STAIRS OPENED").
+
+Levels: press F on the open stairs to descend. The screen fades and the next level loads: level 2
+is the **Catacombs**, a new layout with torch-lit bone-and-stone walls, tougher zombies (1.5x
+health, faster, more of them, more sprinters) and new, stronger guns on the walls (Weevil, XR-2,
+Man-O-War, Marshal 16, 48 Dredge, Gorgon, plus Haymaker 12 and Drakon; 200-350 points). The new
+guns are also in the mystery box. You keep your points, weapons, ammo, health, active power-ups
+and round number; doors, barricades, the box and the boss reset. After the last level the stairs
+loop back to level 1's layout with a compounding difficulty multiplier (level 3 = loop 1, and so
+on). Restarting always returns to level 1.
+
 ## Controls
 
 | Key | Action |
@@ -40,7 +59,15 @@ opened, and the mystery box is two doors deep.
 
 Open http://localhost:8080/?debug=1 to expose `window.__game` with helpers such as
 `__game.debug.spawnPowerup('nuke')`, `skipToRound(10)`, `addPoints(1000)`, `god(true)`,
-`doors()`, `openDoor(id)`, `openAllDoors()`.
+`doors()`, `openDoor(id)`, `openAllDoors()`, `step(seconds, frameDt, inputOverrides)`.
+
+Boss and levels: `openMegaDoor()` (opens every door, then the mega door, for free),
+`startBoss()` (teleports into the arena and starts the fight), `killBoss()` (kills the boss
+like a weapon kill: 200 points, stairs open), `boss()` (fight state), `descend()` (opens the
+stairs if needed and starts the fade to the next level), `setLevel(i)` (loads level index `i`
+at once; 0 = bunker, 1 = catacombs, 2 = bunker loop 1, ...), and
+`setDifficulty({ healthMult, speedMult, countMult, sprintShift })` (edits the current level's
+difficulty).
 
 ## Tests
 

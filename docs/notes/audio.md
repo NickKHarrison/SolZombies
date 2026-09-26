@@ -91,3 +91,29 @@
   partials at ~1.48/2.21/3.39 kHz with fast decay, a low 140->70 Hz thud and a short high-passed
   noise tick). +-6 % random pitch per open from the audio-local PRNG.
 - `playSfx('door')` is also a valid name now. Checked in Chrome: plays with no console errors.
+
+## WO5 (Agent E, 3.6): boss, levels, mega door
+- New SFX. All subscriptions live in `initAudio`, so a re-init is safe, and every sound is a silent
+  no-op without a context. Boss sounds use the compressed Thundergun bus (`bossBus()`, with the
+  world bus as the fallback).
+  - `bossRoar` (`boss:start`): two formant voices, 92→58 Hz and 61→41 Hz, 1.35 s, plus a noise
+    growl, a 48 Hz sub and two war-drum hits (0 s and 0.42 s).
+  - `bossCharge` (`boss:charge`, rate limited to 0.3 s): a dissonant rising saw stab (220/233 Hz →
+    330/349 Hz) plus a snort voice and a hiss.
+  - `bossHit` (`zombie:hit` where `payload.zombie.kind === 'boss'`): a low 90→38 Hz thud plus dull
+    noise, rate limited by `AUDIO.bossHitMinInterval ?? 0.12`. Other kinds still play `zombieHit`.
+  - `bossDefeated` (`boss:defeated`): a drum hit, a C-major arpeggio and a held chord with a bell.
+  - `levelDescend` (`level:descend`): 6 stone footsteps whose pitch drops, plus a low drone (41 Hz
+    sine with a 55 Hz saw).
+  - `levelStart` (`level:start`): an ominous minor swell with a bell. It is skipped for `index 0`, so
+    a new game only plays the round-start sting.
+  - `megaDoor` (`purchase:made` kind `megadoor`): a 1.3 s iron grind (detuned low saw/square plus
+    two resonant noise bands), then a deep clang.
+- Verified with a fake AudioContext in Node: each event builds its nodes (29/15/5/25/34/12/19). In
+  Node without `window` the calls are silent. In Chrome, emitting all 7 events gave no console
+  errors.
+
+### WO5 FIX-3 (review I2)
+- `zombie:killed` goes through `onZombieKilledSfx`: kills with `cause === 'debug'` (the leftover
+  minions `finishFight` clears) play nothing, and at most one death groan plays per 12 ms (one
+  per frame), so a nuke or a mass kill no longer stacks 10+ groans.

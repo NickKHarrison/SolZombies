@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { POWERUPS, POINTS } from '../src/config.js';
+import { POWERUPS, POINTS, BOSS } from '../src/config.js';
 import * as events from '../src/events.js';
 import { createEmptyState } from '../src/state.js';
 import * as player from '../src/player.js';
@@ -262,4 +262,56 @@ test('drops with no player-walkable tile nearby are skipped and not counted (rev
     assert.equal(spawned, 0);
     assert.equal(s.powerups.items.length, 0);
     assert.equal(s.powerups.dropsThisRound, 0, 'skipped drop does not count toward the cap');
+  });
+
+// --- WO5 3.2: boss / minion power-up rules -------------------------------------------------
+
+test('WO5 nuke: boss is not queued and takes BOSS.nukeFrac of max HP; minions are queued',
+  { skip: stub(player.createPlayer, zombie.killZombie, waves.createRoundState, waves.pauseSpawning) }, () => {
+    const s = fresh(21);
+    s.player = player.createPlayer(0, 0);
+    s.rounds = waves.createRoundState();
+    s.rounds.round = 3;
+    const boss = zombie.spawnZombie(s, { x: 300, y: 300 }, { kind: 'boss' });
+    const mins = [0, 1, 2].map((i) => zombie.spawnZombie(s, { x: 100 + i * 30, y: 100 }, { kind: 'minion' }));
+    initPowerups(s);
+    applyPowerup(s, 'nuke');
+    assert.ok(Math.abs(boss.hp - boss.maxHp * (1 - BOSS.nukeFrac)) < 1e-6);
+    assert.deepEqual(s.powerups.nuke.queue, mins.map((m) => m.id));
+    // A boss id sneaking into the queue (e.g. an older nuke) is still never killed by it.
+    s.powerups.nuke.queue.push(boss.id);
+    for (let i = 0; i < 20; i++) updatePowerups(s, POWERUPS.nukeStagger);
+    assert.ok(mins.every((m) => m._killed));
+    assert.ok(!boss._killed);
+  });
+
+test('WO5 drops: minions roll at the normal chance; the boss never rolls (guaranteed Max Ammo is boss.js)', () => {
+  const s = fresh(22);
+  initPowerups(s);
+  for (let i = 0; i < 5000; i++) {
+    s.powerups.dropsThisRound = 0;
+    events.emit('zombie:killed', { zombie: { id: 1, x: 5, y: 6, kind: 'boss' }, cause: 'weapon', x: 5, y: 6, kind: 'boss' });
+  }
+  assert.equal(s.powerups.items.length, 0);
+  let drops = 0;
+  for (let i = 0; i < 10000; i++) {
+    s.powerups.dropsThisRound = 0;
+    events.emit('zombie:killed', { zombie: { id: 2, x: 5, y: 6, kind: 'minion' }, cause: 'weapon', x: 5, y: 6, kind: 'minion' });
+  }
+  drops = s.powerups.items.length;
+  assert.ok(drops > 150 && drops < 250, `drops=${drops}`);
+});
+
+test('WO5 FIX-2 nuke vs boss is a fractional effect: exactly nukeFrac even above maxHitFrac and under Insta-Kill',
+  { skip: stub(player.createPlayer, zombie.killZombie, waves.createRoundState, waves.pauseSpawning) }, () => {
+    const s = fresh(23);
+    s.player = player.createPlayer(0, 0);
+    s.rounds = waves.createRoundState();
+    s.rounds.round = 10;
+    const boss = zombie.spawnZombie(s, { x: 300, y: 300 }, { kind: 'boss' });
+    initPowerups(s);
+    applyPowerup(s, 'instaKill');
+    applyPowerup(s, 'nuke');
+    assert.ok(BOSS.nukeFrac > BOSS.maxHitFrac);
+    assert.ok(Math.abs(boss.hp - boss.maxHp * (1 - BOSS.nukeFrac)) < 1e-6);
   });

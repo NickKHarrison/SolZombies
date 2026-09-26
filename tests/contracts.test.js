@@ -165,6 +165,12 @@ const CANONICAL_EVENTS = [
   'box:opened',
   'barricade:board',
   'game:start', 'game:over', 'game:restart',
+  // WO5 3.7
+  'boss:start',     // { name, maxHp, level }   boss.js
+  'boss:charge',    // { x, y }                 zombie.js (charge telegraph start)
+  'boss:defeated',  // { name, level }          boss.js
+  'level:start',    // { index, name, loop }    level.js
+  'level:descend',  // { from, to }             level.js
 ];
 
 test('3.2 events.js: exports', () => {
@@ -187,6 +193,7 @@ test('3.2 every literal emit(\'...\') in src/*.js uses a canonical event name', 
   const files = [
     ...readdirSync(SRC_DIR).filter((f) => f.endsWith('.js')),
     ...readdirSync(join(SRC_DIR, 'sprites')).filter((f) => f.endsWith('.js')).map((f) => `sprites/${f}`),
+    ...readdirSync(join(SRC_DIR, 'levels')).filter((f) => f.endsWith('.js')).map((f) => `levels/${f}`), // WO5
   ];
   const re = /\bemit\s*\(\s*(['"`])([^'"`]*)\1/g;
   const bad = [];
@@ -347,6 +354,8 @@ const FORBIDDEN_IN_PURE = [
 const PURE_FILES = [
   ...Object.entries(MODULE_SPEC).filter(([, { dom }]) => !dom).map(([name]) => name),
   'sprites/palette', 'sprites/soldier', 'sprites/guns', 'sprites/face', 'sprites/animator',
+  // WO5 rule: boss.js, level.js, levels/*.js are pure
+  'boss', 'level', 'levels/levels', 'levels/level1', 'levels/level2',
 ];
 
 for (const name of PURE_FILES) {
@@ -472,4 +481,135 @@ test('WO2 new config and weapon defs: thundergun cone, WEAPON_FX, ZOMBIE knock, 
   }
   assert.ok(BOX_WEAPON_IDS.includes('thundergun'), 'BOX_WEAPON_IDS includes thundergun');
   assert.ok(!BOX_WEAPON_IDS.includes('deathmachine'), 'Death Machine stays out of the box');
+});
+
+// ---------------------------------------------------------------------------------------------
+// WORK_ORDER_5 (Agent 0, Phase 0): config 3.8, state additions, new modules 3.2/3.3/3.5
+// ---------------------------------------------------------------------------------------------
+
+test('WO5 3.8 config: DOORS, BOSS, LEVELS_CFG', () => {
+  assert.equal(kindOf(config.DOORS), OBJ, 'config.DOORS');
+  assert.equal(config.DOORS.megaCost, 250);
+  const B = config.BOSS;
+  assert.equal(kindOf(B), OBJ, 'config.BOSS');
+  for (const k of ['radius', 'speed', 'damage', 'attackWindup', 'attackCooldown', 'baseHealth', 'roundScale',
+    'points', 'deathLinger', 'chargeEvery', 'chargeTelegraph', 'chargeSpeedMult', 'chargeMaxTime', 'chargeRecover',
+    'chargeKnockback', 'summonEvery', 'minionsPerWave', 'maxMinions', 'instaKillFrac', 'nukeFrac',
+    'thunderNearFrac', 'thunderNearKnock', 'thunderFarKnock']) {
+    assert.equal(typeof B[k], 'number', `BOSS.${k}`);
+  }
+  assert.equal(kindOf(B.minion), OBJ, 'BOSS.minion');
+  for (const k of ['radius', 'speedMult', 'healthFrac', 'damage', 'attackCooldown']) {
+    assert.equal(typeof B.minion[k], 'number', `BOSS.minion.${k}`);
+  }
+  assert.ok(B.points > config.POINTS.perKill, 'boss pays perKill via player.js + (points - perKill) via boss.js');
+  const L = config.LEVELS_CFG;
+  assert.equal(kindOf(L), OBJ, 'config.LEVELS_CFG');
+  assert.equal(typeof L.fadeSeconds, 'number', 'LEVELS_CFG.fadeSeconds');
+  for (const k of ['healthMult', 'countMult', 'speedMult', 'sprintShift']) {
+    assert.equal(typeof L.loop[k], 'number', `LEVELS_CFG.loop.${k}`);
+  }
+});
+
+test('WO5 state.js: level, boss, transition default to null', () => {
+  const s = stateMod.createEmptyState(1);
+  for (const k of ['level', 'boss', 'transition']) {
+    assert.ok(k in s, `state.${k} missing`);
+    assert.equal(s[k], null, `state.${k} should default to null`);
+  }
+});
+
+const WO5_MODULE_SPEC = {
+  boss: {
+    createBossState: F, initBoss: F, updateBoss: F, startFight: F, spawnMinions: F,
+    finishFight: F, bossZombie: F, bossHpFrac: F,
+  },
+  level: {
+    createLevelState: F, levelDifficulty: F, startLevel: F, beginDescent: F, updateLevel: F,
+    nextLevelIndex: F,
+  },
+  'levels/levels': { LEVELS: ARR, levelByIndex: F },
+  'levels/level1': { LEVEL1: OBJ },
+  'levels/level2': { LEVEL2: OBJ },
+};
+
+for (const [name, spec] of Object.entries(WO5_MODULE_SPEC)) {
+  test(`WO5 ${name}.js (pure): imports in Node without throwing and has every contract export`, async () => {
+    let mod;
+    try {
+      mod = await import(`../src/${name}.js`);
+    } catch (err) {
+      assert.fail(`importing src/${name}.js threw at module load: ${err && err.name}: ${err && err.message}\n${err && err.stack}`);
+    }
+    assertExports(mod, spec, `${name}.js`);
+  });
+}
+
+test('WO5 3.5 level defs: shape', async () => {
+  const { LEVELS, levelByIndex } = await import('../src/levels/levels.js');
+  assert.ok(LEVELS.length >= 2, 'at least two levels');
+  for (const def of LEVELS) {
+    for (const k of ['id', 'name']) assert.equal(typeof def[k], 'string', `level.${k}`);
+    assert.equal(kindOf(def.ascii), ARR, `${def.id}.ascii`);
+    assert.equal(def.ascii.length, 40, `${def.id}: 40 rows`);
+    for (const row of def.ascii) assert.equal(row.length, 60, `${def.id}: 60 columns`);
+    assert.equal(kindOf(def.wallbuys), OBJ, `${def.id}.wallbuys`);
+    assert.equal(kindOf(def.theme), OBJ, `${def.id}.theme`);
+    for (const k of ['name', 'floor', 'floorAlt', 'wall', 'wallEdge', 'accent', 'doorWood', 'doorIron']) {
+      assert.equal(typeof def.theme[k], 'string', `${def.id}.theme.${k}`);
+    }
+    assert.ok('ambient' in def.theme, `${def.id}.theme.ambient`);
+    assert.equal(typeof def.theme.torch, 'boolean', `${def.id}.theme.torch`);
+    assert.equal(kindOf(def.boss), OBJ, `${def.id}.boss`);
+    assert.equal(typeof def.boss.name, 'string', `${def.id}.boss.name`);
+    assert.equal(typeof def.boss.tint, 'string', `${def.id}.boss.tint`);
+  }
+  assert.equal(LEVELS[0].id, 'bunker');
+  assert.equal(LEVELS[1].id, 'catacombs');
+  assert.equal(levelByIndex(LEVELS.length), LEVELS[0], 'levelByIndex wraps');
+});
+
+// Exports added by Agents A-G in WO5 Phase 1 (3.1-3.5). EXPECTED TO FAIL until they land.
+test('WO5 new exports', async () => {
+  const map = await import('../src/map.js');
+  const waves = await import('../src/waves.js');
+  const shop = await import('../src/shop.js');
+  const zombie = await import('../src/zombie.js');
+  const boss = await import('../src/boss.js');
+  const level = await import('../src/level.js');
+  const levels = await import('../src/levels/levels.js');
+  const { WEAPONS, WALL_WEAPON_IDS } = await import('../src/weapons.js');
+  const missing = [];
+  const need = (mod, label, name, kind) => {
+    if (kindOf(mod[name]) !== kind) missing.push(`${label}.${name} (${kind})`);
+  };
+  // 3.1 map.js (Agent B)
+  for (const f of ['loadMap', 'allDoorsOpen', 'megaDoorUnlockable', 'openMegaDoor', 'sealMegaDoor',
+    'unsealMegaDoor', 'openStairs', 'inArena', 'isBossActiveBlocking']) need(map, 'map', f, F);
+  need(map, 'map', 'TILE_ARENA_SPAWN', 'number');
+  need(map, 'map', 'TILE_STAIRS', 'number');
+  if (map.TILE_ARENA_SPAWN !== undefined && map.TILE_ARENA_SPAWN !== 8) missing.push('map.TILE_ARENA_SPAWN === 8');
+  if (map.TILE_STAIRS !== undefined && map.TILE_STAIRS !== 9) missing.push('map.TILE_STAIRS === 9');
+  // 3.2 zombie.js / boss.js (Agent C)
+  for (const f of ['spawnZombie', 'updateZombies', 'damageZombie', 'killZombie', 'healthForRound',
+    'tierForRound', 'applyKnockback']) need(zombie, 'zombie', f, F);
+  for (const f of ['createBossState', 'initBoss', 'updateBoss', 'startFight', 'spawnMinions',
+    'finishFight', 'bossZombie', 'bossHpFrac']) need(boss, 'boss', f, F);
+  // 3.3 waves.js / shop.js / level.js (Agent G)
+  need(waves, 'waves', 'endRoundNow', F);
+  need(shop, 'shop', 'buyMegaDoor', F);
+  need(shop, 'shop', 'useStairs', F);
+  for (const f of ['createLevelState', 'levelDifficulty', 'startLevel', 'beginDescent', 'updateLevel',
+    'nextLevelIndex']) need(level, 'level', f, F);
+  // 3.4 weapons.js (Agent D): new guns + level-2 wall prices
+  const NEW_GUNS = { manowar: 250, xr2: 225, weevil: 200, marshal16: 225, gorgon: 300, dredge48: 275, haymaker12: 250, drakon: 300 };
+  for (const [id, cost] of Object.entries(NEW_GUNS)) {
+    if (kindOf(WEAPONS[id]) !== OBJ) { missing.push(`WEAPONS.${id}`); continue; }
+    if (WEAPONS[id].cost !== cost) missing.push(`WEAPONS.${id}.cost === ${cost}`);
+    if (!WALL_WEAPON_IDS.includes(id)) missing.push(`WALL_WEAPON_IDS includes ${id}`);
+  }
+  // 3.5 levels (Agent A)
+  need(levels, 'levels', 'LEVELS', ARR);
+  need(levels, 'levels', 'levelByIndex', F);
+  assert.deepEqual(missing, [], `missing WO5 exports:\n  ${missing.join('\n  ')}`);
 });

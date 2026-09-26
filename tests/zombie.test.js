@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ZOMBIE, TILE } from '../src/config.js';
+import { ZOMBIE, TILE, BOSS } from '../src/config.js';
 import * as events from '../src/events.js';
 import { createEmptyState } from '../src/state.js';
 import * as map from '../src/map.js';
 import * as player from '../src/player.js';
+import * as zombie from '../src/zombie.js';
 import {
   healthForRound, tierForRound, spawnZombie, damageZombie, killZombie, updateZombies, HIT_FLASH,
   applyKnockback,
@@ -642,4 +643,306 @@ test('applyKnockback rejects stun <= 0 or non-finite without setting velocity', 
   assert.equal(applyKnockback(s, z, 500, 0, 0.5), true);
   assert.equal(z.kvx, 500);
   assert.equal(z.stun, 0.5);
+});
+
+// --- WO5 3.2: zombie kinds, difficulty, boss AI ------------------------------------------
+
+const L2 = { healthMult: 1.5, speedMult: 1.1, countMult: 1.25, sprintShift: 3 };
+
+test('WO5 healthForRound applies difficulty.healthMult; default is level 1', () => {
+  assert.equal(healthForRound(1, L2), 225);
+  assert.equal(healthForRound(5, { healthMult: 2 }), 1100);
+  assert.equal(healthForRound(5, null), healthForRound(5));
+});
+
+test('WO5 spawnZombie: normal kind uses state.level.difficulty (health, speed, sprintShift)', () => {
+  const s = fakeState(3);
+  s.level = { index: 1, difficulty: L2 };
+  const tiers = new Set();
+  for (let i = 0; i < 200; i++) {
+    const z = spawnZombie(s, openSpawn);
+    assert.equal(z.kind, 'normal');
+    assert.equal(z.hp, 225);
+    const base = ZOMBIE.speeds[z.tier] * 1.1;
+    assert.ok(z.speed <= base * 1.1 + 1e-9 && z.speed >= base * 0.9 - 1e-9);
+    tiers.add(z.tier);
+  }
+  assert.ok(tiers.has('jog'), 'round 1 + sprintShift 3 rolls joggers');
+  const s1 = fakeState(3);
+  for (let i = 0; i < 50; i++) assert.equal(spawnZombie(s1, openSpawn).tier, 'walk');
+});
+
+test('WO5 spawnZombie: minion and boss stats, kind in zombie:spawned payload', () => {
+  const s = fakeState(4);
+  s.rounds.round = 5;
+  const spawned = record('zombie:spawned');
+  const m = spawnZombie(s, { id: 'x1', x: 100, y: 100, barricadeId: 3 }, { kind: 'minion' });
+  assert.equal(m.kind, 'minion');
+  assert.equal(m.radius, BOSS.minion.radius);
+  assert.equal(m.hp, BOSS.minion.health, 'FIX-2: minion HP = 300 x healthMult, no round scaling');
+  assert.equal(m.damage, BOSS.minion.damage);
+  assert.equal(m.attackCooldown, BOSS.minion.attackCooldown);
+  assert.equal(m.mode, 'chasing');
+  assert.equal(m.barricadeId, null, 'minions are never tied to a window');
+  const base = ZOMBIE.speeds.sprint * BOSS.minion.speedMult;
+  assert.ok(m.speed >= base * 0.9 - 1e-9 && m.speed <= base * 1.1 + 1e-9);
+  const b = spawnZombie(s, { id: 'boss', x: 200, y: 200 }, { kind: 'boss', name: 'THE BONE PRIEST' });
+  assert.equal(b.kind, 'boss');
+  assert.equal(b.radius, BOSS.radius);
+  assert.equal(b.maxHp, Math.round(BOSS.baseHealth * (1 + BOSS.roundScale * 5)));
+  assert.equal(BOSS.baseHealth, 4500);
+  assert.equal(b.speed, BOSS.speed);
+  assert.equal(b.name, 'THE BONE PRIEST');
+  assert.deepEqual(b.charge, { timer: BOSS.chargeEvery, phase: 'idle', dx: 0, dy: 0, t: 0 });
+  assert.equal(b.summonTimer, BOSS.summonEvery);
+  assert.deepEqual(spawned.map((p) => p.kind), ['minion', 'boss']);
+  assert.equal(spawnZombie(s, openSpawn).kind, 'normal');
+});
+
+test('WO5 FIX-2 insta-kill doubles damage to the boss (not a kill, no floor); minions still die', () => {
+  const s = fakeState(5);
+  s.time = 10;
+  s.powerups.active.instaKill = 100;
+  const b = spawnZombie(s, { x: 100, y: 100 }, { kind: 'boss' });
+  const killed = record('zombie:killed');
+  assert.equal(damageZombie(s, b, 10), false);
+  assert.equal(b.hp, b.maxHp - 10 * BOSS.instaKillMult, 'x2, not a 5 % floor');
+  const hp0 = b.hp;
+  damageZombie(s, b, 1e6); // doubled, then capped at maxHitFrac
+  assert.ok(Math.abs(hp0 - b.hp - BOSS.maxHitFrac * b.maxHp) < 1e-6);
+  // 20 Death-Machine-sized hits no longer kill it (review M1: was dead in 20 hits).
+  for (let i = 0; i < 20; i++) damageZombie(s, b, 150);
+  assert.ok(b.hp > 0 && killed.length === 0);
+  b.hp = 1;
+  damageZombie(s, b, 10);
+  assert.ok(b.hp <= 0 && killed.length === 1 && killed[0].kind === 'boss');
+  assert.equal(b.dyingT, BOSS.deathLinger);
+  const m = spawnZombie(s, { x: 150, y: 100 }, { kind: 'minion' });
+  assert.equal(damageZombie(s, m, 1), true);
+});
+
+test('WO5 boss ignores stun: knockback is displacement only', { skip: mapStub }, () => {
+  const s = fakeState(6);
+  s.map = roomMap(16, 12);
+  const b = spawnZombie(s, { x: 8 * TILE, y: 6 * TILE }, { kind: 'boss' });
+  const x0 = b.x;
+  assert.equal(applyKnockback(s, b, 720, 0, 1.2), true);
+  assert.equal(b.stun, 0);
+  assert.equal(b.kvx, 0);
+  assert.ok(Math.abs(b.x - x0 - BOSS.thunderNearKnock) < 1e-6, `moved ${b.x - x0}`);
+  const x1 = b.x;
+  zombie.pushZombie(s, b, 40, 0);
+  assert.ok(Math.abs(b.x - x1 - 40) < 1e-6);
+  zombie.pushZombie(s, b, 10000, 0); // wall stops the push
+  assert.ok(b.x <= s.map.width - TILE - b.radius + 1e-6);
+  assert.equal(zombie.isBoss(b), true);
+});
+
+test('WO5 boss charge: telegraph (still, boss:charge) -> dash -> wall stop -> recover -> idle', { skip: mapStub }, () => {
+  const s = fakeState(7);
+  s.map = roomMap(16, 12);
+  s.player = fakePlayer(14 * TILE, 6 * TILE);
+  const charges = record('boss:charge');
+  const b = spawnZombie(s, { x: 8 * TILE, y: 6 * TILE }, { kind: 'boss' });
+  b.charge.timer = 0.001;
+  const dt = 1 / 60;
+  updateZombies(s, dt);
+  assert.equal(b.charge.phase, 'telegraph');
+  assert.equal(charges.length, 1);
+  assert.deepEqual(charges[0], { x: 8 * TILE, y: 6 * TILE });
+  const x0 = b.x;
+  let t = 0;
+  while (b.charge.phase === 'telegraph' && t < 2) { updateZombies(s, dt); t += dt; }
+  assert.ok(Math.abs(t - BOSS.chargeTelegraph) < 2 * dt, `telegraph ${t}`);
+  assert.equal(b.x, x0, 'boss stands still during the telegraph');
+  assert.equal(b.charge.phase, 'dash');
+  assert.ok(b.charge.dx > 0.99);
+  // Player sidesteps: the boss runs into the east wall.
+  s.player.x = 2 * TILE; s.player.y = 2 * TILE;
+  t = 0;
+  while (b.charge.phase === 'dash' && t < 2) { updateZombies(s, dt); t += dt; }
+  assert.equal(b.charge.phase, 'recover');
+  assert.equal(b.charge.wall, true, 'stopped by the wall');
+  assert.ok(t < BOSS.chargeMaxTime, `dash ${t}`);
+  assert.ok(b.x > (s.map.cols - 1) * TILE - b.radius - 3, `x=${b.x}`);
+  assert.ok(s.effects.some((e) => e.type === 'shake'));
+  const xr = b.x;
+  t = 0;
+  while (b.charge.phase === 'recover' && t < 2) { updateZombies(s, dt); t += dt; }
+  assert.ok(Math.abs(t - BOSS.chargeRecover) < 2 * dt);
+  assert.ok(Math.abs(b.x - xr) < 1e-6, 'stays put while recovering');
+  assert.equal(b.charge.phase, 'idle');
+  assert.ok(b.charge.timer > BOSS.chargeEvery - 0.1);
+  assert.equal(charges.length, 1);
+});
+
+test('WO5 boss charge hits the player: damage and 40 px knockback along the dash', { skip: mapStub || playerStub }, () => {
+  const s = fakeState(8);
+  s.map = roomMap(24, 12);
+  s.player = fakePlayer(12 * TILE, 6 * TILE);
+  const b = spawnZombie(s, { x: 5 * TILE, y: 6 * TILE }, { kind: 'boss' });
+  b.charge.timer = 0.001;
+  const dt = 1 / 60;
+  let t = 0;
+  let px = s.player.x;
+  while (b.charge.phase !== 'recover' && t < 3) {
+    px = s.player.x;
+    updateZombies(s, dt); t += dt;
+  }
+  assert.equal(b.charge.phase, 'recover');
+  assert.equal(b.charge.wall, false);
+  assert.equal(s.player.health, 150 - BOSS.damage);
+  assert.ok(Math.abs(s.player.x - px - BOSS.chargeKnockback) < 1e-6, `knock ${s.player.x - px}`);
+  assert.equal(s.player.y, 6 * TILE);
+});
+
+test('WO5 boss charge ends after chargeMaxTime in the open', { skip: mapStub }, () => {
+  const s = fakeState(9);
+  s.map = roomMap(60, 12);
+  s.player = fakePlayer(55 * TILE, 6 * TILE);
+  const b = spawnZombie(s, { x: 3 * TILE, y: 6 * TILE }, { kind: 'boss' });
+  b.charge.timer = 0.001;
+  const dt = 1 / 60;
+  let t = 0;
+  while (b.charge.phase !== 'dash' && t < 2) { updateZombies(s, dt); t += dt; }
+  s.player.y = 2 * TILE; // out of the line
+  const x0 = b.x;
+  t = 0;
+  while (b.charge.phase === 'dash' && t < 3) { updateZombies(s, dt); t += dt; }
+  assert.ok(Math.abs(t - BOSS.chargeMaxTime) < 2 * dt, `dash ${t}`);
+  assert.ok(Math.abs(b.x - x0 - BOSS.speed * BOSS.chargeSpeedMult * t) < 10);
+  assert.equal(b.charge.wall, false);
+});
+
+test('WO5 boss keeps hunting under Zombie Blood; minions wander', { skip: mapStub }, () => {
+  const s = fakeState(10);
+  s.map = roomMap(16, 12);
+  s.time = 1;
+  s.powerups.active.zombieBlood = 100;
+  s.player = fakePlayer(12 * TILE, 6 * TILE);
+  const b = spawnZombie(s, { x: 3 * TILE, y: 6 * TILE }, { kind: 'boss' });
+  const m = spawnZombie(s, { x: 3 * TILE, y: 3 * TILE }, { kind: 'minion' });
+  const x0 = b.x;
+  for (let i = 0; i < 30; i++) updateZombies(s, 1 / 60);
+  assert.equal(b.mode, 'chasing');
+  assert.ok(b.x > x0 + 20);
+  assert.equal(m.mode, 'wandering');
+});
+
+test('WO5 minions never tear boards, even standing in a boarded pocket', { skip: mapStub }, () => {
+  const s = fakeState(11);
+  s.map = fakeMap(4);
+  s.player = fakePlayer(3.5 * TILE, 5.5 * TILE);
+  const m = spawnZombie(s, { x: 2.5 * TILE, y: 1.5 * TILE, barricadeId: 1 }, { kind: 'minion' });
+  assert.equal(m.mode, 'chasing');
+  for (let i = 0; i < 180; i++) {
+    updateZombies(s, 1 / 60);
+    assert.notEqual(m.mode, 'tearing');
+  }
+  assert.equal(s.map.barricades[0].boards, 4);
+});
+
+test('WO5 boss melee uses boss damage, wind-up and reach', { skip: mapStub || playerStub }, () => {
+  const s = fakeState(12);
+  s.map = roomMap(16, 12);
+  const b = spawnZombie(s, { x: 6 * TILE, y: 6 * TILE }, { kind: 'boss' });
+  s.player = fakePlayer(6 * TILE + BOSS.radius + 14 + 20, 6 * TILE); // in boss reach, beyond a normal one
+  const dt = 1 / 60;
+  updateZombies(s, dt);
+  assert.equal(b.mode, 'attacking');
+  let t = dt;
+  while (s.player.health === 150 && t < 2) { updateZombies(s, dt); t += dt; }
+  assert.equal(s.player.health, 150 - BOSS.damage);
+  assert.ok(Math.abs(t - BOSS.attackWindup) < 3 * dt, `windup ${t}`);
+  assert.ok(Math.abs(b.attackCd - BOSS.attackCooldown) < 2 * dt);
+});
+
+// ---------------------------------------------------------------------------
+// WO5 FIX-2 balance rules (docs/qa/wo5-balance.md #3, #4, #5, #7, #8, #9)
+// ---------------------------------------------------------------------------
+
+test('FIX-2 boss per-hit cap: any single hit <= maxHitFrac x maxHp; nuke / Thundergun share exempt', () => {
+  const s = fakeState(11);
+  s.rounds.round = 10;
+  const b = spawnZombie(s, { x: 100, y: 100 }, { kind: 'boss' });
+  const max = b.maxHp;
+  const cap = BOSS.maxHitFrac * max;
+  const hits = record('zombie:hit');
+  damageZombie(s, b, 70); // KN-44 hit: below the cap, untouched
+  assert.equal(b.hp, max - 70);
+  let hp = b.hp;
+  damageZombie(s, b, 1000); // Ray Gun direct hit: capped
+  assert.ok(Math.abs(hp - b.hp - cap) < 1e-6);
+  assert.ok(Math.abs(hits[1].amount - cap) < 1e-6, 'zombie:hit reports the capped amount');
+  hp = b.hp;
+  damageZombie(s, b, BOSS.thunderNearFrac * max); // Thundergun near share: its own fraction
+  assert.ok(Math.abs(hp - b.hp - BOSS.thunderNearFrac * max) < 1e-6);
+  hp = b.hp;
+  damageZombie(s, b, Infinity); // non-finite near-cone kill -> thunderNearFrac
+  assert.ok(Math.abs(hp - b.hp - BOSS.thunderNearFrac * max) < 1e-6);
+  hp = b.hp;
+  damageZombie(s, b, BOSS.nukeFrac * max, 'nuke'); // nuke: its own fraction
+  assert.ok(Math.abs(hp - b.hp - BOSS.nukeFrac * max) < 1e-6);
+  assert.equal(BOSS.thunderNearFrac, 0.08);
+  assert.equal(BOSS.maxHitFrac, 0.03);
+});
+
+test('FIX-2 fractional effects get no Insta-Kill bonus; capped hits stay capped under Insta-Kill', () => {
+  const s = fakeState(12);
+  s.time = 5;
+  s.powerups.active.instaKill = 100;
+  const b = spawnZombie(s, { x: 100, y: 100 }, { kind: 'boss' });
+  const max = b.maxHp;
+  damageZombie(s, b, BOSS.thunderNearFrac * max);
+  assert.ok(Math.abs(max - b.hp - BOSS.thunderNearFrac * max) < 1e-6);
+  const hp = b.hp;
+  damageZombie(s, b, 0.02 * max); // x2 = 4 % -> capped at 3 %
+  assert.ok(Math.abs(hp - b.hp - BOSS.maxHitFrac * max) < 1e-6);
+  assert.equal(zombie.bossHitDamage(50, 10000, 'weapon', true), 100);
+  assert.equal(zombie.bossHitDamage(50, 10000, 'weapon', false), 50);
+  assert.equal(zombie.bossHitDamage(1000, 10000, 'nuke', true), 1000);
+});
+
+test('FIX-2 boss HP: 4500 x healthMult x (1 + 0.12 x min(round, 12))', () => {
+  const { bossHealthFor } = zombie;
+  assert.equal(bossHealthFor(10), Math.round(4500 * (1 + 0.12 * 10)));
+  assert.equal(bossHealthFor(12), Math.round(4500 * (1 + 0.12 * 12)));
+  assert.equal(bossHealthFor(20), bossHealthFor(12), 'round factor capped at roundScaleCap');
+  assert.equal(bossHealthFor(20, { healthMult: 1.5 }), Math.round(4500 * 1.5 * (1 + 0.12 * 12)));
+  assert.equal(BOSS.roundScaleCap, 12);
+});
+
+test('FIX-2 minion HP = BOSS.minion.health x level healthMult, independent of round', () => {
+  const s = fakeState(13);
+  s.rounds.round = 3;
+  assert.equal(spawnZombie(s, openSpawn, { kind: 'minion' }).hp, 300);
+  s.rounds.round = 20;
+  assert.equal(spawnZombie(s, openSpawn, { kind: 'minion' }).hp, 300);
+  s.level = { index: 1, difficulty: { healthMult: 1.5, speedMult: 1.1, countMult: 1.25, sprintShift: 3 } };
+  assert.equal(spawnZombie(s, openSpawn, { kind: 'minion' }).hp, 450);
+  assert.equal(zombie.minionHealthFor(99, { healthMult: 2.16 }), 648);
+});
+
+test('FIX-2 speed cap: normal zombies <= ZOMBIE.maxSpeed (214), minions <= 1.1 x that, boss uncapped', () => {
+  const s = fakeState(14);
+  s.rounds.round = 30;
+  s.level = { index: 3, difficulty: { healthMult: 2.16, speedMult: 1.15, countMult: 1.5, sprintShift: 7 } };
+  assert.equal(ZOMBIE.maxSpeed, 214);
+  let capped = 0;
+  for (let i = 0; i < 300; i++) {
+    const z = spawnZombie(s, openSpawn);
+    assert.ok(z.speed <= ZOMBIE.maxSpeed + 1e-9, `normal ${z.speed}`);
+    if (z.speed === ZOMBIE.maxSpeed) capped++;
+  }
+  assert.ok(capped > 0, 'fast sprinters actually hit the cap');
+  const minionCap = ZOMBIE.maxSpeed * BOSS.minion.maxSpeedMult;
+  for (let i = 0; i < 100; i++) {
+    const m = spawnZombie(s, openSpawn, { kind: 'minion' });
+    assert.ok(m.speed <= minionCap + 1e-9, `minion ${m.speed}`);
+  }
+  // Level 1 walkers / joggers are untouched.
+  const s1 = fakeState(15);
+  for (let i = 0; i < 50; i++) assert.ok(spawnZombie(s1, openSpawn).speed < ZOMBIE.maxSpeed);
+  const b = spawnZombie(s, openSpawn, { kind: 'boss' });
+  assert.ok(Math.abs(b.speed - BOSS.speed * 1.15) < 1e-9);
 });

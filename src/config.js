@@ -42,6 +42,10 @@ export const ZOMBIE = {
   // WO2 (Agent H): Thundergun knockback.
   knockFriction: 6,      // exponential decay rate of knock velocity (1/s)
   stunMinSpeed: 20,      // knock speed (px/s) below which the slide stops
+  // WO5 FIX-2 (balance #3): hard cap on a normal zombie's speed after tier x speedMult x jitter,
+  // just under the player's 220 walk so the player can always back-pedal while firing.
+  // Minions are capped at BOSS.minion.maxSpeedMult x this.
+  maxSpeed: 214,
 };
 
 export const ROUNDS = {
@@ -103,6 +107,13 @@ export const RENDER = {
   zombieBloodTint: 'rgba(255,120,40,0.06)',   // flat tint; edge vignette carries the rest (Phase 4)
   damageVignetteMax: 0.7,     // damage vignette alpha at 0 hp
   damageWithZbMult: 0.6,      // damage vignette scale while Zombie Blood is active
+  // WO5 (moved from render.js by the integrator): boss / mega door effects and sprite scales.
+  bossStartShake: { ttl: 0.9, magnitude: 10 },
+  bossDeathShake: { ttl: 0.8, magnitude: 12 },
+  bossDeathFlash: { ttl: 0.4, maxTtl: 0.65 },   // starts at ~60 % white
+  megaDoorShake: { ttl: 0.6, magnitude: 5 },
+  bossRingTtl: 0.6,   // boss death shock ring; the pool is zombie.js's boss blood effect (FIX-3)
+  bossScale: 2.4, minionScale: 0.7,
 };
 
 export const AUDIO = {
@@ -112,6 +123,7 @@ export const AUDIO = {
   emptyClickMinInterval: 0.18, zombieHitMinInterval: 0.03, groanMinInterval: 0.05, deniedMinInterval: 0.25,
   // WO2 3.11 Thundergun: own bus (bypasses the gun limiter), concurrent boom cap, delayed body thud.
   thunderBusGain: 1.0, maxThunderVoices: 2, thunderThudDelay: 0.12,
+  bossHitMinInterval: 0.12,  // WO5: min seconds between boss hit thuds (moved from audio.js)
 };
 
 export const INPUT = {
@@ -136,4 +148,45 @@ export const SPRITES = {
   reloadFrameTime: 0.25,
   faceScale: 4,
   face: { glanceMin: 1.0, glanceMax: 3.0, blinkMin: 3.0, blinkMax: 6.0, blinkTime: 0.12, winceTime: 0.4, grinTime: 1.0 },
+};
+
+// ---------------------------------------------------------------------------
+// WO5 3.8 (Phase 0) — mega door, boss arena, multi-level dungeon.
+// ---------------------------------------------------------------------------
+
+export const DOORS = { megaCost: 250 };
+
+export const BOSS = {
+  radius: 34, speed: 90, damage: 75, attackWindup: 0.5, attackCooldown: 1.4,
+  baseHealth: 4500, roundScale: 0.12,   // FIX-2 (balance #4): 4000 -> 4500
+  roundScaleCap: 12,     // FIX-2 (balance #4): round factor uses min(round, roundScaleCap)
+  points: 200,           // total per boss kill: POINTS.perKill via player.js + (points - perKill) from boss.finishFight
+  deathLinger: 2.0,
+  chargeEvery: 7, chargeTelegraph: 0.6, chargeSpeedMult: 3.5, chargeMaxTime: 1.1, chargeRecover: 0.4,
+  chargeKnockback: 40, summonEvery: 12, minionsPerWave: 4, maxMinions: 10,
+  instaKillFrac: 0.05,   // unused since FIX-2 (kept for the contract test); see instaKillMult
+  nukeFrac: 0.10, thunderNearFrac: 0.08, thunderNearKnock: 60, thunderFarKnock: 40,  // FIX-2 (#9): near 0.15 -> 0.08
+  // FIX-2 (review M1, balance #7/#8/#6/#13):
+  instaKillMult: 2,      // Insta-Kill doubles damage to the boss (replaces the 5 % per-hit floor; deviates from 1.2)
+  maxHitFrac: 0.03,      // any single hit on the boss is capped at 3 % of max HP (nuke / Thundergun near share exempt)
+  ammoDropAtFrac: 0.5,   // one Max Ammo drops the first time the boss falls below this HP fraction
+  minionsLevelCap: 2,    // extra minions per wave = min(levelIndex, minionsLevelCap)
+  minion: {
+    radius: 10, speedMult: 1.1,
+    healthFrac: 0.45,    // unused since FIX-2 (kept for the contract test); see health
+    health: 300,         // FIX-2 (balance #5): minion HP = health x level healthMult
+    maxSpeedMult: 1.1,   // FIX-2: minion speed capped at ZOMBIE.maxSpeed x this
+    damage: 25, attackCooldown: 0.8,
+  },
+};
+
+export const LEVELS_CFG = {
+  fadeSeconds: 1.2,
+  // Per descent past the last authored level, compounding on the previous level (WO5 FIX-1,
+  // QA balance #1/#2): health x1.2, count x1.1, speed x1.03 (capped at speedMultCap),
+  // sprintShift +2. Every factor strictly increases each descent (speed until the cap).
+  loop: { healthMult: 1.2, countMult: 1.1, speedMult: 1.03, sprintShift: 2, speedMultCap: 1.15 },
+  // First break after a descent (seconds; replaces ROUNDS.firstRoundDelay there). The player is
+  // also healed to full on arrival (QA playtest #4).
+  arrivalBreak: 10,
 };

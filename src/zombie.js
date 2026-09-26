@@ -2,7 +2,7 @@
 // Contract: WORK_ORDER.md 3.5 (Zombie shape), 3.6 (API), 5.5 (behavior).
 // No DOM access. All randomness via state.rng.
 
-import { ZOMBIE, TILE } from './config.js';
+import { ZOMBIE, TILE, BOSS } from './config.js';
 import { emit } from './events.js';
 import { nextId, dist, norm, clamp } from './math.js';
 import { tearBoard, barricadeOpen, resolveCircle } from './map.js';
@@ -33,12 +33,81 @@ const TIER_TABLE = [
 // Stats per round
 // ---------------------------------------------------------------------------
 
-export function healthForRound(round) {
+// WO5: `difficulty` is state.level.difficulty ({ healthMult, speedMult, countMult, sprintShift });
+// absent -> level-1 values (health x1). The result is rounded when a multiplier applies.
+export function healthForRound(round, difficulty) {
   const r = Math.max(1, Math.floor(Number(round) || 1));
-  if (r <= ZOMBIE.roundsLinear) return ZOMBIE.baseHealth + ZOMBIE.healthPerRound * (r - 1);
-  const atLinearEnd = ZOMBIE.baseHealth + ZOMBIE.healthPerRound * (ZOMBIE.roundsLinear - 1); // 950
-  return Math.round(atLinearEnd * Math.pow(ZOMBIE.healthMultAfter, r - ZOMBIE.roundsLinear));
+  let hp;
+  if (r <= ZOMBIE.roundsLinear) hp = ZOMBIE.baseHealth + ZOMBIE.healthPerRound * (r - 1);
+  else {
+    const atLinearEnd = ZOMBIE.baseHealth + ZOMBIE.healthPerRound * (ZOMBIE.roundsLinear - 1); // 950
+    hp = Math.round(atLinearEnd * Math.pow(ZOMBIE.healthMultAfter, r - ZOMBIE.roundsLinear));
+  }
+  const m = difficultyOf(difficulty).healthMult;
+  return m === 1 ? hp : Math.round(hp * m);
 }
+
+// WO5 1.3 difficulty with safe defaults. Accepts a difficulty object or null/undefined.
+const DEFAULT_DIFFICULTY = Object.freeze({ healthMult: 1, speedMult: 1, countMult: 1, sprintShift: 0 });
+function num(v, d) { const n = Number(v); return Number.isFinite(n) ? n : d; }
+export function difficultyOf(d) {
+  if (!d || typeof d !== 'object') return DEFAULT_DIFFICULTY;
+  return {
+    healthMult: num(d.healthMult, 1) > 0 ? num(d.healthMult, 1) : 1,
+    speedMult: num(d.speedMult, 1) > 0 ? num(d.speedMult, 1) : 1,
+    countMult: num(d.countMult, 1) > 0 ? num(d.countMult, 1) : 1,
+    sprintShift: num(d.sprintShift, 0),
+  };
+}
+function stateDifficulty(state) {
+  return difficultyOf(state && state.level ? state.level.difficulty : null);
+}
+
+// WO5 1.2: boss max HP = baseHealth x healthMult x (1 + roundScale x round).
+// FIX-2 (balance #4): the round factor stops growing at BOSS.roundScaleCap (12); past that the
+// boss grows through the level's healthMult only.
+export function bossHealthFor(round, difficulty) {
+  const r = Math.max(1, Math.floor(Number(round) || 1));
+  const cap = Number.isFinite(BOSS.roundScaleCap) ? BOSS.roundScaleCap : Infinity;
+  return Math.round(BOSS.baseHealth * difficultyOf(difficulty).healthMult * (1 + BOSS.roundScale * Math.min(r, cap)));
+}
+
+// FIX-2 (balance #5): minion HP = BOSS.minion.health (300) x level healthMult (no round scaling).
+// Falls back to the old healthFrac-of-round rule if the config key is missing.
+export function minionHealthFor(round, difficulty) {
+  const M = BOSS.minion;
+  if (Number.isFinite(M.health)) return Math.max(1, Math.round(M.health * difficultyOf(difficulty).healthMult));
+  return Math.max(1, Math.round(healthForRound(round, difficulty) * M.healthFrac));
+}
+
+// FIX-2 (balance #3): speed caps applied after every multiplier and the jitter.
+export function maxSpeedFor(kind) {
+  const cap = Number.isFinite(ZOMBIE.maxSpeed) ? ZOMBIE.maxSpeed : Infinity;
+  if (kind === 'minion') return cap * (Number.isFinite(BOSS.minion.maxSpeedMult) ? BOSS.minion.maxSpeedMult : 1);
+  if (kind === 'boss') return Infinity;
+  return cap;
+}
+
+// FIX-2 (review M1, balance #7/#8): damage one hit deals to the boss.
+//   - Fractional effects (Nuke, cause 'nuke'; Thundergun near share, passed as exactly
+//     thunderNearFrac x maxHp or as Infinity) use their own fraction: no cap, no Insta-Kill bonus.
+//   - Everything else: x BOSS.instaKillMult while Insta-Kill is active, then capped at
+//     BOSS.maxHitFrac x maxHp.
+export function bossHitDamage(amount, maxHp, cause, instaKill) {
+  let dmg = Math.max(0, Number(amount));
+  if (Number.isNaN(dmg)) dmg = 0;
+  const thunder = BOSS.thunderNearFrac * maxHp;
+  if (!Number.isFinite(dmg)) return thunder;
+  if (cause === 'nuke') return dmg;
+  if (Math.abs(dmg - thunder) <= 1e-9 * Math.max(1, maxHp)) return dmg;
+  if (instaKill) dmg *= Number.isFinite(BOSS.instaKillMult) ? BOSS.instaKillMult : 1;
+  if (Number.isFinite(BOSS.maxHitFrac)) dmg = Math.min(dmg, BOSS.maxHitFrac * maxHp);
+  return dmg;
+}
+
+// WO5: kind helpers (weapons.js uses isBoss for the Thundergun rules).
+export function isBoss(z) { return !!z && z.kind === 'boss'; }
+export function isMinion(z) { return !!z && z.kind === 'minion'; }
 
 export function tierForRound(round, rng) {
   const r = Math.max(1, Math.floor(Number(round) || 1));
@@ -65,6 +134,11 @@ function powerupActive(state, type) {
   return exp != null && exp > (state.time || 0);
 }
 
+function pushShake(state, ttl, magnitude) {
+  if (!state || !Array.isArray(state.effects)) return;
+  state.effects.push({ type: 'shake', ttl, maxTtl: ttl, magnitude });
+}
+
 function pushBlood(state, x, y, big) {
   if (!state || !Array.isArray(state.effects)) return;
   const ttl = big ? BLOOD_DEATH_TTL : BLOOD_HIT_TTL;
@@ -80,8 +154,16 @@ function tileTypeAt(map, x, y) {
 
 function isAlive(z) { return z.mode !== 'dying' && !z._killed; }
 
+// WO5: reach grows/shrinks with the body (boss radius 34, minion 10); a normal zombie keeps
+// exactly ZOMBIE.attackRange.
 function inAttackRange(z, p) {
-  return !!p && dist(z.x, z.y, p.x, p.y) <= ZOMBIE.attackRange + p.radius;
+  const reach = ZOMBIE.attackRange + ((z.radius || ZOMBIE.radius) - ZOMBIE.radius);
+  return !!p && dist(z.x, z.y, p.x, p.y) <= reach + p.radius;
+}
+
+// Min centre distance kept between two zombies (normal pair = separationMinDist, scaled by size).
+function pairMinDist(a, b) {
+  return ZOMBIE.separationMinDist * ((a.radius || ZOMBIE.radius) + (b.radius || ZOMBIE.radius)) / (2 * ZOMBIE.radius);
 }
 
 function isOutsideTile(t) { return t === TILE_POCKET || t === TILE_WINDOW; }
@@ -100,6 +182,7 @@ function stackDir(a, b) {
 // heavily stacked pocket cannot fling a zombie (review.md #2).
 function separation(state, z) {
   let sx = 0, sy = 0;
+  if (z.kind === 'boss') return { x: 0, y: 0 }; // WO5: the boss shoulders through its minions
   const R = ZOMBIE.separationRadius, F = ZOMBIE.separationForce;
   for (const o of state.zombies) {
     if (o === z || !isAlive(o)) continue;
@@ -179,22 +262,49 @@ function barricadeForPocket(map, x, y) {
 // Spawning
 // ---------------------------------------------------------------------------
 
-export function spawnZombie(state, spawnPoint) {
+// WO5 3.2: opts.kind 'normal' (default) | 'minion' | 'boss'. Difficulty comes from
+// state.level.difficulty (health x healthMult, speed x speedMult, tier roll at round + sprintShift);
+// the zombie count is waves.js's job. opts.name / opts.tint override the boss's level-def values.
+// Per-zombie combat stats (damage, attackWindup, attackCooldown) are stored on the zombie.
+export function spawnZombie(state, spawnPoint, opts = {}) {
+  const kind = opts && (opts.kind === 'boss' || opts.kind === 'minion') ? opts.kind : 'normal';
   const round = (state.rounds && state.rounds.round) || 1;
-  const hp = healthForRound(round);
-  const tier = tierForRound(round, state.rng);
-  const speed = ZOMBIE.speeds[tier] * state.rng.range(1 - SPEED_JITTER, 1 + SPEED_JITTER);
-  const barricadeId = spawnPoint.barricadeId == null ? null : spawnPoint.barricadeId;
+  const diff = stateDifficulty(state);
+  const sp = spawnPoint || { x: 0, y: 0 };
+  let hp, tier, speed, radius, damage, windup, cooldown;
+  if (kind === 'boss') {
+    hp = bossHealthFor(round, diff);
+    tier = 'walk';
+    speed = BOSS.speed * diff.speedMult;
+    radius = BOSS.radius; damage = BOSS.damage; windup = BOSS.attackWindup; cooldown = BOSS.attackCooldown;
+  } else if (kind === 'minion') {
+    const M = BOSS.minion;
+    hp = minionHealthFor(round, diff);
+    tier = 'sprint';
+    speed = ZOMBIE.speeds.sprint * M.speedMult * diff.speedMult * state.rng.range(1 - SPEED_JITTER, 1 + SPEED_JITTER);
+    speed = Math.min(speed, maxSpeedFor('minion'));
+    radius = M.radius; damage = M.damage; windup = ZOMBIE.attackWindup; cooldown = M.attackCooldown;
+  } else {
+    hp = healthForRound(round, diff);
+    tier = tierForRound(round + diff.sprintShift, state.rng);
+    speed = ZOMBIE.speeds[tier] * diff.speedMult * state.rng.range(1 - SPEED_JITTER, 1 + SPEED_JITTER);
+    speed = Math.min(speed, maxSpeedFor('normal'));
+    radius = ZOMBIE.radius; damage = ZOMBIE.damage; windup = ZOMBIE.attackWindup; cooldown = ZOMBIE.attackCooldown;
+  }
+  // Minions and the boss spawn inside the arena: never tearing, never tied to a window.
+  const barricadeId = kind === 'normal' && sp.barricadeId != null ? sp.barricadeId : null;
   const z = {
     id: nextId(),
-    x: spawnPoint.x, y: spawnPoint.y,
-    radius: ZOMBIE.radius,
+    kind,
+    x: sp.x, y: sp.y,
+    radius,
     hp, maxHp: hp,
     tier, speed,
+    damage, attackWindup: windup, attackCooldown: cooldown,
     // Window spawns always start tearing; the first update flips them to chasing if the
     // barricade is already open (keeps spawn free of map calls).
     mode: barricadeId == null ? 'chasing' : 'tearing',
-    spawnPointId: spawnPoint.id,
+    spawnPointId: sp.id == null ? null : sp.id,
     barricadeId,
     tearTimer: 0, attackTimer: 0, attackCd: 0, dyingT: 0,
     vx: 0, vy: 0, hitFlash: 0,
@@ -205,8 +315,15 @@ export function spawnZombie(state, spawnPoint) {
     // WO2 3.10 knockback (Thundergun): knock velocity, stun seconds left, knock direction.
     kvx: 0, kvy: 0, stun: 0, knockAngle: 0,
   };
+  if (kind === 'boss') {
+    const def = state.level && state.level.def && state.level.def.boss;
+    z.name = (opts && opts.name) || (def && def.name) || 'THE WARDEN';
+    z.tint = (opts && opts.tint) || (def && def.tint) || '#7a1f1f';
+    z.charge = { timer: BOSS.chargeEvery, phase: 'idle', dx: 0, dy: 0, t: 0 };
+    z.summonTimer = BOSS.summonEvery;
+  }
   state.zombies.push(z);
-  emit('zombie:spawned', { zombie: z });
+  emit('zombie:spawned', { zombie: z, kind });
   return z;
 }
 
@@ -219,10 +336,16 @@ export function damageZombie(state, z, amount, cause = 'weapon', x, y) {
   if (!z || !isAlive(z)) return false;
   const hx = x == null ? z.x : x, hy = y == null ? z.y : y;
   let dmg = Math.max(0, Number(amount) || 0);
-  if (powerupActive(state, 'instaKill')) dmg = Math.max(dmg, z.hp);
+  const hpBefore = Number.isFinite(z.hp) ? z.hp : 0;
+  if (z.kind === 'boss') {
+    // WO5 1.2 + FIX-2: nothing one-shots the boss. A non-finite hit (Thundergun near-cone kill)
+    // becomes thunderNearFrac of max HP; other hits are x instaKillMult under Insta-Kill and capped
+    // at maxHitFrac of max HP (see bossHitDamage).
+    const maxHp = Number.isFinite(z.maxHp) && z.maxHp > 0 ? z.maxHp : hpBefore;
+    dmg = bossHitDamage(amount, maxHp, cause, powerupActive(state, 'instaKill'));
+  } else if (powerupActive(state, 'instaKill')) dmg = Math.max(dmg, z.hp);
   // WO2: Thundergun near-cone kills pass Infinity. Report the hp actually removed and never
   // leave a non-finite hp behind.
-  const hpBefore = Number.isFinite(z.hp) ? z.hp : 0;
   if (!Number.isFinite(dmg)) dmg = Math.max(0, hpBefore);
   z.hp = hpBefore - dmg;
   z.hitFlash = HIT_FLASH;
@@ -239,13 +362,20 @@ export function killZombie(state, z, cause = 'weapon') {
   z._killed = true;
   if (!(z.hp <= 0)) z.hp = 0; // also catches NaN
   z.mode = 'dying';
-  z.dyingT = ZOMBIE.deathLinger;
+  z.dyingT = z.kind === 'boss' ? BOSS.deathLinger : ZOMBIE.deathLinger;
   z.vx = 0; z.vy = 0;
   z.attackTimer = 0;
   z.tearOwner = false;
   z.kvx = 0; z.kvy = 0; z.stun = 0;
+  if (z.charge) { z.charge.phase = 'idle'; z.charge.t = 0; }
   pushBlood(state, z.x, z.y, true);
-  emit('zombie:killed', { zombie: z, cause, x: z.x, y: z.y });
+  if (z.kind === 'boss' && state && Array.isArray(state.effects)) {
+    // WO5: bigger pool + flash for the 2 s boss death.
+    state.effects.push({ type: 'blood', x: z.x, y: z.y, ttl: BLOOD_DEATH_TTL * 2, maxTtl: BLOOD_DEATH_TTL * 2, radius: 44, big: true, boss: true });
+    state.effects.push({ type: 'flash', ttl: 0.3, maxTtl: 0.3 });
+    pushShake(state, 0.6, 10);
+  }
+  emit('zombie:killed', { zombie: z, cause, x: z.x, y: z.y, kind: z.kind || 'normal' });
   return true;
 }
 
@@ -256,11 +386,21 @@ export function killZombie(state, z, cause = 'weapon') {
 // Sets the knock velocity (replacing any previous one) and extends the stun. Ignored for dying
 // zombies and for tearing zombies (they stay in their pocket). Interrupts an attack wind-up.
 // Returns true if the knockback was applied.
+// WO5: the boss is immune to stun. Its knock is an instant displacement of
+// min(|v| / knockFriction, BOSS.thunderNearKnock) px along (vx, vy) (the distance a normal zombie
+// would slide, capped); no stun, no wind-up cancel, charge state untouched. Use pushZombie for an
+// exact distance (Thundergun: near 60 px, far 40 px).
 export function applyKnockback(state, z, vx, vy, stunSeconds) {
   if (!z || !isAlive(z) || z.mode === 'tearing') return false;
   vx = Number(vx); vy = Number(vy);
   if (!Number.isFinite(vx)) vx = 0;
   if (!Number.isFinite(vy)) vy = 0;
+  if (z.kind === 'boss') {
+    const v = Math.hypot(vx, vy);
+    if (!(v > 0)) return false;
+    const d = Math.min(v / (ZOMBIE.knockFriction || 1), BOSS.thunderNearKnock);
+    return pushZombie(state, z, (vx / v) * d, (vy / v) * d);
+  }
   const st = Number(stunSeconds);
   // A knock needs a positive, finite stun: updateStunned is what decays and clears kvx/kvy, so a
   // velocity set without a stun would persist forever. Reject it without touching the zombie.
@@ -269,6 +409,20 @@ export function applyKnockback(state, z, vx, vy, stunSeconds) {
   z.stun = Math.max(Number.isFinite(z.stun) ? z.stun : 0, st);
   if (vx || vy) z.knockAngle = Math.atan2(vy, vx);
   z.attackTimer = 0;
+  return true;
+}
+
+// WO5: instant displacement by (dx, dy) px with wall collision (map.resolveCircle) and bounds
+// clamp. No stun. Works for every kind; the Thundergun uses it for the boss. Returns true if moved.
+export function pushZombie(state, z, dx, dy) {
+  if (!z || !isAlive(z) || z.mode === 'tearing') return false;
+  dx = Number(dx); dy = Number(dy);
+  if (!Number.isFinite(dx) || !Number.isFinite(dy) || (!dx && !dy)) return false;
+  // Step in chunks no longer than half a tile so a push cannot tunnel through a wall.
+  const len = Math.hypot(dx, dy);
+  const steps = Math.max(1, Math.ceil(len / (TILE / 2)));
+  for (let i = 0; i < steps; i++) settle(state, z, z.x + dx / steps, z.y + dy / steps);
+  z.knockAngle = Math.atan2(dy, dx);
   return true;
 }
 
@@ -342,7 +496,7 @@ function updateChasing(state, z, dt) {
   const p = state.player;
   if (p && !p.down && inAttackRange(z, p)) {
     z.mode = 'attacking';
-    z.attackTimer = z.attackCd <= 0 ? ZOMBIE.attackWindup : 0;
+    z.attackTimer = z.attackCd <= 0 ? windupOf(z) : 0;
     z.vx = 0; z.vy = 0;
     return;
   }
@@ -363,10 +517,10 @@ function updateChasing(state, z, dt) {
 // touching; the velocity component toward each in-contact neighbour is removed, so zombies
 // behind the front ring slide around it or wait instead of compressing the crowd.
 function blockByContacts(state, z, vx, vy) {
-  if (!z.inside) return { x: vx, y: vy };
-  const reach = ZOMBIE.separationMinDist + 2;
+  if (!z.inside || z.kind === 'boss') return { x: vx, y: vy };
   for (const o of state.zombies) {
     if (o === z || !o.inside || !isAlive(o)) continue;
+    const reach = pairMinDist(z, o) + 2;
     const dx = o.x - z.x, dy = o.y - z.y;
     if (dx >= reach || dx <= -reach || dy >= reach || dy <= -reach) continue;
     const d = Math.hypot(dx, dy);
@@ -390,13 +544,114 @@ function updateAttacking(state, z, dt) {
     z.attackTimer -= dt;
     if (z.attackTimer <= 0) {
       z.attackTimer = 0;
-      if (inAttackRange(z, p)) damagePlayer(state, ZOMBIE.damage);
-      z.attackCd = ZOMBIE.attackCooldown;
+      if (inAttackRange(z, p)) damagePlayer(state, z.damage > 0 ? z.damage : ZOMBIE.damage);
+      z.attackCd = z.attackCooldown > 0 ? z.attackCooldown : ZOMBIE.attackCooldown;
     }
     return;
   }
   if (!inAttackRange(z, p)) { z.mode = 'chasing'; return; }
-  if (z.attackCd <= 0) z.attackTimer = ZOMBIE.attackWindup;
+  if (z.attackCd <= 0) z.attackTimer = windupOf(z);
+}
+
+function windupOf(z) { return z.attackWindup > 0 ? z.attackWindup : ZOMBIE.attackWindup; }
+
+// ---------------------------------------------------------------------------
+// WO5 boss AI: charge state machine idle -> telegraph -> dash -> recover -> idle.
+// ---------------------------------------------------------------------------
+
+// Returns true when the charge state machine owns this frame (the normal AI is skipped).
+function updateBossCharge(state, z, dt) {
+  const c = z.charge || (z.charge = { timer: BOSS.chargeEvery, phase: 'idle', dx: 0, dy: 0, t: 0 });
+  const p = state.player;
+  if (c.phase === 'idle') {
+    if (c.timer > 0) c.timer -= dt;
+    // Never interrupt a swing that is already winding up.
+    const busy = z.mode === 'attacking' && z.attackTimer > 0;
+    if (c.timer <= 0 && p && !p.down && !busy) {
+      c.phase = 'telegraph'; c.t = 0; c.dx = 0; c.dy = 0;
+      z.mode = 'chasing'; z.attackTimer = 0; z.vx = 0; z.vy = 0;
+      emit('boss:charge', { x: z.x, y: z.y });
+      return true;
+    }
+    return false;
+  }
+  c.t += dt;
+  if (c.phase === 'telegraph') {
+    z.vx = 0; z.vy = 0;
+    if (c.t >= BOSS.chargeTelegraph) {
+      // Aim at where the player is when the telegraph ends.
+      let d = p ? norm(p.x - z.x, p.y - z.y) : { x: 0, y: 0 };
+      if (!(d.x || d.y)) d = { x: Math.cos(z.knockAngle || 0), y: Math.sin(z.knockAngle || 0) };
+      c.dx = d.x; c.dy = d.y;
+      c.phase = 'dash'; c.t = 0; c.hit = false;
+    }
+    return true;
+  }
+  if (c.phase === 'dash') {
+    const sp = z.speed * BOSS.chargeSpeedMult;
+    const step = sp * dt;
+    z.vx = c.dx * sp; z.vy = c.dy * sp;
+    // Sub-step so a fast dash cannot skip through a thin wall or past the player.
+    const n = Math.max(1, Math.ceil(step / (TILE / 4)));
+    let blocked = false;
+    for (let i = 0; i < n; i++) {
+      const bx = z.x, by = z.y;
+      settle(state, z, bx + (c.dx * step) / n, by + (c.dy * step) / n);
+      // Progress along the dash direction this sub-step; a wall eats most of it.
+      const prog = (z.x - bx) * c.dx + (z.y - by) * c.dy;
+      if (prog < (step / n) * 0.5) { blocked = true; break; }
+      if (p && !p.down && dist(z.x, z.y, p.x, p.y) <= z.radius + p.radius + 2) {
+        chargeHitPlayer(state, z, c);
+        return true;
+      }
+    }
+    if (p && !p.down && !c.hit && dist(z.x, z.y, p.x, p.y) <= z.radius + p.radius + 2) {
+      chargeHitPlayer(state, z, c);
+      return true;
+    }
+    if (blocked) {
+      c.phase = 'recover'; c.t = 0; c.wall = true;
+      z.vx = 0; z.vy = 0;
+      pushShake(state, 0.35, 8);
+      return true;
+    }
+    if (c.t >= BOSS.chargeMaxTime) {
+      c.phase = 'recover'; c.t = 0; c.wall = false;
+      z.vx = 0; z.vy = 0;
+    }
+    return true;
+  }
+  if (c.phase === 'recover') {
+    z.vx = 0; z.vy = 0;
+    if (c.t >= BOSS.chargeRecover) {
+      c.phase = 'idle'; c.t = 0; c.timer = BOSS.chargeEvery; c.wall = false;
+    }
+    return true;
+  }
+  c.phase = 'idle';
+  return false;
+}
+
+// Dash contact: damage + knock the player chargeKnockback px along the dash (wall-safe via
+// map.resolveCircle), shake, then recover.
+function chargeHitPlayer(state, z, c) {
+  const p = state.player;
+  c.hit = true;
+  damagePlayer(state, BOSS.damage);
+  const k = BOSS.chargeKnockback;
+  const steps = Math.max(1, Math.ceil(k / (TILE / 2)));
+  for (let i = 0; i < steps; i++) {
+    let nx = p.x + (c.dx * k) / steps, ny = p.y + (c.dy * k) / steps;
+    if (state.map) {
+      const r = resolveCircle(state.map, nx, ny, p.radius || 14);
+      nx = r.x; ny = r.y;
+    }
+    if (Number.isFinite(nx) && Number.isFinite(ny)) { p.x = nx; p.y = ny; }
+  }
+  pushShake(state, 0.4, 10);
+  c.phase = 'recover'; c.t = 0; c.wall = false;
+  z.vx = 0; z.vy = 0;
+  z.attackCd = Math.max(z.attackCd || 0, z.attackCooldown || BOSS.attackCooldown);
 }
 
 function updateWandering(state, z, dt) {
@@ -426,7 +681,7 @@ function resolveOverlaps(state) {
   const n = list.length;
   if (n === 0) return;
   const p = state.player;
-  const minD = ZOMBIE.separationMinDist, maxPush = ZOMBIE.separationMaxPush;
+  const maxPush = ZOMBIE.separationMaxPush;
   const px = new Float64Array(n), py = new Float64Array(n);
   for (let iter = 0; iter < ZOMBIE.separationIters; iter++) {
     px.fill(0); py.fill(0);
@@ -435,15 +690,20 @@ function resolveOverlaps(state) {
       const a = list[i];
       for (let j = i + 1; j < n; j++) {
         const b = list[j];
+        const minD = pairMinDist(a, b);
         const dx = b.x - a.x, dy = b.y - a.y;
         if (dx >= minD || dx <= -minD || dy >= minD || dy <= -minD) continue;
         const d = Math.hypot(dx, dy);
         if (d >= minD) continue;
         let ux, uy;
         if (d < 1e-6) { const u = stackDir(b, a); ux = u.x; uy = u.y; } else { ux = dx / d; uy = dy / d; }
-        const h = (minD - d) / 2;
-        px[i] -= ux * h; py[i] -= uy * h;
-        px[j] += ux * h; py[j] += uy * h;
+        // Split the push by mass (radius^2): equal bodies move half each, a minion yields to the
+        // boss almost entirely.
+        const ma = (a.radius || ZOMBIE.radius) ** 2, mb = (b.radius || ZOMBIE.radius) ** 2;
+        const over = minD - d;
+        const ha = over * mb / (ma + mb), hb = over * ma / (ma + mb);
+        px[i] -= ux * ha; py[i] -= uy * ha;
+        px[j] += ux * hb; py[j] += uy * hb;
         any = true;
       }
       if (p) {
@@ -490,6 +750,7 @@ export function updateZombies(state, dt) {
     // Stunned (knocked back): slide only. The pocket check below runs from the next frame on,
     // so a zombie knocked through an open window into a pocket tears only if the window is
     // boarded again, like any other zombie standing in a pocket.
+    if (z.kind === 'boss') { z.stun = 0; z.kvx = 0; z.kvy = 0; }
     if (z.stun > 0) {
       if (z.mode === 'tearing') { z.stun = 0; z.kvx = 0; z.kvy = 0; }
       else {
@@ -500,7 +761,24 @@ export function updateZombies(state, dt) {
       }
     }
 
-    const t = tileTypeAt(map, z.x, z.y);
+    const special = z.kind === 'boss' || z.kind === 'minion';
+    if (special) {
+      // WO5: minions and the boss live in the arena: no pocket logic, never tearing, no stun.
+      z.inside = true;
+      if (z.mode === 'tearing') { z.mode = 'chasing'; z.tearTimer = 0; }
+      if (z.kind === 'boss') {
+        if (updateBossCharge(state, z, dt)) continue;
+        // Zombie Blood does not fool the boss.
+        if (z.mode === 'wandering') z.mode = 'chasing';
+        switch (z.mode) {
+          case 'attacking': updateAttacking(state, z, dt); break;
+          default: z.mode = 'chasing'; updateChasing(state, z, dt); break;
+        }
+        continue;
+      }
+    }
+
+    const t = special ? -1 : tileTypeAt(map, z.x, z.y);
     if (t !== -1) z.inside = !isOutsideTile(t);
 
     // Any zombie standing in a spawn pocket whose barricade has boards tears that barricade,

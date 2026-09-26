@@ -1,5 +1,5 @@
 // Power-ups (Agent G). Pure logic: no DOM access. See WORK_ORDER.md 3.6 and 5.8.
-import { POWERUPS, POINTS } from './config.js';
+import { POWERUPS, POINTS, BOSS } from './config.js';
 import * as events from './events.js';
 import { dist, nextId } from './math.js';
 // Namespace imports: sibling modules are resolved lazily at call time (cycle-safe, and a
@@ -61,6 +61,8 @@ export function initPowerups(state) {
 
 function rollDrop(state, payload) {
   if (!payload || payload.cause !== 'weapon') return;
+  // WO5: the boss's only drop is the guaranteed Max Ammo from boss.finishFight.
+  if (payload.kind === 'boss' || payload.zombie?.kind === 'boss') return;
   const pu = state.powerups;
   if (pu.dropsThisRound >= POWERUPS.maxPerRound) return;
   if (!state.rng.chance(POWERUPS.dropChance)) return;
@@ -148,7 +150,7 @@ export function updatePowerups(state, dt) {
       nuke.timer -= POWERUPS.nukeStagger;
       const id = nuke.queue.shift();
       const z = state.zombies.find((zz) => zz.id === id);
-      if (z && z.mode !== 'dying') zombie.killZombie(state, z, 'nuke');
+      if (z && z.mode !== 'dying' && z.kind !== 'boss') zombie.killZombie(state, z, 'nuke');
     }
     if (!nuke.queue.length) pu.nuke = null;
   }
@@ -170,7 +172,13 @@ export function applyPowerup(state, type) {
       if (p) for (const w of p.weapons) if (w) weapons.refillReserve(w);
       break;
     case 'nuke': {
-      const ids = state.zombies.filter((z) => z.mode !== 'dying').map((z) => z.id);
+      // WO5 1.2: the boss is never queued; it takes BOSS.nukeFrac of its max HP instead (cause
+      // 'nuke', so it can still die if it was that low). Minions are queued like any zombie.
+      const alive = state.zombies.filter((z) => z.mode !== 'dying' && !z._killed);
+      const ids = alive.filter((z) => z.kind !== 'boss').map((z) => z.id);
+      for (const b of alive) {
+        if (b.kind === 'boss') zombie.damageZombie(state, b, BOSS.nukeFrac * (b.maxHp || b.hp || 0), 'nuke', b.x, b.y);
+      }
       if (pu.nuke) {
         for (const id of ids) if (!pu.nuke.queue.includes(id)) pu.nuke.queue.push(id);
       } else {

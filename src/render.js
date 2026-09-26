@@ -22,8 +22,18 @@ const NUKE_SHAKE = RENDER.nukeShake;
 // Tile codes (map.js 5.1)
 const T_FLOOR = 0, T_WALL = 1, T_WINDOW = 2, T_POCKET = 3, T_BOX = 4, T_WALLBUY = 5, T_OPEN = 6;
 const T_DOOR = 7; // WO4 2.1: closed buyable door (opening sets its tiles to T_FLOOR)
+const T_ARENA = 8, T_STAIRS = 9; // WO5 3.1: arena minion spawn (floor), staircase (solid until opened)
 const DOOR_FX_TTL = 0.6;
 const DOOR_SHAKE = { ttl: 0.35, magnitude: 3 };
+// WO5 3.6 tunables (config RENDER; local fallbacks keep older configs working)
+const BOSS_START_SHAKE = RENDER.bossStartShake || { ttl: 0.9, magnitude: 10 };
+const BOSS_DEATH_SHAKE = RENDER.bossDeathShake || { ttl: 0.8, magnitude: 12 };
+const BOSS_DEATH_FLASH = RENDER.bossDeathFlash || { ttl: 0.4, maxTtl: 0.65 };   // starts at ~60 % white
+const MEGA_SHAKE = RENDER.megaDoorShake || { ttl: 0.6, magnitude: 5 };
+// FIX-3 (review I3): zombie.js owns the boss blood pool (a 'blood' effect with boss:true, drawn
+// here as the big lobed pool); render's own 'bossDeath' effect is only the short shock ring.
+const BOSS_RING_TTL = RENDER.bossRingTtl ?? 0.6;
+const BOSS_SCALE = RENDER.bossScale ?? 2.4, MINION_SCALE = RENDER.minionScale ?? 0.7;
 
 let canvas = null;
 let ctx = null;
@@ -59,6 +69,8 @@ export function initRender(c) {
   unsubs.push(events.on('game:restart', () => { pending = []; resetAnim(); }));
   unsubs.push(events.on('weapon:fired', onWeaponFired));
   unsubs.push(events.on('purchase:made', onPurchaseMade));
+  unsubs.push(events.on('boss:start', onBossStart));
+  unsubs.push(events.on('zombie:killed', onZombieKilled));
   resetAnim();
 }
 
@@ -125,29 +137,37 @@ export function render(state) {
   ctx.save();
   ctx.translate(-camX, -camY);
 
-  drawStaticLayer(map, view);
+  const theme = themeOf(state);
+  drawStaticLayer(map, view, theme);
+  if (theme.torch) drawTorches(view, now);
   drawBarricades(map, view);
   drawBox(state, map, t);
-  drawPowerups(state, t, view);
   drawEffectsOfType(state, 'blood', view);
+  // FIX-3 (playtest #1): power-ups above every blood decal so the boss's Max Ammo stays visible.
+  drawPowerups(state, t, view);
   drawZombies(state, view);
   drawBullets(state);
   drawPlayer(state);
+  drawLabelsOverPlayer(state);
   drawBoxLabel(state, map, t);
+  drawEffectsOfType(state, 'bossDeath', view);
   drawEffectsOfType(state, 'tracer', view);
   drawEffectsOfType(state, 'muzzle', view);
   drawEffectsOfType(state, 'shockwave', view);
   drawEffectsOfType(state, 'explosion', view);
   drawEffectsOfType(state, 'doorOpen', view);
+  sealedMegaBox = map.megaDoor && map.megaDoor.sealed ? doorBox(map.megaDoor) : null;
   drawEffectsOfType(state, 'text', view);
   if (state.debug) drawDebugWorld(state, view);
 
   ctx.restore();
 
   // ---- screen space ----
+  drawAmbient(theme, W, H);
   drawZombieBloodTint(state, W, H);
   drawDamageVignette(state, W, H);
   drawFlash(state, W, H);
+  drawTransition(state, W, H);
   if (state.debug) drawDebugScreen(state);
 }
 
@@ -178,9 +198,31 @@ function onPowerupCollected(p) {
 // WO4 2.4: purchase:made kind 'door' -> dust burst at the door centre + small shake. The handler
 // has no state, so the effect carries the door id and is placed when the queue is flushed.
 function onPurchaseMade(p) {
+  if (p && p.kind === 'megadoor') {
+    pending.push({ type: 'shake', ttl: MEGA_SHAKE.ttl, maxTtl: MEGA_SHAKE.ttl, magnitude: MEGA_SHAKE.magnitude });
+    return;
+  }
   if (!p || p.kind !== 'door') return;
   pending.push({ type: 'doorOpen', doorId: p.id, ttl: DOOR_FX_TTL, maxTtl: DOOR_FX_TTL });
   pending.push({ type: 'shake', ttl: DOOR_SHAKE.ttl, maxTtl: DOOR_SHAKE.ttl, magnitude: DOOR_SHAKE.magnitude });
+}
+
+// WO5 3.6: boss:start -> shake 10.
+function onBossStart() {
+  pending.push({ type: 'shake', ttl: BOSS_START_SHAKE.ttl, maxTtl: BOSS_START_SHAKE.ttl, magnitude: BOSS_START_SHAKE.magnitude });
+}
+
+// WO5 3.6: the boss's zombie:killed (start of its 2 s dying linger) -> shock ring, white flash and
+// a heavy shake. The pool itself is zombie.js's boss blood effect (FIX-3, review I3: no duplicate).
+function onZombieKilled(p) {
+  const z = p && p.zombie;
+  if (!z || z.kind !== 'boss') return;
+  const x = Number.isFinite(p.x) ? p.x : z.x, y = Number.isFinite(p.y) ? p.y : z.y;
+  if (Number.isFinite(x) && Number.isFinite(y)) {
+    pending.push({ type: 'bossDeath', x, y, r: (z.radius || ZOMBIE.radius * BOSS_SCALE) * 2.1, ttl: BOSS_RING_TTL, maxTtl: BOSS_RING_TTL });
+  }
+  pending.push({ type: 'flash', ttl: BOSS_DEATH_FLASH.ttl, maxTtl: BOSS_DEATH_FLASH.maxTtl });
+  pending.push({ type: 'shake', ttl: BOSS_DEATH_SHAKE.ttl, maxTtl: BOSS_DEATH_SHAKE.ttl, magnitude: BOSS_DEATH_SHAKE.magnitude });
 }
 
 // Fills x/y (and the door's extent/axis) of a queued doorOpen effect from state.map.doors.
@@ -237,6 +279,7 @@ function defaultTtl(type) {
     case 'text': return TEXT_TTL;
     case 'explosion': return 0.35;
     case 'doorOpen': return DOOR_FX_TTL;
+    case 'bossDeath': return BOSS_RING_TTL;
     case 'shockwave': return (CFG.WEAPON_FX && CFG.WEAPON_FX.shockwaveTtl) || 0.45;
     default: return 0.3;
   }
@@ -379,16 +422,78 @@ function drawMenuBackground(W, H, now) {
 // the per-frame check allocates nothing (FIX-2, review Info #9).
 // WO4 2.4: map.version (bumped on every door open) is part of the key and of the memo check, so
 // an opened door repaints the layer; a missing version counts as 0.
-let staticKeyMemo = { map: null, version: 0, key: '' };
-function staticKey(map) {
+// WO5 3.6: the key also carries the level id + theme signature (a level swap or theme change
+// repaints) and a small integer of mega-door / stairs flags (a seal/unseal/open repaints even
+// without a version bump). The memo check compares identities and ints only: no per-frame allocs.
+let staticKeyMemo = { map: null, version: 0, theme: null, flags: -1, key: '' };
+function staticKey(map, theme) {
   const ver = Number.isFinite(map.version) ? map.version : 0;
-  if (staticKeyMemo.map === map && staticKeyMemo.version === ver) return staticKeyMemo.key;
+  const flags = featureFlags(map);
+  if (staticKeyMemo.map === map && staticKeyMemo.version === ver && staticKeyMemo.theme === theme &&
+      staticKeyMemo.flags === flags) return staticKeyMemo.key;
   const W = weaponsMod && weaponsMod.WEAPONS;
   const n = W ? Object.keys(W).length : 0;
   const art = gunArtKey();
-  const key = n + ':' + (map.cols || 0) + 'x' + (map.rows || 0) + ':' + art + ':v' + ver;
-  if (n > 0 && art === 'gunart') staticKeyMemo = { map, version: ver, key };
+  const key = n + ':' + (map.cols || 0) + 'x' + (map.rows || 0) + ':' + art + ':v' + ver +
+    ':L' + (map.levelId != null ? map.levelId : '') + ':T' + theme.sig + ':f' + flags;
+  if (n > 0 && art === 'gunart') staticKeyMemo = { map, version: ver, theme, flags, key };
   return key;
+}
+
+// Mega door / stairs state as an int (0 when the map has neither).
+function featureFlags(map) {
+  const md = map.megaDoor, st = map.stairs;
+  let f = 0;
+  if (md) f |= 1 | (md.open ? 2 : 0) | (md.sealed ? 4 : 0);
+  if (st) f |= 8 | (st.open ? 16 : 0);
+  return f;
+}
+
+// ---------------------------------------------------------------------------
+// Themes (WO5 3.6)
+// ---------------------------------------------------------------------------
+
+// Fallback = the WO4 look (COLORS + the WO4 door panel colours): a map without a theme is unchanged.
+const WO4_DOOR_WOOD = '#3e2412', WO4_DOOR_IRON = '#2b2d31', WO4_ACCENT = '#9aa0a8';
+let defaultTheme = null;
+const themeCache = new WeakMap(); // raw theme object -> resolved theme
+function resolveTheme(raw) {
+  if (!raw || typeof raw !== 'object') {
+    if (!defaultTheme) defaultTheme = buildTheme({});
+    return defaultTheme;
+  }
+  let t = themeCache.get(raw);
+  if (!t) { t = buildTheme(raw); themeCache.set(raw, t); }
+  return t;
+}
+function buildTheme(raw) {
+  const str = (v, d) => (typeof v === 'string' && v ? v : d);
+  const floor = str(raw.floor, COLORS.floor);
+  const t = {
+    name: str(raw.name, ''),
+    floor,
+    floorAlt: str(raw.floorAlt, floor),
+    wall: str(raw.wall, COLORS.wall),
+    wallEdge: str(raw.wallEdge, COLORS.wallEdge),
+    accent: str(raw.accent, WO4_ACCENT),
+    doorWood: str(raw.doorWood, WO4_DOOR_WOOD),
+    doorIron: str(raw.doorIron, WO4_DOOR_IRON),
+    ambient: str(raw.ambient, null),   // null / '' = no tint
+    torch: !!raw.torch,
+  };
+  // A theme with a distinct floorAlt gets the checker, accent flecks and wall brickwork. Level 1
+  // (floorAlt = floor) therefore keeps the flat WO4 look exactly.
+  t.textured = t.floorAlt.toLowerCase() !== t.floor.toLowerCase();
+  t.sig = [t.name, t.floor, t.floorAlt, t.wall, t.wallEdge, t.accent, t.doorWood, t.doorIron, t.torch ? 1 : 0].join('|');
+  return t;
+}
+// map.theme first (map.js 3.1), then the level def (state.level.def.theme), else the WO4 look.
+// Note: mutating a theme object in place is not picked up (resolved themes are cached per object);
+// assign a new object instead.
+function themeOf(state) {
+  const map = state.map;
+  const raw = (map && map.theme) || (state.level && state.level.def && state.level.def.theme) || null;
+  return resolveTheme(raw);
 }
 
 // Part of the static-layer key: whether the gun art is still placeholder, so the wall-buy chalk
@@ -427,8 +532,8 @@ function paintChalkGun(c, def, maxW, maxH) {
   return true;
 }
 
-function getStaticLayer(map) {
-  const key = staticKey(map);
+function getStaticLayer(map, theme) {
+  const key = staticKey(map, theme);
   if (staticLayer && staticLayer.map === map && staticLayer.key === key) return staticLayer.canvas;
   if (typeof document === 'undefined') return null;
   const width = map.width || (map.cols || 0) * TILE;
@@ -437,18 +542,26 @@ function getStaticLayer(map) {
   const oc = document.createElement('canvas');
   oc.width = width; oc.height = height;
   const c = oc.getContext('2d');
-  paintStatic(c, map, width, height);
-  staticLayer = { canvas: oc, map, key };
+  labelRects = [];
+  try { paintStatic(c, map, width, height, theme); } finally {
+    staticLayer = { canvas: oc, map, key, torches: theme.torch ? findTorches(map) : [], labels: labelRects };
+    labelRects = null;
+  }
   return oc;
 }
 
-function paintStatic(c, map, width, height) {
+function paintStatic(c, map, width, height, theme) {
   const cols = map.cols || Math.round(width / TILE);
   const rows = map.rows || Math.round(height / TILE);
+  const th = theme || resolveTheme(null);
 
-  // Floor
-  c.fillStyle = COLORS.floor;
+  // Floor (WO5: theme floor, plus a floorAlt checker and accent flecks when the theme has one)
+  c.fillStyle = th.floor;
   c.fillRect(0, 0, width, height);
+  if (th.textured) {
+    c.fillStyle = th.floorAlt;
+    for (let ty = 0; ty < rows; ty++) for (let tx = (ty & 1); tx < cols; tx += 2) c.fillRect(tx * TILE, ty * TILE, TILE, TILE);
+  }
   // Subtle floor mottling
   for (let ty = 0; ty < rows; ty++) {
     for (let tx = 0; tx < cols; tx++) {
@@ -459,6 +572,9 @@ function paintStatic(c, map, width, height) {
       }
     }
   }
+  if (th.textured) paintFloorFlecks(c, th, cols, rows);
+  // WO5: the boss arena floor is slightly darker.
+  paintArenaFloor(c, map, cols);
   // Grid
   c.strokeStyle = 'rgba(255,255,255,0.04)';
   c.lineWidth = 1;
@@ -488,6 +604,14 @@ function paintStatic(c, map, width, height) {
           c.lineWidth = 2;
           c.strokeRect(x + 1, y + 1, TILE - 2, TILE - 2);
           c.lineWidth = 1;
+        } else if (code === T_ARENA) {
+          // Minion spawn: faint scratched ring on the arena floor.
+          c.strokeStyle = 'rgba(150,30,30,0.28)';
+          c.lineWidth = 2;
+          c.beginPath();
+          c.arc(x + TILE / 2, y + TILE / 2, TILE * 0.32, 0, Math.PI * 2);
+          c.stroke();
+          c.lineWidth = 1;
         }
       }
     }
@@ -495,7 +619,7 @@ function paintStatic(c, map, width, height) {
 
   // Walls: prefer merged rects, fall back to tiles
   const rects = Array.isArray(map.walls) && map.walls.length ? map.walls : null;
-  c.fillStyle = COLORS.wall;
+  c.fillStyle = th.wall;
   if (rects) {
     for (const r of rects) c.fillRect(r.x, r.y, r.w, r.h);
   } else if (map.tiles) {
@@ -507,9 +631,10 @@ function paintStatic(c, map, width, height) {
   if (Array.isArray(map.wallBuys)) {
     for (const wb of map.wallBuys) c.fillRect(wb.x, wb.y, wb.w || TILE, wb.h || TILE);
   }
+  if (th.textured) paintBrickwork(c, map, th, cols, rows);
   // Edges: draw per-tile edges only where a wall borders a non-solid tile (clean outlines)
   if (map.tiles) {
-    c.strokeStyle = COLORS.wallEdge;
+    c.strokeStyle = th.wallEdge;
     c.lineWidth = 1;
     c.beginPath();
     for (let ty = 0; ty < rows; ty++) {
@@ -525,7 +650,7 @@ function paintStatic(c, map, width, height) {
     }
     c.stroke();
   } else if (rects) {
-    c.strokeStyle = COLORS.wallEdge;
+    c.strokeStyle = th.wallEdge;
     for (const r of rects) c.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
   }
 
@@ -535,7 +660,10 @@ function paintStatic(c, map, width, height) {
   }
 
   // WO4: closed doors (planks + iron bands + labels on both sides). Open doors are floor.
-  paintDoors(c, map, cols, rows);
+  paintDoors(c, map, cols, rows, th);
+  // WO5: staircase (barred gate / open steps) and the mega door.
+  paintStairs(c, map, th, cols, rows);
+  paintMegaDoor(c, map, th, cols);
 }
 
 // ---------------------------------------------------------------------------
@@ -559,9 +687,13 @@ function doorAxis(d, b) {
   return b && b.h > b.w ? 'v' : 'h';
 }
 
-function paintDoors(c, map, cols, rows) {
+function paintDoors(c, map, cols, rows, th) {
   const doors = Array.isArray(map.doors) ? map.doors : [];
   const covered = new Set();
+  // WO5: mega door tiles are code 7 too; paintMegaDoor draws them (while not open).
+  if (map.megaDoor && Array.isArray(map.megaDoor.tiles)) {
+    for (const t of map.megaDoor.tiles) { const i = tileIndexOf(t, cols); if (i >= 0) covered.add(i); }
+  }
   const labels = [];
   for (const d of doors) {
     if (!d || d.open) continue;
@@ -569,7 +701,7 @@ function paintDoors(c, map, cols, rows) {
     if (!b) continue;
     if (Array.isArray(d.tiles)) for (const t of d.tiles) covered.add(t.ty * cols + t.tx);
     const axis = doorAxis(d, b);
-    paintDoorPanel(c, b, axis, (d.id || 0) * 97);
+    paintDoorPanel(c, b, axis, (d.id || 0) * 97, th);
     const price = Number.isFinite(d.cost) ? String(d.cost) : '';
     const sides = axis === 'v' ? [{ dx: -1, dy: 0 }, { dx: 1, dy: 0 }] : [{ dx: 0, dy: -1 }, { dx: 0, dy: 1 }];
     for (const s of sides) labels.push([b, s, price]);
@@ -582,7 +714,7 @@ function paintDoors(c, map, cols, rows) {
         if (map.tiles[i] !== T_DOOR || covered.has(i)) continue;
         const l = tileAt(map, tx - 1, ty), r = tileAt(map, tx + 1, ty);
         const alongX = isSolidCode(l) || l === T_DOOR || isSolidCode(r) || r === T_DOOR;
-        paintDoorPanel(c, { x: tx * TILE, y: ty * TILE, w: TILE, h: TILE }, alongX ? 'h' : 'v', i);
+        paintDoorPanel(c, { x: tx * TILE, y: ty * TILE, w: TILE, h: TILE }, alongX ? 'h' : 'v', i, th);
       }
     }
   }
@@ -592,7 +724,10 @@ function paintDoors(c, map, cols, rows) {
 
 // Heavy dark wooden planks running along the doorway, crossed by riveted iron bands.
 // Painted in a local frame: u along the doorway (length L), v across it (depth D).
-function paintDoorPanel(c, b, axis, seed) {
+function paintDoorPanel(c, b, axis, seed, th) {
+  const wood = th && th.doorWood !== WO4_DOOR_WOOD ? hexRgb(th.doorWood) : null; // null = WO4 planks
+  const iron = th ? th.doorIron : WO4_DOOR_IRON;
+  const rivet = th ? th.accent : WO4_ACCENT;
   const L = axis === 'v' ? b.h : b.w;
   const D = axis === 'v' ? b.w : b.h;
   c.save();
@@ -609,7 +744,10 @@ function paintDoorPanel(c, b, axis, seed) {
     const v = inset + k * ph;
     const h = hash(seed + k * 7.1);
     const base = 40 + Math.round(h * 14);
-    c.fillStyle = `rgb(${base + 16},${Math.round(base * 0.66)},${Math.round(base * 0.36)})`;
+    if (wood) {
+      const f = 0.85 + h * 0.35;
+      c.fillStyle = `rgb(${Math.min(255, Math.round(wood[0] * f))},${Math.min(255, Math.round(wood[1] * f))},${Math.min(255, Math.round(wood[2] * f))})`;
+    } else c.fillStyle = `rgb(${base + 16},${Math.round(base * 0.66)},${Math.round(base * 0.36)})`;
     c.fillRect(1, v + 0.5, L - 2, ph - 1);
     // Grain
     c.strokeStyle = 'rgba(0,0,0,0.35)';
@@ -632,11 +770,11 @@ function paintDoorPanel(c, b, axis, seed) {
   for (let k = 0; k < tiles; k++) {
     for (const off of [7, step - 7 - bandW]) {
       const u = Math.round(k * step + off);
-      c.fillStyle = '#2b2d31';
+      c.fillStyle = iron;
       c.fillRect(u, 1, bandW, D - 2);
       c.fillStyle = 'rgba(160,165,172,0.35)';
       c.fillRect(u, 1, 1, D - 2);
-      c.fillStyle = '#9aa0a8';
+      c.fillStyle = rivet;
       for (let r = 0; r < 3; r++) {
         const v = Math.round(D * (0.2 + r * 0.3));
         c.fillRect(u + 1.5, v - 1, 2, 2);
@@ -647,6 +785,421 @@ function paintDoorPanel(c, b, axis, seed) {
   c.strokeStyle = '#050302';
   c.lineWidth = 1;
   c.strokeRect(0.5, 0.5, L - 1, D - 1);
+  c.restore();
+}
+
+// ---------------------------------------------------------------------------
+// WO5 3.6: themed floor/walls, arena, torches, mega door, stairs (all static-layer painters
+// except the torch flames, which are drawn per frame by drawTorches)
+// ---------------------------------------------------------------------------
+
+function hexRgb(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+// Like shade() but always returns #rrggbb (so the result can be shaded again).
+function shadeHex(hex, f) {
+  const c = hexRgb(hex);
+  if (!c) return hex;
+  const h = (v) => Math.max(0, Math.min(255, Math.round(v * f))).toString(16).padStart(2, '0');
+  return '#' + h(c[0]) + h(c[1]) + h(c[2]);
+}
+
+// Tile reference -> tile index. Accepts {tx, ty}, {x, y} in tiles, or a bare index.
+function tileIndexOf(t, cols) {
+  if (typeof t === 'number') return t;
+  if (t && Number.isFinite(t.tx) && Number.isFinite(t.ty)) return t.ty * cols + t.tx;
+  return -1;
+}
+
+// Bone-white (theme accent) flecks scattered on the floor, deterministic per tile.
+function paintFloorFlecks(c, th, cols, rows) {
+  c.save();
+  c.fillStyle = th.accent;
+  for (let ty = 0; ty < rows; ty++) {
+    for (let tx = 0; tx < cols; tx++) {
+      const h = hash(tx * 57.3 + ty * 911.7);
+      if (h < 0.45) continue;
+      const n = 1 + Math.floor(hash(h * 331 + tx) * 3);
+      for (let k = 0; k < n; k++) {
+        const fx = tx * TILE + 3 + Math.floor(hash(tx * 13 + ty * 7 + k * 3.1) * (TILE - 6));
+        const fy = ty * TILE + 3 + Math.floor(hash(tx * 5 + ty * 17 + k * 7.7) * (TILE - 6));
+        c.globalAlpha = 0.14 + hash(fx * 0.37 + fy) * 0.22;
+        const sz = hash(fx + fy * 0.5) > 0.8 ? 3 : 2;
+        c.fillRect(fx, fy, sz, hash(fy * 0.9 + k) > 0.6 ? 1 : sz);
+      }
+    }
+  }
+  c.restore();
+}
+
+// Arena floor: slightly darker (map.arenaTiles: Set or array of tile indices).
+function paintArenaFloor(c, map, cols) {
+  const at = map.arenaTiles;
+  if (!at || !cols) return;
+  c.save();
+  c.fillStyle = 'rgba(0,0,0,0.3)';
+  const paint = (i) => {
+    if (!Number.isFinite(i)) return;
+    c.fillRect((i % cols) * TILE, Math.floor(i / cols) * TILE, TILE, TILE);
+  };
+  if (typeof at.forEach === 'function') at.forEach((i) => paint(i));
+  c.restore();
+}
+
+// Stone brickwork on wall tiles for textured themes (mortar lines, staggered per row).
+function paintBrickwork(c, map, th, cols, rows) {
+  if (!map.tiles) return;
+  const bh = TILE / 3;
+  c.save();
+  c.strokeStyle = 'rgba(0,0,0,0.45)';
+  c.lineWidth = 1;
+  c.beginPath();
+  for (let ty = 0; ty < rows; ty++) {
+    for (let tx = 0; tx < cols; tx++) {
+      if (map.tiles[ty * cols + tx] !== T_WALL) continue;
+      const x = tx * TILE, y = ty * TILE;
+      for (let r = 0; r < 3; r++) {
+        const yy = Math.round(y + r * bh) + 0.5;
+        c.moveTo(x, yy); c.lineTo(x + TILE, yy);
+        const off = ((r + ty) & 1) ? TILE / 2 : TILE / 4;
+        const xx = Math.round(x + off) + 0.5;
+        c.moveTo(xx, yy); c.lineTo(xx, yy + bh);
+      }
+    }
+  }
+  c.stroke();
+  // Faint lit specks of the edge colour so the stone reads as stone.
+  c.fillStyle = th.wallEdge;
+  for (let ty = 0; ty < rows; ty++) {
+    for (let tx = 0; tx < cols; tx++) {
+      if (map.tiles[ty * cols + tx] !== T_WALL) continue;
+      const h = hash(tx * 3.3 + ty * 71.1);
+      if (h < 0.5) continue;
+      c.globalAlpha = 0.18 + (h - 0.5) * 0.3;
+      c.fillRect(tx * TILE + Math.floor(h * 30) + 3, ty * TILE + Math.floor(hash(h * 91) * 30) + 3, 3, 2);
+    }
+  }
+  c.restore();
+}
+
+// Torch positions: plain wall tiles that touch floor, every ~6 tiles along a wall run
+// ((tx + 5*ty) % 6 === 0 hits every 6th tile on both horizontal and vertical runs).
+// Deterministic from the tile index; computed once per static-layer build.
+function findTorches(map) {
+  const out = [];
+  if (!map.tiles || !map.cols) return out;
+  const cols = map.cols, rows = map.rows;
+  const dirs = [[0, 1], [0, -1], [1, 0], [-1, 0]];
+  for (let ty = 0; ty < rows; ty++) {
+    for (let tx = 0; tx < cols; tx++) {
+      if ((tx + 5 * ty) % 6 !== 0) continue;
+      const i = ty * cols + tx;
+      if (map.tiles[i] !== T_WALL) continue;
+      for (const [dx, dy] of dirs) {
+        if (!isOpenFloorCode(tileAt(map, tx + dx, ty + dy))) continue;
+        out.push({
+          x: tx * TILE + TILE / 2 + dx * TILE * 0.32,
+          y: ty * TILE + TILE / 2 + dy * TILE * 0.32,
+          dx, dy, seed: hash(i * 1.37) * 100,
+        });
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+// Local drawing frame over box b: u runs along the doorway (length L), v across it (depth D),
+// with v = 0 on the `front` side ({dx, dy}). Mirrored frames are fine: no text is drawn in them.
+function applyFrontFrame(c, b, axis, front) {
+  if (axis === 'v') {
+    if (front && front.dx > 0) c.transform(0, 1, -1, 0, b.x + b.w, b.y);
+    else c.transform(0, 1, 1, 0, b.x, b.y);
+  } else if (front && front.dy > 0) c.transform(1, 0, 0, -1, b.x, b.y + b.h);
+  else c.transform(1, 0, 0, 1, b.x, b.y);
+}
+
+function labelSides(axis) {
+  return axis === 'v' ? [{ dx: -1, dy: 0 }, { dx: 1, dy: 0 }] : [{ dx: 0, dy: -1 }, { dx: 0, dy: 1 }];
+}
+
+// Single-line plate beside box b on `side` (same placement rules as paintWallBuyLabel).
+function paintPlate(c, b, side, text, fg, bg, border) {
+  c.save();
+  c.font = 'bold 13px monospace';
+  const tw = c.measureText(text).width;
+  const plateW = Math.ceil(tw + 12), plateH = 19, gap = 3;
+  let px, py;
+  if (side.dy === 1) { px = b.x + b.w / 2 - plateW / 2; py = b.y + b.h + gap; }
+  else if (side.dy === -1) { px = b.x + b.w / 2 - plateW / 2; py = b.y - gap - plateH; }
+  else if (side.dx === 1) { px = b.x + b.w + gap; py = b.y + b.h / 2 - plateH / 2; }
+  else { px = b.x - gap - plateW; py = b.y + b.h / 2 - plateH / 2; }
+  px = Math.round(px); py = Math.round(py);
+  if (labelRects) labelRects.push({ x: px, y: py, w: plateW, h: plateH });
+  c.fillStyle = bg;
+  roundRect(c, px, py, plateW, plateH, 3);
+  c.fill();
+  c.strokeStyle = border;
+  c.lineWidth = 1;
+  roundRect(c, px + 0.5, py + 0.5, plateW - 1, plateH - 1, 3);
+  c.stroke();
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.fillStyle = fg;
+  c.fillText(text, px + plateW / 2, py + plateH / 2 + 0.5);
+  c.restore();
+}
+
+// Mega door: a tall riveted iron door. Frame posts stick out past both ends of the doorway and a
+// few px past the wall faces, riveted plates per tile, cross braces, an upright skull plate in the
+// middle; "MEGA DOOR" + cost labels while buyable, red "SEALED" plates while sealed. Not drawn
+// once open (its tiles are floor then).
+function paintMegaDoor(c, map, th) {
+  const md = map.megaDoor;
+  if (!md || md.open) return;
+  const b = doorBox(md);
+  if (!b) return;
+  const axis = doorAxis(md, b);
+  const sealed = !!md.sealed;
+  const L = axis === 'v' ? b.h : b.w;
+  const D = axis === 'v' ? b.w : b.h;
+  const iron = th.doorIron;
+  const ext = 7, over = 4;
+  c.save();
+  if (axis === 'v') { c.translate(b.x + b.w, b.y); c.rotate(Math.PI / 2); } else c.translate(b.x, b.y);
+  // Backing + frame (posts + lintels) in dark iron.
+  c.fillStyle = '#060505';
+  c.fillRect(-ext, -over, L + ext * 2, D + over * 2);
+  c.fillStyle = shadeHex(iron, 0.75);
+  c.fillRect(-ext, -over, ext + 2, D + over * 2);
+  c.fillRect(L - 2, -over, ext + 2, D + over * 2);
+  c.fillRect(-ext, -over, L + ext * 2, 3);
+  c.fillRect(-ext, D + over - 3, L + ext * 2, 3);
+  c.fillStyle = th.accent;
+  for (const u of [-ext / 2 - 1, L + ext / 2 - 1]) {
+    for (let v = 2; v < D; v += 8) c.fillRect(u, v, 2, 2);
+  }
+  // Plates, one per tile.
+  const n = Math.max(1, Math.round(L / TILE));
+  const step = L / n;
+  for (let k = 0; k < n; k++) {
+    const u0 = Math.round(k * step) + 2, pw = Math.round(step) - 4;
+    c.fillStyle = shadeHex(iron, 1.05 + hash(k * 3.7 + 1) * 0.3);
+    c.fillRect(u0, 2, pw, D - 4);
+    c.fillStyle = 'rgba(255,255,255,0.10)';
+    c.fillRect(u0, 2, pw, 1);
+    c.fillRect(u0, 2, 1, D - 4);
+    c.fillStyle = 'rgba(0,0,0,0.5)';
+    c.fillRect(u0, D - 3, pw, 1);
+    c.fillRect(u0 + pw - 1, 2, 1, D - 4);
+    // Rust streaks
+    c.fillStyle = 'rgba(120,50,20,0.25)';
+    c.fillRect(u0 + Math.floor(hash(k * 9.1) * (pw - 4)) + 2, 3, 2, Math.floor(D * 0.6));
+    // Rivet rows along both long edges
+    c.fillStyle = th.accent;
+    for (let u = u0 + 3; u < u0 + pw - 2; u += 7) { c.fillRect(u, 4, 2, 2); c.fillRect(u, D - 6, 2, 2); }
+  }
+  // Cross braces over the whole door
+  c.strokeStyle = shadeHex(iron, 0.6);
+  c.lineWidth = 4;
+  c.beginPath();
+  c.moveTo(3, 4); c.lineTo(L - 3, D - 4);
+  c.moveTo(3, D - 4); c.lineTo(L - 3, 4);
+  c.stroke();
+  if (sealed) {
+    // Glowing red locking bar along the door
+    c.fillStyle = 'rgba(40,0,0,0.9)';
+    c.fillRect(-ext + 2, D / 2 - 4, L + ext * 2 - 4, 8);
+    c.fillStyle = '#b01818';
+    c.fillRect(-ext + 3, D / 2 - 2.5, L + ext * 2 - 6, 5);
+    c.fillStyle = 'rgba(255,120,120,0.6)';
+    c.fillRect(-ext + 3, D / 2 - 2.5, L + ext * 2 - 6, 1);
+  }
+  c.restore();
+  // Skull plate, always upright.
+  const cx = Number.isFinite(md.cx) ? md.cx : b.x + b.w / 2;
+  const cy = Number.isFinite(md.cy) ? md.cy : b.y + b.h / 2;
+  paintSkullPlate(c, cx, cy, Math.max(10, Math.min(D, 44) * 0.46), th, sealed);
+  // Labels (on a box grown by the frame overhang so plates clear the posts/lintels)
+  const lb = axis === 'v'
+    ? { x: b.x - over, y: b.y, w: b.w + over * 2, h: b.h }
+    : { x: b.x, y: b.y - over, w: b.w, h: b.h + over * 2 };
+  const price = Number.isFinite(md.cost) ? String(md.cost)
+    : (CFG.DOORS && Number.isFinite(CFG.DOORS.megaCost) ? String(CFG.DOORS.megaCost) : '');
+  for (const s of labelSides(axis)) {
+    if (sealed) paintPlate(c, lb, s, 'SEALED', '#ffe0e0', 'rgba(110,8,8,0.94)', '#ff5a5a');
+    else paintWallBuyLabel(c, lb, lb.w, lb.h, s, 'MEGA DOOR', price);
+  }
+}
+
+function paintSkullPlate(c, x, y, R, th, sealed) {
+  c.save();
+  c.translate(Math.round(x), Math.round(y));
+  // Round iron plate with a rim of rivets
+  c.beginPath();
+  c.arc(0, 0, R, 0, Math.PI * 2);
+  c.fillStyle = sealed ? '#3a0c0c' : shadeHex(th.doorIron, 0.7);
+  c.fill();
+  c.lineWidth = 2;
+  c.strokeStyle = '#050404';
+  c.stroke();
+  c.fillStyle = th.accent;
+  for (let k = 0; k < 8; k++) {
+    const a = k * Math.PI / 4;
+    c.fillRect(Math.cos(a) * (R - 3) - 1, Math.sin(a) * (R - 3) - 1, 2, 2);
+  }
+  // Skull
+  const s = R * 0.62;
+  const bone = '#d9d0b8';
+  c.fillStyle = bone;
+  c.beginPath();
+  c.arc(0, -s * 0.18, s * 0.72, 0, Math.PI * 2);
+  c.fill();
+  c.fillRect(-s * 0.42, s * 0.2, s * 0.84, s * 0.5);
+  c.fillStyle = sealed ? '#ff2a1a' : '#120c0c';
+  c.beginPath();
+  c.arc(-s * 0.3, -s * 0.12, s * 0.2, 0, Math.PI * 2);
+  c.arc(s * 0.3, -s * 0.12, s * 0.2, 0, Math.PI * 2);
+  c.fill();
+  c.fillStyle = '#120c0c';
+  c.beginPath();
+  c.moveTo(0, s * 0.08); c.lineTo(-s * 0.1, s * 0.28); c.lineTo(s * 0.1, s * 0.28); c.closePath();
+  c.fill();
+  for (let k = -1; k <= 1; k++) c.fillRect(k * s * 0.22 - 0.5, s * 0.42, 1, s * 0.28);
+  c.restore();
+}
+
+// Which side of the stairs faces the arena: {dx, dy}. Counts arena tiles (else walkable floor)
+// in the row/column just outside each long side of the run.
+function stairsFront(map, b, axis) {
+  const cols = map.cols || 0;
+  const tx0 = Math.floor(b.x / TILE), ty0 = Math.floor(b.y / TILE);
+  const tx1 = Math.floor((b.x + b.w - 1) / TILE), ty1 = Math.floor((b.y + b.h - 1) / TILE);
+  const at = map.arenaTiles;
+  const has = at && typeof at.has === 'function' ? (i) => at.has(i) : null;
+  const score = (tx, ty) => {
+    if (tx < 0 || ty < 0 || tx >= cols || ty >= (map.rows || 0)) return 0;
+    if (has && has(ty * cols + tx)) return 2;
+    return isOpenFloorCode(tileAt(map, tx, ty)) ? 1 : 0;
+  };
+  let a = 0, z = 0;
+  if (axis === 'v') {
+    for (let ty = ty0; ty <= ty1; ty++) { a += score(tx0 - 1, ty); z += score(tx1 + 1, ty); }
+    return z > a ? { dx: 1, dy: 0 } : { dx: -1, dy: 0 };
+  }
+  for (let tx = tx0; tx <= tx1; tx++) { a += score(tx, ty0 - 1); z += score(tx, ty1 + 1); }
+  return z > a ? { dx: 0, dy: 1 } : { dx: 0, dy: -1 };
+}
+
+// Staircase: closed = barred iron gate in a stone frame; open = dark steps descending away from
+// the arena, with a "DESCEND" plate on the arena side. Stray code-9 tiles (no map.stairs) get a
+// one-tile gate.
+function paintStairs(c, map, th, cols, rows) {
+  const st = map.stairs;
+  const covered = new Set();
+  if (st) {
+    if (Array.isArray(st.tiles)) for (const t of st.tiles) { const i = tileIndexOf(t, cols); if (i >= 0) covered.add(i); }
+    const b = doorBox(st);
+    if (b) {
+      const axis = doorAxis(st, b);
+      const front = stairsFront(map, b, axis);
+      if (st.open) {
+        paintStepsOpen(c, b, axis, front, th);
+        paintPlate(c, b, front, 'DESCEND', '#ffd27a', 'rgba(14,9,4,0.92)', '#c98a2a');
+      } else paintBarredGate(c, b, axis, front, th);
+    }
+  }
+  if (!map.tiles) return;
+  for (let ty = 0; ty < rows; ty++) {
+    for (let tx = 0; tx < cols; tx++) {
+      const i = ty * cols + tx;
+      if (map.tiles[i] !== T_STAIRS || covered.has(i)) continue;
+      const b = { x: tx * TILE, y: ty * TILE, w: TILE, h: TILE };
+      const l = tileAt(map, tx - 1, ty), r = tileAt(map, tx + 1, ty);
+      const axis = (isSolidCode(l) || l === T_STAIRS || isSolidCode(r) || r === T_STAIRS) ? 'h' : 'v';
+      paintBarredGate(c, b, axis, stairsFront(map, b, axis), th);
+    }
+  }
+}
+
+function paintStepsOpen(c, b, axis, front, th) {
+  const L = axis === 'v' ? b.h : b.w;
+  const D = axis === 'v' ? b.w : b.h;
+  const stone = hexRgb(shadeHex(th.floor, 2.8)) || [110, 104, 96];
+  c.save();
+  applyFrontFrame(c, b, axis, front);
+  c.fillStyle = '#030203';
+  c.fillRect(0, 0, L, D);
+  const n = 5;
+  const sh = D / n;
+  for (let k = 0; k < n; k++) {
+    const f = 1 - k / n;                         // nearer steps are lighter
+    const v0 = k * sh;
+    const inset = 2 + k * 1.2;                   // the stairwell narrows as it descends
+    c.fillStyle = `rgb(${Math.round(stone[0] * f)},${Math.round(stone[1] * f)},${Math.round(stone[2] * f)})`;
+    c.fillRect(inset, v0, L - inset * 2, sh - 1);
+    c.fillStyle = `rgba(255,235,200,${(0.22 * f).toFixed(3)})`; // worn lip
+    c.fillRect(inset, v0, L - inset * 2, 1);
+    c.fillStyle = 'rgba(0,0,0,0.55)';                           // riser shadow
+    c.fillRect(inset, v0 + sh - 2, L - inset * 2, 1);
+  }
+  const g = c.createLinearGradient(0, 0, 0, D);
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(1, 'rgba(0,0,0,0.7)');
+  c.fillStyle = g;
+  c.fillRect(0, 0, L, D);
+  // Stone side walls
+  c.fillStyle = shadeHex(th.wallEdge, 0.8);
+  c.fillRect(0, 0, 2, D);
+  c.fillRect(L - 2, 0, 2, D);
+  c.restore();
+}
+
+function paintBarredGate(c, b, axis, front, th) {
+  const L = axis === 'v' ? b.h : b.w;
+  const D = axis === 'v' ? b.w : b.h;
+  c.save();
+  applyFrontFrame(c, b, axis, front);
+  // Dark stairwell glimpsed behind the bars
+  c.fillStyle = '#040303';
+  c.fillRect(0, 0, L, D);
+  c.fillStyle = 'rgba(70,60,50,0.35)';
+  for (let k = 0; k < 3; k++) c.fillRect(3, D * 0.3 + k * D * 0.2, L - 6, 1);
+  // Stone frame
+  c.fillStyle = shadeHex(th.wallEdge, 0.9);
+  c.fillRect(0, 0, L, 3);
+  c.fillRect(0, 0, 3, D);
+  c.fillRect(L - 3, 0, 3, D);
+  // Vertical bars (across the doorway) + two cross bars
+  const bar = shadeHex(th.doorIron, 1.4);
+  for (let u = 6; u < L - 4; u += 7) {
+    c.fillStyle = bar;
+    c.fillRect(u, 2, 3, D - 3);
+    c.fillStyle = 'rgba(255,255,255,0.18)';
+    c.fillRect(u, 2, 1, D - 3);
+  }
+  c.fillStyle = shadeHex(th.doorIron, 1.1);
+  c.fillRect(3, D * 0.28, L - 6, 3);
+  c.fillRect(3, D * 0.68, L - 6, 3);
+  c.fillStyle = th.accent;
+  for (let u = 7; u < L - 4; u += 7) { c.fillRect(u, D * 0.28 + 0.5, 1.5, 1.5); c.fillRect(u, D * 0.68 + 0.5, 1.5, 1.5); }
+  c.restore();
+  // Padlock at the centre (upright)
+  const x = Math.round(b.x + b.w / 2), y = Math.round(b.y + b.h / 2);
+  c.save();
+  c.strokeStyle = '#8a8f96';
+  c.lineWidth = 2;
+  c.beginPath();
+  c.arc(x, y - 3, 4, Math.PI, 0);
+  c.stroke();
+  c.fillStyle = '#b08a2a';
+  c.fillRect(x - 5, y - 3, 10, 8);
+  c.fillStyle = '#1a1206';
+  c.fillRect(x - 1, y, 2, 3);
   c.restore();
 }
 
@@ -693,7 +1246,7 @@ function paintWallBuy(c, map, wb) {
   for (const s of sides) paintWallBuyLabel(c, wb, w, h, s, name, price);
 }
 
-function isOpenFloorCode(code) { return code === T_FLOOR || code === T_OPEN; }
+function isOpenFloorCode(code) { return code === T_FLOOR || code === T_OPEN || code === T_ARENA; }
 
 // Chalk gun outline centred on (0,0), about 34x16 px, shape by weapon class.
 function gunSilhouette(c, cls) {
@@ -729,6 +1282,7 @@ function paintWallBuyLabel(c, wb, w, h, side, name, price) {
   else if (side.dx === 1) { px = wb.x + w + gap; py = wb.y + h / 2 - plateH / 2; }
   else { px = wb.x - gap - plateW; py = wb.y + h / 2 - plateH / 2; }
   px = Math.round(px); py = Math.round(py);
+  if (labelRects) labelRects.push({ x: px, y: py, w: plateW, h: plateH });
   // Dark backing plate with a chalk border
   c.fillStyle = 'rgba(8,8,10,0.82)';
   roundRect(c, px, py, plateW, plateH, 3);
@@ -750,8 +1304,27 @@ function paintWallBuyLabel(c, wb, w, h, side, name, price) {
   c.restore();
 }
 
-function drawStaticLayer(map, view) {
-  const layer = getStaticLayer(map);
+// FIX-3 (playtest #10): label plates painted into the static layer are recorded while painting;
+// a plate the player stands on is re-blitted from the static layer over the player at 75 % so the
+// wall-buy / mega-door text stays readable. Only plates overlapping the player are touched.
+let labelRects = null;
+function drawLabelsOverPlayer(state) {
+  const p = state.player;
+  const L = staticLayer && staticLayer.labels;
+  if (!p || !L || !L.length || staticLayer.map !== state.map) return;
+  const pr = (p.radius || 14) + 6;
+  let drew = false;
+  for (let i = 0; i < L.length; i++) {
+    const b = L[i];
+    if (p.x + pr <= b.x || p.x - pr >= b.x + b.w || p.y + pr <= b.y || p.y - pr >= b.y + b.h) continue;
+    if (!drew) { ctx.save(); ctx.globalAlpha = 0.75; drew = true; }
+    ctx.drawImage(staticLayer.canvas, b.x, b.y, b.w, b.h, b.x, b.y, b.w, b.h);
+  }
+  if (drew) ctx.restore();
+}
+
+function drawStaticLayer(map, view, theme) {
+  const layer = getStaticLayer(map, theme);
   if (!layer) return;
   // Blit only the visible region, clamped to the layer bounds.
   const sx = Math.max(0, view.x), sy = Math.max(0, view.y);
@@ -936,15 +1509,18 @@ function drawZombies(state, view) {
       if (!z) continue;
       const dying = z.mode === 'dying';
       if ((pass === 0) !== dying) continue;
+      const kind = z.kind;
+      if (kind === 'boss') { if (inView(view, z.x, z.y, 140)) drawBoss(state, z, dying); continue; }
       if (!inView(view, z.x, z.y, 40)) continue;
-      const r0 = z.radius || ZOMBIE.radius;
+      const minion = kind === 'minion';
+      const r0 = z.radius || (minion ? ZOMBIE.radius * MINION_SCALE : ZOMBIE.radius);
       let alpha = 1, scale = 1;
       if (dying) {
         const f = Math.max(0, Math.min(1, (z.dyingT != null ? z.dyingT : 0) / linger));
         alpha = f; scale = 0.5 + 0.5 * f;
       }
       const r = r0 * scale;
-      const col = zombieColor(z.tier);
+      const col = minion ? minionColor(z.tier) : zombieColor(z.tier);
       if (!dying && z.stun > 0) { drawStunnedZombie(z, r, col, state.time || 0); continue; }
       const sr = stunSeen.get(z);
       if (sr) sr.last = 0; // stun over: the next stun (any z.stun > 0) replays the puff
@@ -961,8 +1537,9 @@ function drawZombies(state, view) {
         ctx.rotate(ang);
         ctx.fillStyle = shade(col, 0.8);
         const reach = z.mode === 'attacking' ? r * 1.25 : r * 0.95;
-        ctx.fillRect(r * 0.2, -r * 0.75, reach, 4);
-        ctx.fillRect(r * 0.2, r * 0.75 - 4, reach, 4);
+        const aw = minion ? 3 : 4;
+        ctx.fillRect(r * 0.2, -r * 0.75, reach, aw);
+        ctx.fillRect(r * 0.2, r * 0.75 - aw, reach, aw);
         ctx.restore();
       }
 
@@ -970,15 +1547,26 @@ function drawZombies(state, view) {
       ctx.arc(z.x, z.y, r, 0, Math.PI * 2);
       ctx.fillStyle = dying ? shade(col, 0.6) : col;
       ctx.fill();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = shade(col, 0.45);
+      if (minion) {
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = dying ? shade(MINION_OUTLINE, 0.5) : MINION_OUTLINE;
+      } else {
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = shade(col, 0.45);
+      }
       ctx.stroke();
 
       if (!dying) {
         // Eyes
         const ex = Math.cos(ang), ey = Math.sin(ang);
         const px = -ey, py = ex;
-        ctx.fillStyle = z.tier === 'sprint' ? '#ffb040' : '#e0e070';
+        if (minion) {  // eye glow
+          ctx.fillStyle = 'rgba(255,50,20,0.35)';
+          for (let s = -1; s <= 1; s += 2) {
+            ctx.fillRect(z.x + ex * r * 0.45 + px * s * r * 0.35 - 3, z.y + ey * r * 0.45 + py * s * r * 0.35 - 3, 6, 6);
+          }
+        }
+        ctx.fillStyle = minion ? '#ff3a1a' : z.tier === 'sprint' ? '#ffb040' : '#e0e070';
         for (let s = -1; s <= 1; s += 2) {
           ctx.fillRect(z.x + ex * r * 0.45 + px * s * r * 0.35 - 1.5, z.y + ey * r * 0.45 + py * s * r * 0.35 - 1.5, 3, 3);
         }
@@ -994,6 +1582,399 @@ function drawZombies(state, view) {
       ctx.globalAlpha = 1;
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// WO5 3.6: boss, minions, torches, boss death pool, ambient tint, level transition
+// ---------------------------------------------------------------------------
+
+// Minions (FIX-3, playtest #8): their own near-black purple palette whatever the theme or tier
+// (tan level-2 zombies no longer look alike), a thin red outline and glowing red eyes.
+const MINION_BODY = { walk: '#2c1236', jog: '#301339', sprint: '#35143e' };
+const MINION_OUTLINE = '#d02a1c';
+function minionColor(tier) {
+  return MINION_BODY[tier] || MINION_BODY.walk;
+}
+
+const BOSS_BODY = shadeHex(COLORS.zombieWalk, 0.72);
+function bossTint(state) {
+  const b = state.level && state.level.def && state.level.def.boss;
+  const t = b && typeof b.tint === 'string' && hexRgb(b.tint) ? b.tint : '#7a1f1f';
+  return t;
+}
+
+// Boss: a zombie at 2.4x (its radius is BOSS.radius = 34) with thick clawed arms, pauldrons and a
+// spiked rusted crown/helmet in the level's boss tint, glowing red eyes. Charge phases: white
+// pulsing flash + warning ring on 'telegraph', ghost trail + speed lines on 'dash', circling
+// stars on 'recover'. Dying (BOSS.deathLinger, 2 s): darkens, slumps and fades.
+function drawBoss(state, z, dying) {
+  const t = state.time || 0;
+  const tint = bossTint(state);
+  const R0 = z.radius || ZOMBIE.radius * BOSS_SCALE;
+  const linger = CFG.BOSS && CFG.BOSS.deathLinger > 0 ? CFG.BOSS.deathLinger : 2;
+  let alpha = 1, scale = 1;
+  if (dying) {
+    const f = Math.max(0, Math.min(1, (z.dyingT != null ? z.dyingT : 0) / linger));
+    alpha = 0.15 + 0.85 * f; scale = 0.8 + 0.2 * f;
+  }
+  const r = R0 * scale;
+  const ch = !dying && z.charge ? z.charge : null;
+  const phase = ch ? ch.phase : null;
+  // Facing: the dash direction while charging, else velocity, else toward the player.
+  let dx = 0, dy = 0;
+  if ((phase === 'dash' || phase === 'telegraph') && Number.isFinite(ch.dx) && Number.isFinite(ch.dy) && (ch.dx || ch.dy)) { dx = ch.dx; dy = ch.dy; }
+  else { dx = z.vx || 0; dy = z.vy || 0; }
+  if (Math.abs(dx) + Math.abs(dy) < 1e-3 && state.player) { dx = state.player.x - z.x; dy = state.player.y - z.y; }
+  const ang = Math.atan2(dy, dx || 1e-6);
+  const ex = Math.cos(ang), ey = Math.sin(ang);
+
+  ctx.save();
+  if (phase === 'telegraph') drawChargeLane(state, z, r, ex, ey, t);
+  // Dash motion streak (behind the body)
+  if (phase === 'dash') {
+    ctx.fillStyle = tint;
+    for (let k = 4; k >= 1; k--) {
+      ctx.globalAlpha = 0.22 / k;
+      ctx.beginPath();
+      ctx.arc(z.x - ex * r * 0.75 * k, z.y - ey * r * 0.75 * k, r * (1 - 0.07 * k), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 0.5;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let k = 0; k < 6; k++) {
+      const s = (k / 5 - 0.5) * 1.6 * r;
+      const len = r * (1.6 + hash(k * 7.7 + Math.floor(t * 20)) * 1.4);
+      const bx = z.x - ex * r * 0.5 - ey * s, by = z.y - ey * r * 0.5 + ex * s;
+      ctx.moveTo(bx, by);
+      ctx.lineTo(bx - ex * len, by - ey * len);
+    }
+    ctx.stroke();
+  }
+  // Ground shadow
+  ctx.globalAlpha = 0.35 * alpha;
+  ctx.fillStyle = '#000000';
+  ctx.beginPath();
+  ctx.ellipse(z.x + 4, z.y + 6, r * 1.05, r * 0.9, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.globalAlpha = alpha;
+  ctx.translate(z.x, z.y);
+  ctx.rotate(ang);
+  const body = dying ? shadeHex(BOSS_BODY, 0.6) : BOSS_BODY;
+  if (!dying) {
+    // Arms with claws (reach further while attacking / dashing)
+    const reach = z.mode === 'attacking' || phase === 'dash' ? r * 1.3 : r * 1.0;
+    const aw = r * 0.24;
+    ctx.fillStyle = shadeHex(BOSS_BODY, 0.8);
+    for (let s = -1; s <= 1; s += 2) {
+      const ay = s * r * 0.72;
+      ctx.fillRect(r * 0.3, ay - aw / 2, reach, aw);
+      ctx.fillStyle = '#d8d0b8';
+      for (let c = -1; c <= 1; c++) {
+        ctx.beginPath();
+        ctx.moveTo(r * 0.3 + reach, ay + c * aw * 0.35 - 2);
+        ctx.lineTo(r * 0.3 + reach + r * 0.2, ay + c * aw * 0.45);
+        ctx.lineTo(r * 0.3 + reach, ay + c * aw * 0.35 + 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = shadeHex(BOSS_BODY, 0.8);
+    }
+  }
+  // Body
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fillStyle = body;
+  ctx.fill();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = shadeHex(BOSS_BODY, 0.4);
+  ctx.stroke();
+  // Pauldrons (tint)
+  ctx.fillStyle = shadeHex(tint, 0.85);
+  ctx.strokeStyle = shadeHex(tint, 0.45);
+  ctx.lineWidth = 2;
+  for (let s = -1; s <= 1; s += 2) {
+    ctx.beginPath();
+    ctx.ellipse(-r * 0.12, s * r * 0.62, r * 0.36, r * 0.26, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+  // Crown / helmet: rusted ring in the boss tint with spikes and rivets
+  const hr = r * 0.5;
+  ctx.fillStyle = shadeHex(tint, 0.55);
+  ctx.beginPath();
+  ctx.arc(-r * 0.08, 0, hr, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = tint;
+  for (let k = 0; k < 7; k++) {
+    const a = (k / 7) * Math.PI * 2 + Math.PI / 7;
+    const tip = hr + r * 0.26, base = hr * 0.9;
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.08 + Math.cos(a - 0.22) * base, Math.sin(a - 0.22) * base);
+    ctx.lineTo(-r * 0.08 + Math.cos(a) * tip, Math.sin(a) * tip);
+    ctx.lineTo(-r * 0.08 + Math.cos(a + 0.22) * base, Math.sin(a + 0.22) * base);
+    ctx.fill();
+  }
+  ctx.lineWidth = Math.max(3, r * 0.14);
+  ctx.strokeStyle = tint;
+  ctx.beginPath();
+  ctx.arc(-r * 0.08, 0, hr, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(140,70,30,0.55)'; // rust
+  ctx.fillRect(-r * 0.08 - hr * 0.7, -hr * 0.2, r * 0.12, r * 0.08);
+  ctx.fillStyle = '#e0c89a';
+  for (let k = 0; k < 7; k++) {
+    const a = (k / 7) * Math.PI * 2;
+    ctx.fillRect(-r * 0.08 + Math.cos(a) * hr - 1.5, Math.sin(a) * hr - 1.5, 3, 3);
+  }
+  if (!dying) {
+    // Glowing red eyes (front of the head)
+    for (let s = -1; s <= 1; s += 2) {
+      ctx.fillStyle = 'rgba(255,40,20,0.35)';
+      ctx.beginPath();
+      ctx.arc(r * 0.6, s * r * 0.26, r * 0.16, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ff2a1a';
+      ctx.fillRect(r * 0.6 - 3, s * r * 0.26 - 3, 6, 6);
+      ctx.fillStyle = '#ffd0c0';
+      ctx.fillRect(r * 0.6 - 1, s * r * 0.26 - 1, 2, 2);
+    }
+  }
+  // Telegraph: pulsing white flash over the body + a bright red outline (FIX-3, playtest #7)
+  if (phase === 'telegraph') {
+    const pulse = 0.5 + 0.5 * Math.sin(t * 40);
+    ctx.globalAlpha = alpha * (0.45 + 0.3 * pulse);
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(0, 0, r + 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = alpha * (0.7 + 0.3 * pulse);
+    ctx.strokeStyle = pulse > 0.5 ? '#ff4030' : '#ffd0c8';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(0, 0, r + 4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  if (z.hitFlash > 0) {
+    ctx.globalAlpha = alpha * 0.6 * Math.min(1, z.hitFlash / 0.08);
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+
+  if (phase === 'telegraph') {
+    // Expanding warning ring
+    const f = (t * 2.5) % 1;
+    ctx.save();
+    ctx.globalAlpha = 0.85 * (1 - f);
+    ctx.strokeStyle = '#ff4030';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(z.x, z.y, r * (1.1 + f * 0.9), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  } else if (phase === 'recover') {
+    // Dazed after hitting a wall: little stars circling the head
+    ctx.save();
+    ctx.fillStyle = '#ffe070';
+    for (let k = 0; k < 3; k++) {
+      const a = t * 6 + k * 2.094;
+      ctx.fillRect(z.x + Math.cos(a) * r * 0.7 - 2, z.y - r * 0.2 + Math.sin(a) * r * 0.35 - 2, 4, 4);
+    }
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// FIX-3 (playtest #7): charge warning lane. During the telegraph a pulsing translucent red lane,
+// boss-wide, runs from the boss toward the charge direction (charge.dx/dy once set, else the
+// player, which is where zombie.js aims when the telegraph ends), with chevrons sweeping outward.
+// Length = the dash reach (speed x chargeSpeedMult x chargeMaxTime), cut short at the first
+// solid tile (sampled every 16 px). Called inside drawBoss's save/restore, world space.
+function drawChargeLane(state, z, r, ex, ey, t) {
+  const B = CFG.BOSS || {};
+  const reach = Math.min(700, Math.max(160, (z.speed || B.speed || 90) * (B.chargeSpeedMult || 3.5) * (B.chargeMaxTime || 1.1)));
+  const map = state.map;
+  let len = reach;
+  if (map && map.tiles) {
+    for (let d = r; d <= reach; d += 16) {
+      const code = tileAt(map, Math.floor((z.x + ex * d) / TILE), Math.floor((z.y + ey * d) / TILE));
+      if (code !== T_FLOOR && code !== T_OPEN && code !== T_ARENA && code !== T_POCKET) { len = Math.max(r, d - 8); break; }
+    }
+  }
+  const tel = B.chargeTelegraph > 0 ? B.chargeTelegraph : 0.6;
+  const prog = z.charge && z.charge.t > 0 ? Math.min(1, z.charge.t / tel) : 0;
+  const pulse = 0.5 + 0.5 * Math.sin(t * 18);
+  const hw = r * 0.95;
+  ctx.save();
+  ctx.translate(z.x, z.y);
+  ctx.rotate(Math.atan2(ey, ex));
+  ctx.globalAlpha = 0.16 + 0.14 * pulse + 0.12 * prog;
+  ctx.fillStyle = '#ff2a1a';
+  ctx.fillRect(r * 0.6, -hw, len - r * 0.6, hw * 2);
+  ctx.globalAlpha = 0.55 + 0.35 * pulse;
+  ctx.fillStyle = '#ff4030';
+  ctx.fillRect(r * 0.6, -hw, len - r * 0.6, 2);
+  ctx.fillRect(r * 0.6, hw - 2, len - r * 0.6, 2);
+  // Chevrons sweeping toward the target
+  ctx.strokeStyle = '#ffb0a0';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  const sp = 46, off = (t * 160) % sp;
+  for (let u = r + off; u < len - 12; u += sp) {
+    ctx.moveTo(u, -hw * 0.55); ctx.lineTo(u + 14, 0); ctx.lineTo(u, hw * 0.55);
+  }
+  ctx.globalAlpha = 0.45 + 0.4 * prog;
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Torch flames on the wall tiles picked by findTorches (theme.torch). Drawn every frame (not in
+// the static layer): an additive amber glow sprite plus a flame, both flickering with wall time
+// through a sum of sines per torch (seeded from the tile index).
+let torchGlow = null;
+function getTorchGlow() {
+  if (torchGlow || typeof document === 'undefined') return torchGlow;
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  grad.addColorStop(0, 'rgba(255,170,70,0.9)');
+  grad.addColorStop(0.25, 'rgba(255,130,40,0.45)');
+  grad.addColorStop(0.6, 'rgba(200,80,20,0.12)');
+  grad.addColorStop(1, 'rgba(160,50,10,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  torchGlow = c;
+  return c;
+}
+
+function drawTorches(view, now) {
+  const list = staticLayer && staticLayer.torches;
+  if (!list || !list.length) return;
+  const glow = getTorchGlow();
+  ctx.save();
+  for (let i = 0; i < list.length; i++) {
+    const tc = list[i];
+    if (!inView(view, tc.x, tc.y, 70)) continue;
+    const sd = tc.seed;
+    const fl = 0.8 + 0.1 * Math.sin(now * 9.1 + sd) + 0.07 * Math.sin(now * 23.3 + sd * 1.7) +
+      0.05 * (hash(Math.floor(now * 14) + sd) - 0.5);
+    if (glow) {
+      const sz = 120 * (0.9 + fl * 0.2);
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.34 * fl;
+      ctx.drawImage(glow, tc.x + tc.dx * 8 - sz / 2, tc.y + tc.dy * 8 - sz / 2, sz, sz);
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    // Iron bracket
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#1b1410';
+    ctx.fillRect(tc.x - 3, tc.y - 3, 6, 6);
+    // Flame, leaning out of the wall
+    const fx = tc.x + tc.dx * 3, fy = tc.y + tc.dy * 3 - 1;
+    ctx.fillStyle = '#ff8a1e';
+    ctx.beginPath();
+    ctx.arc(fx, fy, 3.2 + fl * 1.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffe27a';
+    ctx.beginPath();
+    ctx.arc(fx + tc.dx, fy + tc.dy - 0.5, 1.4 + fl, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// Boss death shock ring ('bossDeath' effect, BOSS_RING_TTL): red-white ring over the first 0.6 s.
+function drawBossDeath(e, view) {
+  if (!Number.isFinite(e.x) || !Number.isFinite(e.y)) return;
+  const R = e.r > 0 ? e.r : 70;
+  if (!inView(view, e.x, e.y, R * 2.1)) return;
+  const age = e.maxTtl - e.ttl;
+  if (age >= 0.6) return;
+  const f = age / 0.6;
+  ctx.save();
+  ctx.globalAlpha = 1 - f;
+  ctx.lineWidth = 6 * (1 - f) + 1;
+  ctx.strokeStyle = f < 0.3 ? '#ffffff' : '#ff5040';
+  ctx.beginPath();
+  ctx.arc(e.x, e.y, R * (0.4 + f * 1.6), 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Boss blood pool: zombie.js's boss 'blood' effect (radius 44, boss:true) drawn as a large, lobed
+// pool that spreads over ~1.2 s and fades in its last 3 s.
+function drawBossPool(e, view) {
+  const R = (e.radius > 0 ? e.radius : 44) * 1.6;
+  if (!inView(view, e.x, e.y, R * 1.3)) return;
+  const age = e.maxTtl - e.ttl;
+  const g0 = Math.min(1, age / 1.2);
+  const grow = 1 - (1 - g0) * (1 - g0);
+  const fade = Math.min(1, e.ttl / 3);
+  const seed = Math.floor(e.x * 3.1 + e.y * 7.3);
+  ctx.save();
+  ctx.globalAlpha = 0.9 * fade;
+  ctx.fillStyle = '#4a0505';
+  ctx.beginPath();
+  ctx.arc(e.x, e.y, R * 0.55 * grow, 0, Math.PI * 2);
+  for (let k = 0; k < 11; k++) {
+    const a = hash(seed + k * 13) * Math.PI * 2;
+    const d = R * (0.3 + hash(seed + k * 29) * 0.3) * grow;
+    const rr = R * (0.16 + hash(seed + k * 41) * 0.18) * grow;
+    const x = e.x + Math.cos(a) * d, y = e.y + Math.sin(a) * d;
+    ctx.moveTo(x + rr, y);
+    ctx.arc(x, y, rr, 0, Math.PI * 2);
+  }
+  ctx.fill();
+  ctx.fillStyle = COLORS.blood;
+  ctx.globalAlpha = 0.75 * fade;
+  ctx.beginPath();
+  ctx.arc(e.x - R * 0.06, e.y - R * 0.05, R * 0.38 * grow, 0, Math.PI * 2);
+  for (let k = 0; k < 14; k++) {  // satellite drops
+    const a = hash(seed + k * 53) * Math.PI * 2;
+    const d = R * (0.75 + hash(seed + k * 61) * 0.45) * grow;
+    const rr = 2 + hash(seed + k * 67) * 4;
+    const x = e.x + Math.cos(a) * d, y = e.y + Math.sin(a) * d;
+    ctx.moveTo(x + rr, y);
+    ctx.arc(x, y, rr, 0, Math.PI * 2);
+  }
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,200,200,0.12)';  // wet highlight
+  ctx.globalAlpha = fade;
+  ctx.beginPath();
+  ctx.ellipse(e.x - R * 0.15, e.y - R * 0.15, R * 0.14 * grow, R * 0.07 * grow, -0.6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// theme.ambient: flat full-screen tint (null / '' = none, e.g. level 1).
+function drawAmbient(theme, W, H) {
+  if (!theme || !theme.ambient) return;
+  ctx.fillStyle = theme.ambient;
+  ctx.fillRect(0, 0, W, H);
+}
+
+// Level transition (level.js 3.3): black overlay, alpha 0 -> 1 at t = dur/2 (the level swap),
+// then 1 -> 0 at t = dur.
+function transitionAlpha(tr) {
+  if (!tr) return 0;
+  const dur = tr.dur > 0 ? tr.dur : ((CFG.LEVELS_CFG && CFG.LEVELS_CFG.fadeSeconds) || 1.2);
+  const t = Number.isFinite(tr.t) ? tr.t : 0;
+  const h = dur / 2;
+  const a = t < h ? t / h : 1 - (t - h) / h;
+  return a < 0 ? 0 : a > 1 ? 1 : a;
+}
+function drawTransition(state, W, H) {
+  const a = transitionAlpha(state.transition);
+  if (a <= 0) return;
+  ctx.globalAlpha = a;
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = 1;
 }
 
 // Knocked-back zombies (Thundergun): flattened along the knock direction, plus a dust puff that
@@ -1594,6 +2575,7 @@ function drawEffectsOfType(state, type, view) {
       case 'explosion': drawExplosion(e, view); break;
       case 'shockwave': drawShockwave(e, view); break;
       case 'doorOpen': drawDoorOpen(e, view); break;
+      case 'bossDeath': drawBossDeath(e, view); break;
       case 'text': drawText(e, view); break;
       default: break;
     }
@@ -1601,7 +2583,9 @@ function drawEffectsOfType(state, type, view) {
 }
 
 function drawBlood(e, view, i) {
-  if (!Number.isFinite(e.x) || !Number.isFinite(e.y) || !inView(view, e.x, e.y, 30)) return;
+  if (!Number.isFinite(e.x) || !Number.isFinite(e.y)) return;
+  if (e.boss) { drawBossPool(e, view); return; }
+  if (!inView(view, e.x, e.y, 30)) return;
   const f = lifeFrac(e);
   const seed = (e.seed != null ? e.seed : Math.floor(e.x * 7.31 + e.y * 3.17));
   // zombie.js sets radius (7 hit / 18 death) and big (death decal). Integrator: honor both.
@@ -1812,8 +2796,16 @@ function drawDoorOpen(e, view) {
   ctx.restore();
 }
 
+// FIX-3 (playtest #6): once the mega door is sealed its "MEGA DOOR OPENED" text is dropped, so it
+// never shows through the red SEALED plates. render() sets sealedMegaBox each frame.
+let sealedMegaBox = null;
+const MEGA_OPENED_TEXT = 'MEGA DOOR OPENED';
 function drawText(e, view) {
   if (!Number.isFinite(e.x) || !Number.isFinite(e.y) || !inView(view, e.x, e.y, 60)) return;
+  if (sealedMegaBox && e.text === MEGA_OPENED_TEXT) {
+    const b = sealedMegaBox, m = 90;
+    if (e.x > b.x - m && e.x < b.x + b.w + m && e.y > b.y - m && e.y < b.y + b.h + m) { e.ttl = 0; return; }
+  }
   const f = lifeFrac(e);
   const y = e.y - TEXT_RISE * (1 - f);
   ctx.save();

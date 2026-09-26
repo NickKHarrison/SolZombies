@@ -1,7 +1,7 @@
 // weapons.js (Agent C) — weapon definitions, firing (hitscan + ray gun projectiles),
 // reload, ammo refills. Pure logic: no DOM access. See WORK_ORDER.md 5.4 and docs/notes/weapons.md.
 
-import { PRICES, COLORS, FIXED_DT_CAP, WEAPON_FX, SHOP } from './config.js';
+import { PRICES, COLORS, FIXED_DT_CAP, WEAPON_FX, SHOP, BOSS, ZOMBIE } from './config.js';
 import { emit } from './events.js';
 import { rayCircle, dist, nextId } from './math.js';
 import { raycastWalls } from './map.js';
@@ -34,6 +34,7 @@ function def(o) {
     cone: null,
     cost: null,
     noReload: false,
+    tier: 1,          // WO5: 2 = level-2 wall gun (box weight stays boxOnly)
     ...o,
   });
 }
@@ -55,10 +56,21 @@ export const WEAPONS = Object.freeze({
   icr1:       def({ id: 'icr1',       name: 'ICR-1',        cls: 'ar',      cost: 150,  damage: 66,   rpm: 700,  auto: true,  mag: 30,  reserve: 240, reloadTime: 2.1, spread: 0.035 }),
   argus:      def({ id: 'argus',      name: 'Argus',        cls: 'shotgun', cost: 150,  damage: 45,   rpm: 90,   auto: false, mag: 6,   reserve: 36,  reloadTime: 2.8, spread: 0.12, pellets: 6, range: 900 }),
   locus:      def({ id: 'locus',      name: 'Locus',        cls: 'sniper',  cost: null, damage: 400,  rpm: 50,   auto: false, mag: 6,   reserve: 48,  reloadTime: 2.8, spread: 0.004, penetration: 4, range: 2400 }),
-  drakon:     def({ id: 'drakon',     name: 'Drakon',       cls: 'sniper',  cost: null, damage: 220,  rpm: 200,  auto: false, mag: 10,  reserve: 60,  reloadTime: 2.5, spread: 0.008, penetration: 3, range: 2400 }),
-  haymaker12: def({ id: 'haymaker12', name: 'Haymaker 12',  cls: 'shotgun', cost: null, damage: 25,   rpm: 300,  auto: true,  mag: 16,  reserve: 64,  reloadTime: 3.0, spread: 0.2, pellets: 8, range: 700 }),
+  // WO5 3.4: drakon + haymaker12 gain a (level-2) wall price; tier 2 keeps their box weight at boxOnly.
+  drakon:     def({ id: 'drakon',     name: 'Drakon',       cls: 'sniper',  cost: 300,  tier: 2, damage: 380,  rpm: 200,  auto: false, mag: 10,  reserve: 60,  reloadTime: 2.5, spread: 0.008, penetration: 3, range: 2400 }),
+  haymaker12: def({ id: 'haymaker12', name: 'Haymaker 12',  cls: 'shotgun', cost: 250,  tier: 2, damage: 32,   rpm: 330,  auto: true,  mag: 16,  reserve: 64,  reloadTime: 3.0, spread: 0.2, pellets: 8, range: 700 }),
   dingo:      def({ id: 'dingo',      name: 'Dingo',        cls: 'lmg',     cost: null, damage: 60,   rpm: 800,  auto: true,  mag: 100, reserve: 300, reloadTime: 4.5, spread: 0.07 }),
   brm:        def({ id: 'brm',        name: 'BRM',          cls: 'lmg',     cost: null, damage: 75,   rpm: 650,  auto: true,  mag: 75,  reserve: 300, reloadTime: 4.2, spread: 0.06 }),
+  // WO5 3.4 (Agent D): level-2 wall guns (cost = level-2 wall price), also in the box at boxOnly weight.
+  // WO5 FIX-4 (playtest #2, balance #12): tier-2 stats retuned so every level-2 gun kills a level-2
+  // round-8 zombie in <= 0.85x the KN-44's time and price tracks power (Gorgon/Drakon strongest).
+  // tests/weapons.test.js "tier-2 TTK" pins this; see docs/notes/weapons.md for the table.
+  manowar:    def({ id: 'manowar',    name: 'Man-O-War',    cls: 'ar',      sprite: 'manowar',   cost: 250, tier: 2, damage: 140, rpm: 520, auto: true,  mag: 25, reserve: 200, reloadTime: 2.6, spread: 0.035, penetration: 2 }),
+  xr2:        def({ id: 'xr2',        name: 'XR-2',         cls: 'ar',      sprite: 'xr2',       cost: 225, tier: 2, damage: 80,  rpm: 800, auto: true,  mag: 30, reserve: 270, reloadTime: 2.1, spread: 0.02 }),
+  weevil:     def({ id: 'weevil',     name: 'Weevil',       cls: 'smg',     sprite: 'weevil',    cost: 200, tier: 2, damage: 65,  rpm: 950, auto: true,  mag: 48, reserve: 288, reloadTime: 2.0, spread: 0.06 }),
+  marshal16:  def({ id: 'marshal16',  name: 'Marshal 16',   cls: 'shotgun', sprite: 'marshal16', cost: 225, tier: 2, damage: 100, rpm: 150, auto: false, mag: 2,  reserve: 40,  reloadTime: 1.5, spread: 0.16, pellets: 8, range: 650 }),
+  gorgon:     def({ id: 'gorgon',     name: 'Gorgon',       cls: 'lmg',     sprite: 'gorgon',    cost: 300, tier: 2, damage: 175, rpm: 480, auto: true,  mag: 48, reserve: 240, reloadTime: 4.0, spread: 0.05, penetration: 3 }),
+  dredge48:   def({ id: 'dredge48',   name: '48 Dredge',    cls: 'lmg',     sprite: 'dredge48',  cost: 275, tier: 2, damage: 85,  rpm: 900, auto: true,  mag: 48, reserve: 288, reloadTime: 3.6, spread: 0.07 }),
   raygun:     def({ id: 'raygun',     name: 'Ray Gun',      cls: 'special', sprite: 'raygun', cost: null, damage: 1000, rpm: 180,  auto: false, mag: 20,  reserve: 160, reloadTime: 3.0, spread: 0.01,
                     projectile: Object.freeze({ speed: 900, splashRadius: 90, splashDamage: 300 }) }),
   thundergun: def({ id: 'thundergun', name: 'Thundergun', cls: 'special', sprite: 'thundergun', cost: null,
@@ -78,11 +90,20 @@ export const BOX_WEAPON_IDS = Object.freeze(
 // WO2 3.9: wonder weapons share the lowest box weight (SHOP.boxWeights.wonder).
 export const WONDER_WEAPON_IDS = Object.freeze(['raygun', 'thundergun']);
 
+// WO5 3.4: wall guns whose box weight is SHOP.boxWeights.wall (3) = the level-1 (WO4) wall guns.
+// Level-2 wall guns (def.tier === 2: the six new guns + haymaker12 + drakon) have a cost but keep
+// the boxOnly weight (2), so adding them does not change the relative odds of the WO4 box guns.
+// shop.boxWeights(boxIds, wallIds) should default wallIds to this list to stay consistent.
+export const BOX_WALL_WEIGHT_IDS = Object.freeze(
+  WALL_WEAPON_IDS.filter((id) => WEAPONS[id].tier !== 2),
+);
+
 // Extra export (not in contract 3.6): mystery box weights, for shop.js.
-// 3 for wall guns, 2 for box-only guns, 1 for wonder weapons. Use with state.rng.weighted(BOX_WEIGHTS).
+// 3 for level-1 wall guns, 2 for box-only and level-2 guns, 1 for wonder weapons.
+// Use with state.rng.weighted(BOX_WEIGHTS).
 export const BOX_WEIGHTS = Object.freeze(Object.fromEntries(BOX_WEAPON_IDS.map((id) => [
   id, WONDER_WEAPON_IDS.includes(id) ? SHOP.boxWeights.wonder
-    : (typeof WEAPONS[id].cost === 'number' ? SHOP.boxWeights.wall : SHOP.boxWeights.boxOnly),
+    : (BOX_WALL_WEIGHT_IDS.includes(id) ? SHOP.boxWeights.wall : SHOP.boxWeights.boxOnly),
 ])));
 
 // ---------------------------------------------------------------------------
@@ -96,6 +117,9 @@ const DEFAULT_DEPS = Object.freeze({
   damagePlayer: (...a) => damagePlayer(...a),
   // zombie.applyKnockback (WO2 3.10) is looked up lazily so this module works before it exists.
   applyKnockback: (...a) => (typeof zombieMod.applyKnockback === 'function' ? zombieMod.applyKnockback(...a) : undefined),
+  // WO5 (integrator): exact px displacement (boss Thundergun push). null result = not available,
+  // thunderBoss then falls back to applyKnockback + bossKnock.
+  pushZombie: (...a) => (typeof zombieMod.pushZombie === 'function' ? zombieMod.pushZombie(...a) : null),
 });
 let deps = { ...DEFAULT_DEPS };
 
@@ -154,10 +178,17 @@ export function refillAll(w) {
   w.reloadT = 0;
 }
 
+const TIER2_AMMO_MULT = 0.3;
+
 export function ammoCost(id) {
   const d = WEAPONS[id];
   if (!d || typeof d.cost !== 'number') return Infinity; // not sold on walls: never affordable
-  return Math.round(d.cost * PRICES.wallAmmoMult);
+  // WO5 balance #10: level-2 (tier 2) wall ammo is 0.3x the gun price (level-2 zombies have 1.5x
+  // health but still pay 10 per kill); tier-1 guns keep PRICES.wallAmmoMult (0.5).
+  const mult = d.tier === 2
+    ? (typeof PRICES.wallAmmoMultTier2 === 'number' ? PRICES.wallAmmoMultTier2 : TIER2_AMMO_MULT)
+    : PRICES.wallAmmoMult;
+  return Math.round(d.cost * mult);
 }
 
 // ---------------------------------------------------------------------------
@@ -227,6 +258,10 @@ function fireCone(state, cone, ox, oy, angle) {
     if (d > cone.range) continue;
     if (d > 1e-6 && Math.abs(angleDiff(Math.atan2(zy, zx), angle)) > cone.halfAngle) continue;
     if (!splashVisible(state, ox, oy, z.x, z.y, z.radius)) continue; // wall / boards in the way
+    if (z.kind === 'boss') {
+      if (thunderBoss(state, z, zx, zy, d, d <= cone.killRange)) affected = true;
+      continue;
+    }
     if (d <= cone.killRange) {
       deps.damageZombie(state, z, Infinity, 'weapon', z.x, z.y);
       affected = true;
@@ -240,6 +275,41 @@ function fireCone(state, cone, ox, oy, angle) {
   pushEffect(state, { type: 'shockwave', x: ox, y: oy, angle, range: cone.range, halfAngle: cone.halfAngle,
     ttl: SHOCKWAVE_TTL, maxTtl: SHOCKWAVE_TTL });
   pushEffect(state, { type: 'shake', ttl: THUNDERGUN_SHAKE.ttl, maxTtl: THUNDERGUN_SHAKE.ttl, magnitude: THUNDERGUN_SHAKE.magnitude });
+  return affected;
+}
+
+// WO5 1.2: knock speed + stun for a slide of `px` pixels under zombie.js's stun physics (velocity
+// decays by exp(-knockFriction*t) and stops below stunMinSpeed, so distance = (v0 - min)/k and the
+// slide lasts ln(v0/min)/k). The stun equals the slide time, i.e. no stun beyond the push itself;
+// zombie.applyKnockback ignores the stun for the boss anyway (3.2) but rejects stun <= 0.
+export function bossKnock(px) {
+  const k = ZOMBIE.knockFriction, vMin = ZOMBIE.stunMinSpeed;
+  if (!(px > 0)) return { speed: 0, stun: 0 };
+  if (!(k > 0)) return { speed: px, stun: 1 };
+  const speed = px * k + vMin;
+  return { speed, stun: vMin > 0 ? Math.log(speed / vMin) / k : 1 };
+}
+
+// Thundergun vs boss (WO5 1.2): near cone (within killRange) deals BOSS.thunderNearFrac of the
+// boss's max HP and knocks it back BOSS.thunderNearKnock px; far cone only knocks it back
+// BOSS.thunderFarKnock px. Never an instant kill, no real stun. Returns true if anything applied.
+function thunderBoss(state, z, zx, zy, d, near) {
+  let affected = false;
+  if (near) {
+    const maxHp = Number.isFinite(z.maxHp) && z.maxHp > 0 ? z.maxHp
+      : (state.boss && Number.isFinite(state.boss.maxHp) && state.boss.maxHp > 0 ? state.boss.maxHp : z.hp);
+    deps.damageZombie(state, z, maxHp * BOSS.thunderNearFrac, 'weapon', z.x, z.y);
+    affected = true;
+    if (!isAlive(z)) return true;
+  }
+  const px = near ? BOSS.thunderNearKnock : BOSS.thunderFarKnock;
+  const ux = d > 1e-6 ? zx / d : 1, uy = d > 1e-6 ? zy / d : 0;
+  // Integrator: prefer zombie.pushZombie (exact 60 / 40 px). zombie.applyKnockback on the boss
+  // moves min(|v|/k, 60) px, which would give ~40 + stunMinSpeed/k for the far cone.
+  const pushed = deps.pushZombie(state, z, ux * px, uy * px);
+  if (pushed != null) { if (pushed !== false) affected = true; return affected; }
+  const kb = bossKnock(px);
+  if (deps.applyKnockback(state, z, ux * kb.speed, uy * kb.speed, kb.stun) !== false) affected = true;
   return affected;
 }
 

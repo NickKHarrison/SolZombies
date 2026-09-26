@@ -1,8 +1,10 @@
 // map.js (Agent H) — tile map, collision, raycasts, barricades, interactables.
-// Pure logic: no DOM access. Imports only config, events, math.
-import { TILE, MAP } from './config.js';
+// Pure logic: no DOM access. Imports config, events, math and the level registry (WO5).
+import { TILE, MAP, DOORS } from './config.js';
 import { emit } from './events.js';
 import { clamp, dist } from './math.js';
+import { LEVELS } from './levels/levels.js';
+import { LEVEL1 } from './levels/level1.js';
 
 // Tile codes (read directly by pathfinding.js and render.js; keep stable).
 export const TILE_FLOOR = 0;
@@ -13,19 +15,21 @@ export const TILE_BOX = 4;
 export const TILE_WALLBUY = 5;
 export const TILE_OPEN_SPAWN = 6;
 export const TILE_DOOR = 7; // closed buyable door; opening sets its tiles to TILE_FLOOR
+// WO5. TILE_ARENA_SPAWN is kept for reference only: 'X' tiles are stored as TILE_FLOOR (their
+// positions live in map.arenaSpawns) so pathfinding.js, which walks only 0/2/3/6, needs no change.
+export const TILE_ARENA_SPAWN = 8;
+export const TILE_STAIRS = 9; // closed staircase ('T'): blocks like a wall; openStairs -> TILE_FLOOR
 
 // Boards per barricade.
 const MAX_BOARDS = MAP.maxBoards; // config.js (moved by integrator)
 
-export const WALLBUY_MAP = {
-  1: 'sheiva', 2: 'rk5', 3: 'krm262', 4: 'kuda', 5: 'vmp', 6: 'vesper', 7: 'kn44', 8: 'hvk30',
-  9: 'argus', a: 'lcar9', b: 'pharo', c: 'icr1', d: 'bootlegger',
-};
+// Legacy exports (= level 1 data from the registry).
+export const WALLBUY_MAP = LEVEL1.wallbuys;
 
 // Buyable doors: ASCII letter -> cost (BO3 prices / 10). Door ids follow this key order.
 export const DOOR_MAP = { D: 75, E: 100, F: 100, G: 125, H: 150 };
 
-// 60 x 40 (WO4 layout, see docs/notes/map.md). Zones, in the order a player opens them:
+// Level 1 is 60 x 40 (WO4 layout + WO5 arena; data in src/levels/level1.js, see docs/notes/map.md). Zones, in the order a player opens them:
 //   Hub (start, rows 15-26, cols 21-36): Sheiva on the north wall, 2 windows, doors D (north)
 //     and E (west).
 //   D -> Corridor: stub north of the hub, north hall (rows 3-6) and east hall (cols 42-56);
@@ -34,62 +38,47 @@ export const DOOR_MAP = { D: 75, E: 100, F: 100, G: 125, H: 150 };
 //   F (from the corridor's west end) -> Bunker (north-west): VMP + HVK-30, 1 window.
 //   G (from the courtyard) -> Armory (south): KN-44 + Argus + mystery box, 1 window + 1 open spawn.
 //   H (from the armory, deepest) -> Vault (south-east): ICR-1, 1 window.
-export const MAP_ASCII = [
-  '############################################################',
-  '########S###########################S#######################',
-  '########W#####################2#####W#######################',
-  '###...............F......................................###',
-  '###...............F..............##......................###',
-  '###...............F..............##......................###',
-  '##5...##........###......................................###',
-  '###...##........########...###############...............###',
-  '###.............########...###############.....#####.....a##',
-  '###........##...########...###############.....#####.....###',
-  '###........##...########...###############.....#####.....###',
-  '###.............########...###############.....#####.....###',
-  '###.............########...###############.....#####.....###',
-  '#############8##########...###############.....#####.....###',
-  '########################DDD######1########.....#####.....###',
-  '#####################................#####...............###',
-  '#####################................#####...............###',
-  '###..............####................#####...............###',
-  '###..............####...##...........#####...............###',
-  '###.................E...##...........WS###..............O###',
-  '###.................E................#######################',
-  '###...##....##......E...........##...#######################',
-  '###...##....##...####...........##...#######################',
-  '###..............####................###############c#######',
-  '###..............####.......P........###########.........###',
-  '###..............####................###########.........###',
-  '#SW..............3###................###########.........###',
-  '###..............############W##################.........###',
-  '###..............############S##################.........###',
-  '###..............#########################9#####...###...###',
-  '###...##....##...###.........................###...###...WS#',
-  '###...##....##...###.........................###.........###',
-  '###................G.......##.......##.........H.........###',
-  '###................G.......##.......##.........H.........###',
-  '##4................G...........................H.........###',
-  '###..............###.........................###.........###',
-  '###..............###.O................B......###.........###',
-  '#########W##############7########W##########################',
-  '#########S#######################S##########################',
-  '############################################################',
-];
+export const MAP_ASCII = LEVEL1.ascii;
 
 const CHAR_CODE = {
   '#': TILE_WALL, '.': TILE_FLOOR, 'P': TILE_FLOOR, 'W': TILE_WINDOW, 'S': TILE_SPAWN_POCKET,
   'O': TILE_OPEN_SPAWN, 'B': TILE_BOX,
+  // WO5: mega door, boss spawn (floor), minion spawn (floor, see TILE_ARENA_SPAWN), staircase.
+  'M': TILE_DOOR, 'Z': TILE_FLOOR, 'X': TILE_FLOOR, 'T': TILE_STAIRS,
 };
 
-function charToCode(ch) {
+function charToCode(ch, wallbuyMap) {
   if (ch in CHAR_CODE) return CHAR_CODE[ch];
-  if (ch in WALLBUY_MAP) return TILE_WALLBUY;
+  if (Object.prototype.hasOwnProperty.call(wallbuyMap, ch)) return TILE_WALLBUY;
   if (ch in DOOR_MAP) return TILE_DOOR;
   throw new Error(`map: unknown tile char '${ch}'`);
 }
 
 const DIRS4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+
+// Checks that tiles form one 4-connected group and returns their bounding box (world px).
+function groupBox(list, cols, what) {
+  const key = (t) => t.ty * cols + t.tx;
+  const set = new Set(list.map(key));
+  const seen = new Set([key(list[0])]);
+  const q = [list[0]];
+  for (let i = 0; i < q.length; i++) {
+    for (const [dx, dy] of DIRS4) {
+      const k = (q[i].ty + dy) * cols + q[i].tx + dx;
+      if (set.has(k) && !seen.has(k)) { seen.add(k); q.push({ tx: q[i].tx + dx, ty: q[i].ty + dy }); }
+    }
+  }
+  if (seen.size !== list.length) throw new Error(`map: ${what} tiles are not one connected group`);
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const { tx, ty } of list) {
+    x0 = Math.min(x0, tx); y0 = Math.min(y0, ty); x1 = Math.max(x1, tx); y1 = Math.max(y1, ty);
+  }
+  const x = x0 * TILE, y = y0 * TILE, w = (x1 - x0 + 1) * TILE, h = (y1 - y0 + 1) * TILE;
+  return {
+    tiles: list.map(({ tx, ty }) => ({ tx, ty })), x, y, w, h, cx: x + w / 2, cy: y + h / 2,
+    axis: w >= h ? 'h' : 'v',
+  };
+}
 
 // Greedy merge of wall tiles into rectangles (horizontal runs, then extended downward).
 function mergeWalls(tiles, cols, rows) {
@@ -116,7 +105,16 @@ function mergeWalls(tiles, cols, rows) {
   return rects;
 }
 
-export function loadMap(ascii = MAP_ASCII) {
+// Accepts a level def ({ id, name, ascii, wallbuys, theme, boss }) or a raw ascii array (legacy:
+// level-1 wall buys and theme). opts: { wallbuys, theme } optional overrides.
+export function loadMap(levelOrAscii = LEVELS[0], opts = {}) {
+  const isArr = Array.isArray(levelOrAscii);
+  const def = isArr ? null : (levelOrAscii || LEVEL1);
+  const ascii = isArr ? levelOrAscii : def.ascii;
+  if (!Array.isArray(ascii)) throw new Error('map: level has no ascii');
+  const o = opts || {};
+  const wallbuyMap = o.wallbuys || (def && def.wallbuys) || WALLBUY_MAP;
+  const theme = o.theme || (def && def.theme) || LEVEL1.theme;
   const rows = ascii.length;
   const cols = rows ? ascii[0].length : 0;
   if (!rows || !cols) throw new Error('map: empty ASCII');
@@ -130,27 +128,40 @@ export function loadMap(ascii = MAP_ASCII) {
     playerStart: { x: 0, y: 0 },
     doors: [], version: 0, activeSpawnIds: new Set(),
     barricadeIndex, // extra (not in contract): tile index -> index into barricades, or -1
+    // WO5
+    levelId: def ? def.id : LEVEL1.id, name: def ? def.name : LEVEL1.name, theme, wallbuyMap,
+    megaDoor: null, bossSpawn: null, arenaSpawns: [], arenaTiles: new Set(), stairs: null,
   };
 
   const windows = [];
   const opens = [];
   const doorTiles = {};
+  const megaTiles = [];
+  const stairTiles = [];
   let foundStart = false;
   for (let ty = 0; ty < rows; ty++) {
     for (let tx = 0; tx < cols; tx++) {
       const ch = ascii[ty][tx];
-      const code = charToCode(ch);
+      const code = charToCode(ch, wallbuyMap);
       tiles[ty * cols + tx] = code;
       const rect = { x: tx * TILE, y: ty * TILE, w: TILE, h: TILE };
       if (ch === 'P') {
         map.playerStart = tileToWorld(tx, ty);
         foundStart = true;
+      } else if (ch === 'M') megaTiles.push({ tx, ty });
+      else if (ch === 'T') stairTiles.push({ tx, ty });
+      else if (ch === 'Z') {
+        if (map.bossSpawn) throw new Error('map: more than one boss spawn Z');
+        map.bossSpawn = tileToWorld(tx, ty);
+      } else if (ch === 'X') {
+        const c = tileToWorld(tx, ty);
+        map.arenaSpawns.push({ id: map.arenaSpawns.length + 1, x: c.x, y: c.y, tx, ty });
       } else if (ch === 'W') windows.push({ tx, ty });
       else if (ch === 'O') opens.push({ tx, ty });
       else if (code === TILE_DOOR) (doorTiles[ch] ||= []).push({ tx, ty });
       else if (ch === 'B') map.box = { ...rect, tx, ty };
       else if (code === TILE_WALLBUY) {
-        map.wallBuys.push({ id: map.wallBuys.length + 1, weaponId: WALLBUY_MAP[ch], tx, ty, ...rect });
+        map.wallBuys.push({ id: map.wallBuys.length + 1, weaponId: wallbuyMap[ch], tx, ty, ...rect });
       }
     }
   }
@@ -184,32 +195,111 @@ export function loadMap(ascii = MAP_ASCII) {
   for (const letter of Object.keys(DOOR_MAP)) {
     const dt = doorTiles[letter];
     if (!dt) continue;
-    const key = (t) => t.ty * cols + t.tx;
-    const set = new Set(dt.map(key));
-    const seen = new Set([key(dt[0])]);
-    const q = [dt[0]];
-    for (let i = 0; i < q.length; i++) {
-      for (const [dx, dy] of DIRS4) {
-        const k = (q[i].ty + dy) * cols + q[i].tx + dx;
-        if (set.has(k) && !seen.has(k)) { seen.add(k); q.push({ tx: q[i].tx + dx, ty: q[i].ty + dy }); }
-      }
-    }
-    if (seen.size !== dt.length) throw new Error(`map: door '${letter}' tiles are not one connected group`);
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const { tx, ty } of dt) {
-      x0 = Math.min(x0, tx); y0 = Math.min(y0, ty); x1 = Math.max(x1, tx); y1 = Math.max(y1, ty);
-    }
-    const x = x0 * TILE, y = y0 * TILE, w = (x1 - x0 + 1) * TILE, h = (y1 - y0 + 1) * TILE;
+    const g = groupBox(dt, cols, `door '${letter}'`);
     map.doors.push({
       id: map.doors.length + 1, letter, cost: DOOR_MAP[letter], open: false,
-      tiles: dt.map(({ tx, ty }) => ({ tx, ty })), x, y, w, h, cx: x + w / 2, cy: y + h / 2,
-      axis: w >= h ? 'h' : 'v', // 'h': tiles run along x (horizontal wall); 'v': along y
+      tiles: g.tiles, x: g.x, y: g.y, w: g.w, h: g.h, cx: g.cx, cy: g.cy,
+      axis: g.axis, // 'h': tiles run along x (horizontal wall); 'v': along y
     });
   }
+
+  // WO5: mega door (not in map.doors), staircase, arena.
+  if (megaTiles.length) {
+    const g = groupBox(megaTiles, cols, 'mega door');
+    map.megaDoor = { id: 'mega', letter: 'M', cost: DOORS.megaCost, open: false, sealed: false, ...g };
+  }
+  if (stairTiles.length) {
+    const g = groupBox(stairTiles, cols, 'stairs');
+    map.stairs = { tiles: g.tiles, x: g.x, y: g.y, w: g.w, h: g.h, cx: g.cx, cy: g.cy, open: false };
+  }
+  if (map.bossSpawn) map.arenaTiles = computeArena(map);
 
   map.walls = mergeWalls(tiles, cols, rows);
   recomputeActiveSpawns(map);
   return map;
+}
+
+// Tiles reachable from Z over floor / open-spawn tiles (mega door, stairs and every other solid
+// block). Computed once at load, with the mega door and stairs closed.
+function computeArena(map) {
+  const { cols, rows, tiles } = map;
+  const s = worldToTile(map.bossSpawn.x, map.bossSpawn.y);
+  const start = s.ty * cols + s.tx;
+  const out = new Set([start]);
+  const q = [start];
+  const passable = (c) => c === TILE_FLOOR || c === TILE_OPEN_SPAWN || c === TILE_ARENA_SPAWN;
+  for (let i = 0; i < q.length; i++) {
+    const k = q[i], x = k % cols, y = (k - x) / cols;
+    for (const [dx, dy] of DIRS4) {
+      const nx = x + dx, ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue;
+      const nk = ny * cols + nx;
+      if (out.has(nk) || !passable(tiles[nk])) continue;
+      out.add(nk); q.push(nk);
+    }
+  }
+  return out;
+}
+
+function setTiles(map, list, code) {
+  for (const { tx, ty } of list) map.tiles[ty * map.cols + tx] = code;
+  map.version = (map.version || 0) + 1;
+  if (map.playerStart && map.spawnPoints) recomputeActiveSpawns(map);
+}
+
+// Every normal door open (the mega door is not in map.doors). A map without doors counts as open.
+export function allDoorsOpen(map) {
+  if (!map) return false;
+  return (map.doors || []).every((d) => d.open);
+}
+
+export function megaDoorUnlockable(map) {
+  const md = map && map.megaDoor;
+  return !!md && !md.open && !md.sealed && allDoorsOpen(map);
+}
+
+export function openMegaDoor(map) {
+  if (!megaDoorUnlockable(map)) return false;
+  map.megaDoor.open = true;
+  setTiles(map, map.megaDoor.tiles, TILE_FLOOR);
+  return true;
+}
+
+// Boss fight start: the mega door closes behind the player and cannot be bought.
+export function sealMegaDoor(map) {
+  const md = map && map.megaDoor;
+  if (!md || md.sealed) return false;
+  md.open = false; md.sealed = true;
+  setTiles(map, md.tiles, TILE_DOOR);
+  return true;
+}
+
+// Boss dead: the mega door reopens.
+export function unsealMegaDoor(map) {
+  const md = map && map.megaDoor;
+  if (!md || (md.open && !md.sealed)) return false;
+  md.open = true; md.sealed = false;
+  setTiles(map, md.tiles, TILE_FLOOR);
+  return true;
+}
+
+export function openStairs(map) {
+  const st = map && map.stairs;
+  if (!st || st.open) return false;
+  st.open = true;
+  setTiles(map, st.tiles, TILE_FLOOR);
+  return true;
+}
+
+export function inArena(map, x, y) {
+  if (!map || !map.arenaTiles || !map.arenaTiles.size) return false;
+  const { tx, ty } = worldToTile(x, y);
+  if (tx < 0 || ty < 0 || tx >= map.cols || ty >= map.rows) return false;
+  return map.arenaTiles.has(ty * map.cols + tx);
+}
+
+export function isBossActiveBlocking(map) {
+  return !!(map && map.megaDoor && map.megaDoor.sealed);
 }
 
 // Opens a closed door: its tiles become floor, version bumps, active spawns are recomputed.
@@ -283,6 +373,7 @@ export function isWalkable(map, tx, ty, forZombie = false) {
   switch (code) {
     case TILE_FLOOR:
     case TILE_OPEN_SPAWN:
+    case TILE_ARENA_SPAWN: // never produced by loadMap (X -> floor); walkable if set by hand
       return true;
     case TILE_SPAWN_POCKET:
       return !!forZombie;
@@ -415,7 +506,7 @@ export function resolveCircle(map, x, y, r, forZombie = false) {
 
 function blocksRay(code) {
   return code === TILE_WALL || code === TILE_WINDOW || code === TILE_BOX || code === TILE_WALLBUY ||
-    code === TILE_DOOR;
+    code === TILE_DOOR || code === TILE_STAIRS;
 }
 
 // DDA grid march. dx,dy should be a unit vector (normalized defensively).
@@ -480,7 +571,8 @@ function distToRect(x, y, r) {
   return dist(x, y, clamp(x, r.x, r.x + r.w), clamp(y, r.y, r.y + r.h));
 }
 
-// Nearest wall buy, box, closed door, or damaged barricade whose tile edge is within range of (x, y).
+// Nearest wall buy, box, closed door, mega door (closed and not sealed; returned even while
+// locked so the shop can show the blocked prompt), open stairs, or damaged barricade whose tile edge is within range of (x, y).
 export function nearestInteractable(map, x, y, range) {
   let best = null;
   const consider = (kind, ref) => {
@@ -490,6 +582,8 @@ export function nearestInteractable(map, x, y, range) {
   for (const wb of map.wallBuys) consider('wallbuy', wb);
   if (map.box) consider('box', map.box);
   if (map.doors) for (const d of map.doors) if (!d.open) consider('door', d);
+  if (map.megaDoor && !map.megaDoor.open && !map.megaDoor.sealed) consider('megadoor', map.megaDoor);
+  if (map.stairs && map.stairs.open) consider('stairs', map.stairs);
   for (const b of map.barricades) if (b.boards < b.maxBoards) consider('barricade', b);
   return best;
 }

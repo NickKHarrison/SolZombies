@@ -301,6 +301,15 @@ const POWERUP_MOTIFS = {
   zombieBlood: [311, 233, 311],
 };
 
+// WO5: boss sounds share the Thundergun's compressed bus (loud but limited); world bus fallback.
+const BOSS_HIT_MIN_INTERVAL = AUDIO.bossHitMinInterval ?? 0.12;
+function bossBus() { return thunderBus || buses.world || master; }
+// War-drum hit: pitched sine body + low noise skin slap.
+function drum(dest, t, level) {
+  tone(dest, { type: 'sine', f0: 110, f1: 42, t, dur: 0.45, peak: 0.5 * level, attack: 0.003 });
+  noise(dest, { t, dur: 0.18, peak: 0.25 * level, attack: 0.002, filter: 'lowpass', freq: 900, freq1: 200 });
+}
+
 const SFX = {
   gunshot(p) {
     if (p && p.weaponId === 'thundergun') { thundergun(); return; }
@@ -404,6 +413,80 @@ const SFX = {
     tone(b, { type: 'sine', f0: 140, f1: 70, t: tc, dur: 0.12, peak: 0.16, attack: 0.002 });
     noise(b, { t: tc, dur: 0.05, peak: 0.16, attack: 0.001, filter: 'highpass', freq: 3000 });
   },
+  // ---- WO5 3.6 (Agent E): boss, levels, mega door ----
+  // Boss roar + war-drum hit (boss:start). Compressed boss bus so the long roar never clips.
+  bossRoar() {
+    const b = bossBus();
+    const k = rrange(0.95, 1.05);
+    voice(b, { f0: 92 * k, f1: 58 * k, dur: 1.35, peak: 0.55, attack: 0.08,
+      formants: [[420, 4, 1.0], [880, 5, 0.55], [2100, 6, 0.18]] });
+    voice(b, { f0: 61 * k, f1: 41 * k, t: 0.04, dur: 1.25, peak: 0.35, attack: 0.1,
+      formants: [[300, 3, 1.0], [700, 4, 0.5]] });
+    noise(b, { dur: 1.2, peak: 0.16, attack: 0.1, filter: 'bandpass', freq: 900, freq1: 300, q: 1.2 });
+    tone(b, { type: 'sine', f0: 48, f1: 30, dur: 1.4, peak: 0.35, attack: 0.1 });
+    drum(b, 0.0, 1.0);
+    drum(b, 0.42, 0.75);
+  },
+  // Charge telegraph sting (boss:charge): short dissonant rising brass stab + snort.
+  bossCharge() {
+    if (rateLimited('bcharge', 0.3)) return;
+    const b = bossBus();
+    tone(b, { type: 'sawtooth', f0: 220, f1: 330, dur: 0.5, peak: 0.16, attack: 0.02 });
+    tone(b, { type: 'sawtooth', f0: 233, f1: 349, dur: 0.5, peak: 0.14, attack: 0.02 });
+    tone(b, { type: 'square', f0: 110, f1: 165, dur: 0.5, peak: 0.08, attack: 0.02 });
+    voice(b, { f0: 120, f1: 80, dur: 0.35, peak: 0.3, attack: 0.02, formants: [[520, 4, 1.0], [1000, 5, 0.4]] });
+    noise(b, { dur: 0.3, peak: 0.1, attack: 0.03, filter: 'highpass', freq: 2500, freq1: 5000 });
+  },
+  // Boss hit: heavy flesh thud, lower than zombieHit, own rate limit.
+  bossHit() {
+    if (rateLimited('bhit', BOSS_HIT_MIN_INTERVAL)) return;
+    const b = buses.zombies || bossBus();
+    tone(b, { type: 'sine', f0: 90 * rrange(0.9, 1.1), f1: 38, dur: 0.14, peak: 0.4 });
+    noise(b, { dur: 0.12, peak: 0.3, filter: 'lowpass', freq: 500, freq1: 150, q: 1.2 });
+  },
+  // Victory sting (boss:defeated): rising major arpeggio over a bright chord and a low boom.
+  bossDefeated() {
+    const b = buses.ui;
+    drum(bossBus(), 0, 0.9);
+    notes(b, [262, 330, 392, 523], { type: 'square', step: 0.11, dur: 0.22, peak: 0.08 });
+    for (const f of [262, 330, 392, 523]) tone(b, { type: 'triangle', f0: f, t: 0.46, dur: 1.4, peak: 0.08, attack: 0.02 });
+    tone(b, { type: 'sawtooth', f0: 131, t: 0.46, dur: 1.4, peak: 0.07, attack: 0.03 });
+    tone(b, { type: 'sine', f0: 1047, t: 0.46, dur: 0.9, peak: 0.05 });
+  },
+  // Descending the stairs (level:descend): stone footsteps getting deeper + low drone.
+  levelDescend() {
+    const b = buses.world;
+    for (let i = 0; i < 6; i++) {
+      const t = i * 0.19;
+      const f = 150 - i * 12;
+      tone(b, { type: 'sine', f0: f, f1: f * 0.5, t, dur: 0.09, peak: 0.3 - i * 0.03 });
+      noise(b, { t, dur: 0.07, peak: 0.16 - i * 0.015, filter: 'bandpass', freq: 1400 - i * 120, q: 2 });
+    }
+    tone(b, { type: 'sawtooth', f0: 55, f1: 41, dur: 1.4, peak: 0.08, attack: 0.3 });
+    tone(b, { type: 'sine', f0: 41, f1: 33, dur: 1.5, peak: 0.25, attack: 0.3 });
+  },
+  // New level (level:start): ominous minor swell with a bell on top.
+  levelStart() {
+    const b = buses.ui;
+    for (const f of [110, 131, 165]) tone(b, { type: 'sawtooth', f0: f, dur: 1.3, peak: 0.06, attack: 0.25 });
+    tone(b, { type: 'sine', f0: 55, dur: 1.6, peak: 0.25, attack: 0.2 });
+    tone(b, { type: 'triangle', f0: 880, t: 0.25, dur: 1.2, peak: 0.07 });
+    tone(b, { type: 'sine', f0: 1320 * 1.007, t: 0.25, dur: 0.8, peak: 0.03 });
+  },
+  // Mega door (purchase:made kind 'megadoor'): long heavy iron grind, then a deep clang.
+  megaDoor() {
+    const b = buses.world;
+    const k = rrange(0.96, 1.04);
+    tone(b, { type: 'sawtooth', f0: 70 * k, f1: 48 * k, dur: 1.3, peak: 0.12, attack: 0.15 });
+    tone(b, { type: 'square', f0: 71.5 * k, f1: 47 * k, dur: 1.3, peak: 0.05, attack: 0.15 });
+    noise(b, { dur: 1.3, peak: 0.2, attack: 0.15, filter: 'bandpass', freq: 380 * k, freq1: 210 * k, q: 6 });
+    noise(b, { t: 0.1, dur: 1.1, peak: 0.1, attack: 0.1, filter: 'bandpass', freq: 2200 * k, freq1: 1500 * k, q: 10 });
+    const tc = 1.3;
+    tone(b, { type: 'sine', f0: 95, f1: 40, t: tc, dur: 0.5, peak: 0.35, attack: 0.002 });
+    tone(b, { type: 'triangle', f0: 620 * k, t: tc, dur: 0.7, peak: 0.06, attack: 0.002 });
+    tone(b, { type: 'square', f0: 1310 * k, t: tc, dur: 0.3, peak: 0.03, attack: 0.002 });
+    noise(b, { t: tc, dur: 0.12, peak: 0.2, attack: 0.001, filter: 'lowpass', freq: 1800 });
+  },
   board(p) {
     const byZombie = p && p.by === 'zombie';
     const f = byZombie ? rrange(120, 160) : rrange(200, 260);
@@ -433,6 +516,18 @@ export function setMuted(bool) {
   } catch (_) { /* ignore */ }
 }
 
+// WO5 fix (review I2): one death groan per frame at most, none for cause 'debug' (the boss's
+// finishFight clears leftover minions that way in the same frame as the victory sting).
+let lastGroanMs = -1e9;
+const GROAN_MIN_GAP_MS = 12;
+function onZombieKilledSfx(p) {
+  if (p && p.cause === 'debug') return;
+  const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  if (nowMs - lastGroanMs < GROAN_MIN_GAP_MS) return;
+  lastGroanMs = nowMs;
+  playSfx('zombieKilled');
+}
+
 // Safe to call repeatedly (main calls it again after events.clearAll() on restart).
 // Re-subscribes every call (dropping any previous subscriptions first); never creates a
 // second AudioContext.
@@ -447,8 +542,8 @@ export function initAudio() {
   sub('weapon:fired', p => playSfx('gunshot', p));
   sub('weapon:reload', () => playSfx('reload'));
   sub('weapon:empty', () => playSfx('empty'));
-  sub('zombie:hit', () => playSfx('zombieHit'));
-  sub('zombie:killed', () => playSfx('zombieKilled'));
+  sub('zombie:hit', p => playSfx(p && p.zombie && p.zombie.kind === 'boss' ? 'bossHit' : 'zombieHit'));
+  sub('zombie:killed', onZombieKilledSfx);
   sub('player:damaged', () => playSfx('playerDamaged'));
   sub('player:down', () => playSfx('playerDown'));
   sub('round:start', () => playSfx('roundStart'));
@@ -456,7 +551,13 @@ export function initAudio() {
   sub('powerup:spawned', () => playSfx('powerupSpawned'));
   sub('powerup:collected', p => playSfx('powerupCollected', p));
   sub('powerup:expired', () => playSfx('powerupExpired'));
-  sub('purchase:made', p => playSfx(p && p.kind === 'door' ? 'door' : 'purchase', p));
+  sub('purchase:made', p => playSfx(p && p.kind === 'door' ? 'door' : p && p.kind === 'megadoor' ? 'megaDoor' : 'purchase', p));
+  // WO5 3.6
+  sub('boss:start', () => playSfx('bossRoar'));
+  sub('boss:charge', () => playSfx('bossCharge'));
+  sub('boss:defeated', () => playSfx('bossDefeated'));
+  sub('level:descend', () => playSfx('levelDescend'));
+  sub('level:start', p => { if (p && p.index > 0) playSfx('levelStart', p); });
   sub('purchase:denied', () => playSfx('denied'));
   sub('box:opened', () => playSfx('boxOpened'));
   sub('barricade:board', p => playSfx('board', p));

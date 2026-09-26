@@ -1,12 +1,19 @@
 // shop.js (Agent I): wall buys, wall ammo, mystery box, barricade repair.
 // Pure logic: no DOM. See WORK_ORDER.md 5.9 and docs/notes/shop.md.
-import { PLAYER, POINTS, PRICES, MYSTERY_BOX, SHOP } from './config.js';
+import { PLAYER, POINTS, PRICES, MYSTERY_BOX, SHOP, DOORS } from './config.js';
 import * as events from './events.js';
 import { WEAPONS, WALL_WEAPON_IDS, BOX_WEAPON_IDS, WONDER_WEAPON_IDS, refillAll, ammoCost } from './weapons.js';
+import * as weaponsMod from './weapons.js';
+
+// WO5 3.4: only the level-1 wall guns get the 'wall' box weight; level-2 wall guns keep boxOnly.
+// weapons.BOX_WALL_WEIGHT_IDS when present (namespace read so an older weapons.js still links).
+const BOX_WALL_IDS = Array.isArray(weaponsMod.BOX_WALL_WEIGHT_IDS) ? weaponsMod.BOX_WALL_WEIGHT_IDS : WALL_WEAPON_IDS;
 import { spendPoints, giveWeapon, addPoints } from './player.js';
 import { nearestInteractable, repairBoard } from './map.js';
 // WO4 doors: namespace import so shop.js links even before map.js exports openDoor.
 import * as mapMod from './map.js';
+// WO5: level transition (stairs). Namespace import, called lazily.
+import * as levelMod from './level.js';
 
 // Tunables live in config.js SHOP (moved by integrator); re-exported for tests.
 export const REPAIR_INTERVAL = SHOP.repairInterval;       // seconds of holding F per board
@@ -28,7 +35,7 @@ export function heldWeaponIds(player) {
 }
 
 /** { id: weight } for every box weapon, per 5.4 (3 wall gun, 2 box-only, 1 wonder weapon: ray gun / thundergun). */
-export function boxWeights(boxIds = BOX_WEAPON_IDS, wallIds = WALL_WEAPON_IDS) {
+export function boxWeights(boxIds = BOX_WEAPON_IDS, wallIds = BOX_WALL_IDS) {
   const wall = new Set(wallIds);
   const wonder = new Set(WONDER_WEAPON_IDS);
   const out = {};
@@ -167,6 +174,25 @@ export function buildPrompt(state, hit) {
     return {
       kind: 'door', weaponId: null, doorId: d.id, cost, canAfford: pts >= cost, blocked: false,
       text: `Press F to open door [${cost}]`,
+    };
+  }
+  if (hit.kind === 'megadoor') {
+    const d = hit.ref;
+    if (!d || d.open || d.sealed) return null;
+    const cost = DOORS.megaCost;
+    const blocked = !allDoorsOpenFor(state.map);
+    return {
+      kind: 'megadoor', weaponId: null, doorId: d.id != null ? d.id : 'mega', cost,
+      canAfford: pts >= cost, blocked,
+      text: blocked ? MEGA_BLOCKED_TEXT : `Press F to open MEGA DOOR [${cost}]`,
+    };
+  }
+  if (hit.kind === 'stairs') {
+    const st = hit.ref;
+    if (!st || !st.open) return null;
+    return {
+      kind: 'stairs', weaponId: null, cost: 0, canAfford: true, blocked: false,
+      text: STAIRS_TEXT,
     };
   }
   if (hit.kind === 'barricade') {
@@ -310,9 +336,78 @@ export function buyDoor(state, door) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// WO5 3.3: mega door and stairs
+// ---------------------------------------------------------------------------
+
+export const MEGA_BLOCKED_TEXT = 'MEGA DOOR — open all doors first';
+export const MEGA_TEXT = 'MEGA DOOR OPENED';
+export const STAIRS_TEXT = 'Press F to descend';
+
+// map.allDoorsOpen when map.js has it, else every map.doors[] entry is open.
+function allDoorsOpenFor(map) {
+  if (!map) return false;
+  if (typeof mapMod.allDoorsOpen === 'function') return !!mapMod.allDoorsOpen(map);
+  return !Array.isArray(map.doors) || map.doors.every((d) => d && d.open);
+}
+
+// state.map.openMegaDoor (a function on the map object) wins over map.js's export: test injection.
+function openMegaDoorFn(map) {
+  if (map && typeof map.openMegaDoor === 'function') return map.openMegaDoor;
+  return typeof mapMod.openMegaDoor === 'function' ? mapMod.openMegaDoor : null;
+}
+
+/**
+ * Buys the mega door: requires every normal door open and the mega door neither open nor sealed.
+ * spendPoints(DOORS.megaCost), then map.openMegaDoor(state.map). Emits purchase:made
+ * {kind:'megadoor', id:'mega', cost} or purchase:denied {kind:'megadoor', cost, have}.
+ * While blocked (a normal door still closed) it returns false with no charge and no event.
+ */
+export function buyMegaDoor(state) {
+  const player = state && state.player;
+  const map = state && state.map;
+  const d = map && map.megaDoor;
+  if (!player || !d || d.open || d.sealed || state.transition) return false;
+  if (!allDoorsOpenFor(map)) return false;
+  const open = openMegaDoorFn(map);
+  if (!open) return false;
+  const cost = DOORS.megaCost;
+  const have = player.points;
+  if (have < cost || !spendPoints(state, cost)) {
+    events.emit('purchase:denied', { kind: 'megadoor', cost, have });
+    return false;
+  }
+  if (open(map) === false) {
+    player.points += cost; // map refused (not unlockable): refund, no event
+    return false;
+  }
+  events.emit('purchase:made', { kind: 'megadoor', id: 'mega', cost });
+  const c = doorCentre(d);
+  if (!Array.isArray(state.effects)) state.effects = [];
+  state.effects.push({
+    type: 'text', x: c.x, y: c.y, text: MEGA_TEXT, color: DOOR_TEXT_COLOR,
+    ttl: DOOR_TEXT_TTL, maxTtl: DOOR_TEXT_TTL,
+  });
+  return true;
+}
+
+/** Stairs: starts the descent (level.beginDescent) when the stairs are open. Returns a bool. */
+export function useStairs(state) {
+  const st = state && state.map && state.map.stairs;
+  if (!st || !st.open || state.transition) return false;
+  if (typeof levelMod.beginDescent !== 'function') return false;
+  return levelMod.beginDescent(state) !== false;
+}
+
 export function updateShop(state, input, dt) {
   const shop = state.shop;
   if (!shop.box) shop.box = { state: 'idle', timer: 0, weaponId: null, cycleT: 0 };
+  // WO5: nothing is interactable while the level fade runs.
+  if (state.transition) {
+    shop.prompt = null;
+    if (state.player) state.player.repairTimer = 0;
+    return;
+  }
   tickBox(state, dt);
 
   const player = state.player;
@@ -350,6 +445,11 @@ export function updateShop(state, input, dt) {
     buyWallWeapon(state, hit.ref);
   } else if (hit.kind === 'door') {
     buyDoor(state, hit.ref);
+  } else if (hit.kind === 'megadoor') {
+    buyMegaDoor(state);
+  } else if (hit.kind === 'stairs') {
+    useStairs(state);
+    if (state.transition) { shop.prompt = null; return; }
   } else if (hit.kind === 'box') {
     if (shop.box.state === 'idle') spinBox(state);
     else if (shop.box.state === 'offering') takeBoxWeapon(state);

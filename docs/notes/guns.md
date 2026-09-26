@@ -259,3 +259,24 @@ kkkkkyGGGGGkkkkkkWWWkk..
 ....koGGGGGk............
 ....kkkkkkkk............
 ```
+
+## WO5 (Agent D, WORK_ORDER_5 3.4): level-2 guns
+
+Six new keys, named after the weapon ids (each def sets `sprite: <id>`). Same conventions: fill-only
+grids outlined with the 8-neighbour `k` ring script, `grip` on the barrel axis at the rear of the
+receiver, `muzzle.x === sprite.w` on the same row, palette only. Nominals added to
+`tests/sprites.test.js` `GUN_NOMINAL` (existing guns' tolerances untouched) plus a WO5 test
+(distinct grids, muzzle on the right edge, grip on the barrel line, pose by class, Gorgon longer
+than the LMG, Marshal shorter than the shotgun). Checked in tools/sprite-preview.html (gun sheet).
+
+| key | size | grip | muzzle | pose | weight | silhouette |
+|---|---|---|---|---|---|---|
+| manowar | 23x11 | (6, 3) | (23, 3) | twohand | 1 | chunky AR: 3-row receiver, vented handguard, grey round drum with white ring under the receiver |
+| xr2 | 26x7 | (7, 2) | (26, 2) | twohand | 1 | slim futuristic AR: white `W` shell, purple `p` accent strip, long thin barrel, small grip/mag |
+| weevil | 17x9 | (4, 2) | (17, 2) | twohand | 1 | boxy SMG: tall square receiver, stubby barrel, straight stick mag + short grip |
+| marshal16 | 17x7 | (6, 3) | (17, 3) | twohand | 1 | short double barrel: tan wood stock, two stacked barrels with a dark seam, wood forend |
+| gorgon | 28x10 | (5, 3) | (28, 3) | heavy | 1.6 | long LMG: vented shroud, muzzle brake, olive side ammo box with brass links, bipod |
+| dredge48 | 27x13 | (5, 3) | (27, 3) | heavy | 1.6 | fat LMG: 4-row body, big tan/brown concentric drum under the receiver |
+
+First pass of the 48 Dredge drum had two light
+spots that read as a face; replaced with concentric rings and a dark hub.

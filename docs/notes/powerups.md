@@ -78,3 +78,26 @@ map was a stub.
   rate is unchanged. `DROP_SNAP_TILES = 3` is local.
 - Tests: two regression tests (pocket drop snaps to the inside tile and counts; no reachable
   tile means no spawn and no count). Contract signatures unchanged.
+
+## WO5 (Agent C) - boss and minion rules (WORK_ORDER_5.md 1.2 / 3.2)
+- **Nuke**:
+  - Live zombies whose `kind` is not `'boss'` are queued as before, and minions die with cause `'nuke'`.
+  - Each live boss immediately takes `damageZombie(BOSS.nukeFrac x maxHp, 'nuke')` (10 %). If Insta-Kill is
+    active, the damage is at least 5 %.
+  - The staggered kill loop also skips any boss id as a safety net.
+- **Drops**:
+  - `rollDrop` ignores `zombie:killed` events for the boss (`payload.kind` or `payload.zombie.kind ===
+    'boss'`). The boss's only drop is the guaranteed Max Ammo that `boss.finishFight` spawns with
+    `spawnPowerup(state, 'maxAmmo', x, y)` at the boss position.
+  - Minions use the normal rules: 2 %, `cause === 'weapon'` only.
+  - Leftover minions that `finishFight` kills use cause `'debug'`, so they drop nothing.
+- Zombie Blood is unchanged here; zombie.js decides per kind.
+- Tests: the nuke queues the minions but not the boss, the boss takes 10 %, and a boss id in the queue is
+  never killed. The boss never rolls a random drop, and minions drop at about 2 %.
+
+## WO5 FIX-2
+- No code change. The nuke's boss damage (`BOSS.nukeFrac` of max HP, cause `'nuke'`) is exempt from
+  the new per-hit cap (`BOSS.maxHitFrac`) and from the Insta-Kill x2 applied in
+  `zombie.bossHitDamage`. New test in `tests/powerups.test.js` pins exactly 10 % with Insta-Kill active.
+- Insta-Kill vs the boss is now x2 damage (capped at 3 % max HP per hit), not a 5 % floor; see
+  docs/notes/zombie.md. Minions still die instantly.

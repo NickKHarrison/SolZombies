@@ -164,3 +164,43 @@ placed in the bottom-left. Points sit directly above them.
   counter (round 7), weapon readout, power-up chips and the widest prompt ("Press F for Mystery
   Box [10] FIRE SALE"). Game over shows the dead face and red 0%; menu hides face box and vitals;
   zero console errors through start, death and restart. `npm test` 263/263.
+
+## WO5 (Agent F) — boss bar, banner queue, level label
+
+- **Boss bar** (`.hud-boss`, top-centre at `top: 8.2cqh`, 56cqh wide, fixed position below the
+  power-up chip row whether or not chips show). Georgia-italic red boss name + a track with a red
+  fill (`.hud-boss-fill`) over a white damage-lag bar (`.hud-boss-lag`). Visible only while
+  `state.boss?.phase === 'active'`; hidden on menu/game over via `[data-phase]` CSS, shown while
+  paused. HP from `bossMod.bossHpFrac(state)` (`import * as bossMod from './boss.js'`, guarded
+  with `typeof` + try/catch, clamped 0..1). Lag: on a fresh hit the white bar holds 0.45 s, then
+  drains at 0.6 of max HP/s to the fill; heals snap it up; a new `bossId` resets it. Lag timers
+  use `state.dt` only while playing (frozen when paused), like the face.
+- **Banner queue.** The single `.hud-banner` element (fire-sale style) now plays a queue:
+  `FIRE SALE!` (powerup:collected fireSale), `BOSS: <name>` (boss:start), `STAIRS OPENED`
+  (boss:defeated), `LEVEL <index+1> — <NAME>` (level:start with `index > 0`; index 0 is
+  suppressed per the scaffold note). A banner requested while one is showing waits its turn (max
+  4 queued, identical waiting text not duplicated), so nothing clobbers the fire-sale banner.
+  Advancing is on `animationend`, with a `performance.now()` fallback in `updateHud` (3.4 s) in
+  case the event is lost. The queue is flushed on entering menu/game over (the banner's parent is
+  `display:none` there, so its animation never ends) and on `initHud`. Banners longer than 14
+  chars get `.long` (4.4cqh, nowrap) so they stay on one line.
+- **Level label** (`.hud-level`, inside `.hud-round` below the tally/numeral): `L<index+1> <NAME>`
+  from `state.level.name || state.level.def.name`, shown whenever `state.level` exists (small,
+  1.9cqh, dim warm grey sans). Hidden with the round block on the menu.
+- Megadoor/stairs prompts need nothing new: `state.shop.prompt` with `blocked`/`canAfford:false`
+  already renders grey.
+- **Verified** on port 8156 (`?debug=1`, stepped, faked `state.level` / `state.boss`, events
+  emitted through `__game.modules.events`): queue order FIRE SALE! → BOSS: THE BONE PRIEST →
+  STAIRS OPENED → LEVEL 2 — CATACOMBS (level index 0 suppressed); bar 100% → 65% with white lag
+  holding at 100%, 85% mid-drain, 65% caught up; bar hidden when phase 'idle', on game over and
+  menu, shown when paused. Rects at a 1604x902 stage: face box x185–321, boss bar x707–1212
+  y73–126, chips y22–59, long banner x612–1307 (vitals end x399, weapon starts x1621), no
+  overlaps. No console errors. `node --check` OK; `npm test` 299/300 (only the expected
+  Phase-1 `WO5 new exports` failure, owned by siblings).
+
+### WO5 FIX-3 (playtest #5)
+- `.hud-level` is an inline-block with a small dark plate (`rgba(0,0,0,.55)`, 0.5cqh radius), so
+  wall-buy labels under "L2 CATACOMBS" no longer bleed through.
+- `.hud-weapon` has a faint backing (`rgba(0,0,0,.38)`) for the same reason; the reload pulse
+  keyframes now start from a dark-red 0.4 alpha so the plate never lightens while reloading.
+- The face box is already an opaque steel frame; no change. No `hud.js` change was needed.

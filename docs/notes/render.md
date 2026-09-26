@@ -220,3 +220,92 @@
   repainted the doorway to floor on the next frame, and the dust and glow showed at the centre.
   No console errors. `node --check` passes. `npm test`: 267/272; the 5 failures are all in
   `tests/map.test.js` (Agent B mid-rewrite), none in render/audio.
+
+## WO5 (Agent E, 3.6): themes, torches, mega door, stairs, arena, boss/minions, transition
+- **Theme** = `map.theme`, else `state.level.def.theme`, else the WO4 look (`COLORS` + WO4 door
+  colours). Resolved once per theme object (WeakMap); mutating a theme in place is not seen, so assign
+  a new object. A theme whose `floorAlt` differs from `floor` gets a floorAlt checker, accent
+  (bone-white) flecks and wall brickwork. Level 1 has `floorAlt === floor`, so it keeps the flat
+  WO4 look. Walls and edges use `wall`/`wallEdge`; door planks are tinted from `doorWood` (the WO4
+  formula is kept when `doorWood` is the WO4 value); door bands use `doorIron` and rivets use `accent`.
+- **Static-layer key** adds `levelId`, a theme signature and an int of mega-door/stairs flags
+  (present/open/sealed). The memo check compares map, version, theme object and flags, with no
+  per-frame allocation. A level swap, a theme change or a seal/open therefore repaints, even without
+  a `version` bump (checked in the browser: switching the theme back to null repainted the walls to
+  `#0e0e10`).
+- **Ambient**: `theme.ambient` is a flat full-screen fill, drawn first in the screen pass. Null or
+  empty means no tint.
+- **Torches** (`theme.torch`): picked when the static layer is built. The rule is plain `T_WALL`
+  tiles with `(tx + 5*ty) % 6 === 0` that touch floor (floor, open spawn or arena spawn), so there is
+  one about every 6 tiles along horizontal and vertical runs. Positions are deterministic from the
+  tile index. They are drawn every frame after the static blit (they are not in the layer): an
+  additive pre-rendered amber glow sprite plus a flame and core. The flicker is a sum of sines per
+  torch, seeded from the tile index, on wall-clock time.
+- **Arena**: tiles in `map.arenaTiles` are darkened with `rgba(0,0,0,0.3)`. `X` tiles (code 8) get
+  a faint red scratched ring. Code 8 counts as floor for labels and torches.
+- **Mega door** (`map.megaDoor`, drawn while `!open`):
+  - A tall iron door: frame posts stick out 7 px past both ends and 4 px past the wall faces, with
+    riveted plates per tile, rust streaks, cross braces and an upright skull plate.
+  - While buyable, it has "MEGA DOOR" / cost labels on both sides. The cost is `md.cost`, falling
+    back to `DOORS.megaCost`.
+  - While sealed, it shows a glowing red locking bar, red skull eyes and red "SEALED" plates on
+    both sides.
+  - Its tiles are excluded from the WO4 stray-door-tile panels.
+- **Stairs** (`map.stairs`):
+  - The front is whichever long side has more arena tiles (else floor).
+  - Closed: a barred iron gate in a stone frame, with an upright padlock.
+  - Open: 5 steps getting darker and narrower away from the arena, with a "DESCEND" plate (amber on
+    dark) on the arena side.
+  - Stray code-9 tiles get a one-tile gate.
+- **Boss** (`z.kind === 'boss'`, radius `BOSS.radius` 34 ≈ 2.4× a zombie):
+  - Body: a dark body with thick clawed arms, pauldrons and a spiked rusted crown/helmet in
+    `state.level.def.boss.tint` (default `#7a1f1f`), plus red glowing eyes.
+  - `charge.phase === 'telegraph'`: a pulsing white flash and an expanding white ring.
+  - `'dash'`: ghost trail and speed lines along `charge.dx/dy`.
+  - `'recover'`: circling stars.
+  - Dying uses `BOSS.deathLinger` to darken, slump and fade. Stun visuals are skipped for the boss.
+- **Minions** (`kind 'minion'`, radius 10 ≈ 0.7×): the tier colour at 58 % brightness, 3 px arms and
+  red eyes.
+- **Events**:
+  - `boss:start` → shake 10 (0.9 s).
+  - `zombie:killed` with `zombie.kind === 'boss'` → a `bossDeath` effect (14 s lobed pool of radius
+    about 2.1× the boss radius that spreads over 1.2 s, plus a shock ring), a flash starting at about
+    60 % white and shake 12.
+  - `purchase:made` kind `megadoor` → shake 5.
+- **Transition**: a black overlay whose alpha ramps from 0 to 1 at `t = dur/2`, then back from 1 to 0
+  at `t = dur`. `dur` falls back to `LEVELS_CFG.fadeSeconds`. It is drawn over everything except the
+  debug panel. Pixel check: 0.5, 1 and 0.17 at t = 0.3, 0.6 and 1.1.
+- Render-local tunables: `BOSS_START_SHAKE`, `BOSS_DEATH_SHAKE`, `BOSS_DEATH_FLASH`, `MEGA_SHAKE`,
+  `BOSS_POOL_TTL`, `BOSS_SCALE`, `MINION_SCALE`. The integrator may move them to `RENDER`.
+- **Verified** on `localhost:8155/?debug=1` with B's real level-1 map, where the mega door is at
+  (2120,1120) along h and the stairs are at (1600,840) along v:
+  - The catacomb theme, set via `map.theme`/`state.level`, shows torches.
+  - Mega door buyable/sealed, stairs closed/open.
+  - Boss in telegraph and in dash, and minions.
+  - Boss death pool.
+  - Cost with boss + 10 minions + 24 zombies on the torch theme: `render()` 0.32 ms per call and
+    `step(1/60)` 0.49 ms per frame. No console errors. `npm test` 359/359.
+
+### WO5 FIX-3 (QA follow-up)
+- **Draw order (playtest #1):** `drawPowerups` now runs after every `blood` decal and before the
+  zombies, so the boss's guaranteed Max Ammo (and normal drops) sit on top of pools.
+- **One boss pool (review I3):** zombie.js's boss `blood` effect (`boss: true`, radius 44) is the
+  only pool; `drawBlood` draws it as the big lobed pool (`drawBossPool`, R = radius × 1.6). Render's
+  `bossDeath` effect is now only the 0.6 s shock ring (`RENDER.bossRingTtl`, replaces
+  `bossPoolTtl`), drawn above the player. Flash and shake unchanged.
+- **Sealed mega door text (playtest #6):** while `map.megaDoor.sealed`, any "MEGA DOOR OPENED" text
+  effect within 90 px of the door is expired (`ttl = 0`) instead of drawn.
+- **Charge telegraph (playtest #7):** `drawChargeLane` draws a pulsing translucent red lane
+  (boss-wide, red edges, chevrons sweeping outward) toward `charge.dx/dy` or else the player (the
+  aim zombie.js locks at the end of the telegraph). Length = speed × chargeSpeedMult ×
+  chargeMaxTime, cut at the first solid tile (16 px samples). The body flash gains a 4 px
+  red/pink pulsing outline; the expanding ring is now `#ff4030`, 4 px.
+- **Minions (playtest #8):** fixed near-black purple bodies (`MINION_BODY` per tier) for every
+  theme, a thin 1.5 px red outline and glowing red eyes (6 px halo + bright core).
+- **Labels over the player (playtest #10):** plate rects from `paintPlate`/`paintWallBuyLabel` are
+  recorded into `staticLayer.labels`; a plate overlapping the player is re-blitted from the static
+  layer over the player at 75 % alpha (only overlapping plates, a few drawImage calls at most).
+- Verified on port 8173: L1 telegraph lane stops at the pillar; Max Ammo "MA" visible over the
+  pool after `killBoss` (1 boss blood effect, ring gone after 0.6 s); injected "MEGA DOOR OPENED"
+  text expired on seal; L2 boss + 10 minions + 24 zombies: minions clearly distinct from the
+  tan/green zombies, render 0.32 ms/frame (telegraph active), step 0.77 ms. No console errors.

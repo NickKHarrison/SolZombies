@@ -107,6 +107,82 @@ export const GUN_SPRITES = Object.freeze({
     '....kkkk...........',
   ], { x: 5, y: 4 }, { x: 19, y: 4 }, 'heavy', 1.6),
 
+  // WO5 3.4 (Agent D): level-2 guns. Keys = weapon ids (defs set `sprite` to the same key).
+  manowar: gun([
+    '....kkkkkkkkk..........',
+    'kkkkkWWWWWWWkkkkkkkk...',
+    'kKKKKMMMMMMMMmKmKmmkkkk',
+    'kKKKKMMMMMMMMMMMMMMMMMk',
+    'kKKKKmmmmmmmmmKmKmmkkkk',
+    'kKKkkKmmmmmKkkkkkkkk...',
+    'kkkkkmMWWWMmk..........',
+    '....kmWmmmWmk..........',
+    '....kmMWWWMmk..........',
+    '....kkmmmmmkk..........',
+    '.....kkkkkkk...........',
+  ], { x: 6, y: 3 }, { x: 23, y: 3 }, 'twohand', 1),
+
+  xr2: gun([
+    '...kkkkkkkkkkkkkk.........',
+    'kkkkWWWWWWWWWWWWkkkkkkkkkk',
+    'kKWWWWppppWWWWWWWWMMMMMMMk',
+    'kKKKKmmmmmmmKmmmmWWkkkkkkk',
+    'kkkkKmmKkkkKmkkkkkkk......',
+    '...kkkkkk.kkKmk...........',
+    '...........kkkk...........',
+  ], { x: 7, y: 2 }, { x: 26, y: 2 }, 'twohand', 1),
+
+  weevil: gun([
+    '.kkkkkkkkkkkkk...',
+    'kkKKkWWWWWWWWkkkk',
+    'kKKKKMMMMMMMMMMMk',
+    'kKKkKMMMMMMMMmmkk',
+    'kkkkKmmmmmmmmKkk.',
+    '...kkKmKkmMkkkk..',
+    '....kKKkkmMk.....',
+    '....kkkkkmMk.....',
+    '........kkkk.....',
+  ], { x: 4, y: 2 }, { x: 17, y: 2 }, 'twohand', 1),
+
+  marshal16: gun([
+    '....kkkkkkkkkkkkk',
+    'kkkkkmWWWWWWWWWWk',
+    'ktOOOmMMMMMMMMMMk',
+    'kOOOOmkkkkkkkkkkk',
+    'kOoooMWWWWWWWWWWk',
+    'kokkkmMOOOOOOMMMk',
+    'kkk.kkkkkkkkkkkkk',
+  ], { x: 6, y: 3 }, { x: 17, y: 3 }, 'twohand', 1),
+
+  gorgon: gun([
+    '....kkkkkkkkk...............',
+    'kkkkkKKKKKKKkkkkkkkkkk......',
+    'kKKKKMMMMMMMMmKmKmKmKkkkkkkk',
+    'kKKKKMMMMMMMMMMMMMMMMMMMmWmk',
+    'kKKKkmmmmmmmmmKmKmKmKkkkkmkk',
+    'kkkyGGGGGGGkkkkKmkkkkk..kkk.',
+    '..koGLLLLLGk.kKkkKk.........',
+    '..kyGGGGGGGk.kkkkkk.........',
+    '..kogggggggk................',
+    '..kkkkkkkkkk................',
+  ], { x: 5, y: 3 }, { x: 28, y: 3 }, 'heavy', 1.6),
+
+  dredge48: gun([
+    '....kkkkkkkkkk.............',
+    'kkkkkKKKKKKKKkkkkkkkk......',
+    'kKKKKMMMMMMMMMMmmmmmkkkkkkk',
+    'kKKKKMMMMMMMMMMMMMMMMMMMWWk',
+    'kKKKKmmmmmmmmmmmmmmmkkkkkkk',
+    'kKKkkmmmmmmmmmmmKkkkk......',
+    'kkkkkoOOOOOOokkkkk.........',
+    '...koOttttttOok............',
+    '...koOtmmmmtOok............',
+    '...koOttttttOok............',
+    '...kkoOOOOOOokk............',
+    '....kkooooookk.............',
+    '.....kkkkkkkk..............',
+  ], { x: 5, y: 3 }, { x: 27, y: 3 }, 'heavy', 1.6),
+
   default: gun([
     '..kkkkkkkkk..',
     'kkkWWWWWWWkkk',

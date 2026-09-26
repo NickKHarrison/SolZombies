@@ -6,7 +6,12 @@ import {
   MAP_ASCII, WALLBUY_MAP, loadMap, worldToTile, tileToWorld, isWalkable, resolveCircle,
   raycastWalls, tearBoard, repairBoard, repairAll, barricadeOpen, nearestInteractable,
   TILE_DOOR, DOOR_MAP, openDoor, recomputeActiveSpawns, isSpawnActive,
+  TILE_ARENA_SPAWN, TILE_STAIRS, allDoorsOpen, megaDoorUnlockable, openMegaDoor, sealMegaDoor,
+  unsealMegaDoor, openStairs, inArena, isBossActiveBlocking,
 } from '../src/map.js';
+import { DOORS } from '../src/config.js';
+import { LEVELS } from '../src/levels/levels.js';
+import { LEVEL1 } from '../src/levels/level1.js';
 
 const WEAPON_IDS = ['sheiva', 'rk5', 'krm262', 'kuda', 'vmp', 'vesper', 'kn44', 'hvk30', 'argus',
   'lcar9', 'pharo', 'icr1', 'bootlegger'];
@@ -558,5 +563,219 @@ test('resolveCircle (#3): window rebuilt under a zombie pushes it to the correct
     b.boards = 3;
     const mid = resolveCircle(m, b.x + TILE / 2, b.y + TILE / 2, r, true);
     assert.deepEqual(worldToTile(mid.x, mid.y), { tx: pocket.tx, ty: pocket.ty });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// WO5: mega door, arena, stairs, level defs (3.1)
+// ---------------------------------------------------------------------------
+
+// Small fixture: start room | door D | middle room (open spawn) | mega door M | arena (Z, 2 X) | stairs T.
+const ARENA_ASCII = [
+  '##############',
+  '#P..#....#..X#',
+  '#...D....M.Z.T',
+  '#...#.O..#X..#',
+  '##############',
+];
+const at = (tx, ty) => tileToWorld(tx, ty);
+
+test('WO5 legacy exports and level-def loading', () => {
+  assert.equal(MAP_ASCII, LEVEL1.ascii);
+  assert.equal(WALLBUY_MAP, LEVEL1.wallbuys);
+  assert.equal(TILE_ARENA_SPAWN, 8); assert.equal(TILE_STAIRS, 9);
+  const m = loadMap();
+  assert.equal(m.levelId, LEVELS[0].id); assert.equal(m.name, LEVELS[0].name);
+  assert.equal(m.theme, LEVELS[0].theme); assert.equal(m.wallbuyMap, LEVELS[0].wallbuys);
+  // raw ascii: level-1 theme and wall buys
+  const r = loadMap(['#####', '#P.1#', '#####']);
+  assert.equal(r.theme, LEVEL1.theme); assert.equal(r.wallbuyMap, WALLBUY_MAP);
+  assert.equal(r.wallBuys[0].weaponId, WALLBUY_MAP['1']);
+  // level def with its own wall-buy letters and theme
+  const theme = { name: 'T' };
+  const d = loadMap({ id: 'x', name: 'X', ascii: ['#####', '#Pe.#', '#####'], wallbuys: { e: 'gorgon' }, theme });
+  assert.equal(d.levelId, 'x'); assert.equal(d.name, 'X'); assert.equal(d.theme, theme);
+  assert.equal(d.wallBuys[0].weaponId, 'gorgon');
+  assert.throws(() => loadMap({ id: 'y', ascii: ['#####', '#P1.#', '#####'], wallbuys: { e: 'gorgon' } }), /unknown tile/);
+  // opts override
+  assert.equal(loadMap(['###', '#P#', '###'], { theme }).theme, theme);
+  // every registry level loads, wall buys resolve through the level's own table
+  for (const def of LEVELS) {
+    const lm = loadMap(def);
+    assert.equal(lm.levelId, def.id);
+    for (const wb of lm.wallBuys) assert.equal(wb.weaponId, def.wallbuys[def.ascii[wb.ty][wb.tx]]);
+  }
+});
+
+test('WO5 parse: mega door, boss spawn, arena spawns, stairs, arena tiles', () => {
+  const m = loadMap(ARENA_ASCII);
+  assert.equal(m.doors.length, 1, 'mega door is not in map.doors');
+  const md = m.megaDoor;
+  assert.ok(md);
+  assert.deepEqual(md.tiles, [{ tx: 9, ty: 2 }]);
+  assert.equal(md.cost, DOORS.megaCost); assert.equal(md.open, false); assert.equal(md.sealed, false);
+  assert.equal(md.x, 9 * TILE); assert.equal(md.cx, 9.5 * TILE); assert.equal(md.w, TILE);
+  assert.equal(code(m, 9, 2), TILE_DOOR);
+  assert.deepEqual(m.bossSpawn, at(11, 2));
+  assert.equal(code(m, 11, 2), 0);
+  assert.deepEqual(m.arenaSpawns.map((s) => [s.id, s.x, s.y]),
+    [[1, at(12, 1).x, at(12, 1).y], [2, at(10, 3).x, at(10, 3).y]]);
+  for (const s of m.arenaSpawns) assert.equal(code(m, s.tx, s.ty), 0, 'X stored as floor (pathfinding-walkable)');
+  assert.deepEqual(m.stairs.tiles, [{ tx: 13, ty: 2 }]);
+  assert.equal(m.stairs.open, false);
+  assert.equal(code(m, 13, 2), TILE_STAIRS);
+  const expected = [];
+  for (let ty = 1; ty <= 3; ty++) for (let tx = 10; tx <= 12; tx++) expected.push(ty * m.cols + tx);
+  assert.deepEqual([...m.arenaTiles].sort((a, b) => a - b), expected.sort((a, b) => a - b));
+  assert.equal(inArena(m, m.bossSpawn.x, m.bossSpawn.y), true);
+  assert.equal(inArena(m, m.playerStart.x, m.playerStart.y), false);
+  assert.equal(inArena(m, md.cx, md.cy), false, 'mega door tile is not arena');
+  assert.equal(inArena(m, m.stairs.cx, m.stairs.cy), false);
+  assert.equal(inArena(m, -50, -50), false);
+  // arena spawns are never spawn points and never active
+  assert.equal(m.spawnPoints.length, 1);
+  assert.equal(m.activeSpawnIds.size, 0);
+  openDoor(m, 1);
+  assert.deepEqual([...m.activeSpawnIds], [1]);
+  openMegaDoor(m); openStairs(m);
+  assert.deepEqual([...recomputeActiveSpawns(m)], [1]);
+  // errors
+  assert.throws(() => loadMap(['#####', '#PZZ#', '#####']), /boss spawn/);
+  assert.throws(() => loadMap(['#####', '#PM.#', '###M#', '#####']), /mega door/);
+  assert.throws(() => loadMap(['#####', '#PT.#', '###T#', '#####']), /stairs/);
+});
+
+test('WO5 walkability and rays: stairs block until opened, X tiles are open floor', () => {
+  const m = loadMap(ARENA_ASCII);
+  for (const fz of [false, true]) {
+    assert.equal(isWalkable(m, 13, 2, fz), false, 'closed stairs');
+    assert.equal(isWalkable(m, 9, 2, fz), false, 'closed mega door');
+    assert.equal(isWalkable(m, 10, 3, fz), true, 'arena spawn');
+    assert.equal(isWalkable(m, 11, 2, fz), true, 'boss spawn');
+  }
+  // ray east along row 2 from inside the arena hits the stairs face
+  const o = at(10, 2);
+  assert.ok(Math.abs(raycastWalls(m, o.x, o.y, 1, 0, 1000) - (13 * TILE - o.x)) < 1e-6);
+  // ray over the X tile (row 3, westward from (12,3)) is not stopped by it
+  const o3 = at(12, 3);
+  assert.ok(Math.abs(raycastWalls(m, o3.x, o3.y, -1, 0, 1000) - (o3.x - 10 * TILE)) < 1e-6);
+  // circle pushed off the closed stairs
+  const p = resolveCircle(m, 13 * TILE - 5, o.y, PLAYER.radius, false);
+  assert.ok(p.x <= 13 * TILE - PLAYER.radius + 1e-6);
+  // hand-set code 8 is walkable too and does not block rays
+  m.tiles[3 * m.cols + 10] = TILE_ARENA_SPAWN;
+  assert.equal(isWalkable(m, 10, 3, true), true);
+  assert.equal(isWalkable(m, 10, 3, false), true);
+  assert.equal(raycastWalls(m, o3.x, o3.y, -1, 0, 70), Infinity);
+});
+
+test('WO5 mega door: locked until all doors open, open, seal, unseal', () => {
+  const m = loadMap(ARENA_ASCII);
+  const md = m.megaDoor;
+  const range = PLAYER.interactRange;
+  const front = { x: md.x - 20, y: md.cy };
+  assert.equal(allDoorsOpen(m), false);
+  assert.equal(megaDoorUnlockable(m), false);
+  assert.equal(openMegaDoor(m), false);
+  assert.equal(m.version, 0);
+  // locked mega door is still offered (shop shows the blocked prompt)
+  let h = nearestInteractable(m, front.x, front.y, range);
+  assert.equal(h.kind, 'megadoor'); assert.equal(h.ref, md); assert.equal(h.dist, 20);
+  openDoor(m, 1);
+  assert.equal(allDoorsOpen(m), true);
+  assert.equal(megaDoorUnlockable(m), true);
+  const v = m.version;
+  assert.equal(openMegaDoor(m), true);
+  assert.equal(md.open, true); assert.equal(code(m, 9, 2), 0); assert.equal(m.version, v + 1);
+  assert.ok(isWalkable(m, 9, 2) && isWalkable(m, 9, 2, true));
+  assert.equal(openMegaDoor(m), false); assert.equal(megaDoorUnlockable(m), false);
+  h = nearestInteractable(m, front.x, front.y, range);
+  assert.ok(!h || h.kind !== 'megadoor');
+  // seal
+  assert.equal(isBossActiveBlocking(m), false);
+  assert.equal(sealMegaDoor(m), true);
+  assert.equal(md.open, false); assert.equal(md.sealed, true); assert.equal(code(m, 9, 2), TILE_DOOR);
+  assert.equal(m.version, v + 2);
+  assert.equal(isBossActiveBlocking(m), true);
+  assert.equal(megaDoorUnlockable(m), false); assert.equal(openMegaDoor(m), false);
+  assert.equal(sealMegaDoor(m), false);
+  h = nearestInteractable(m, front.x, front.y, range);
+  assert.ok(!h || h.kind !== 'megadoor', 'sealed door has no prompt');
+  assert.equal(isWalkable(m, 9, 2, true), false);
+  const o = at(11, 2);
+  assert.ok(Math.abs(raycastWalls(m, o.x, o.y, -1, 0, 1000) - (o.x - 10 * TILE)) < 1e-6, 'sealed door blocks rays');
+  // unseal
+  assert.equal(unsealMegaDoor(m), true);
+  assert.equal(md.open, true); assert.equal(md.sealed, false); assert.equal(code(m, 9, 2), 0);
+  assert.equal(m.version, v + 3);
+  assert.equal(isBossActiveBlocking(m), false);
+  assert.equal(unsealMegaDoor(m), false);
+});
+
+test('WO5 stairs: openStairs makes them walkable floor and interactable', () => {
+  const m = loadMap(ARENA_ASCII);
+  const st = m.stairs;
+  const range = PLAYER.interactRange;
+  const front = { x: st.x - 20, y: st.cy };
+  let h = nearestInteractable(m, front.x, front.y, range);
+  assert.ok(!h || h.kind !== 'stairs', 'closed stairs not offered');
+  assert.equal(openStairs(m), true);
+  assert.equal(st.open, true); assert.equal(code(m, 13, 2), 0); assert.equal(m.version, 1);
+  assert.ok(isWalkable(m, 13, 2) && isWalkable(m, 13, 2, true));
+  h = nearestInteractable(m, front.x, front.y, range);
+  assert.equal(h.kind, 'stairs'); assert.equal(h.ref, st);
+  assert.equal(openStairs(m), false); assert.equal(m.version, 1);
+});
+
+test('WO5 null safety: maps without M/Z/X/T and null maps', () => {
+  const m = loadMap(['#####', '#P..#', '#####']);
+  assert.equal(m.megaDoor, null); assert.equal(m.stairs, null); assert.equal(m.bossSpawn, null);
+  assert.deepEqual(m.arenaSpawns, []); assert.equal(m.arenaTiles.size, 0);
+  assert.equal(allDoorsOpen(m), true);
+  for (const mm of [m, null, undefined, {}, { doors: [] }]) {
+    assert.equal(megaDoorUnlockable(mm), false);
+    assert.equal(openMegaDoor(mm), false);
+    assert.equal(sealMegaDoor(mm), false);
+    assert.equal(unsealMegaDoor(mm), false);
+    assert.equal(openStairs(mm), false);
+    assert.equal(inArena(mm, 60, 60), false);
+    assert.equal(isBossActiveBlocking(mm), false);
+  }
+  assert.equal(allDoorsOpen(null), false);
+  assert.equal(m.version, 0);
+  assert.equal(nearestInteractable(m, 60, 60, 1000), null);
+});
+
+test('WO5 registry levels with an arena: arena is clean and reachable once everything is open', () => {
+  for (const def of LEVELS) {
+    const m = loadMap(def);
+    if (!m.bossSpawn) continue; // arena not authored yet (Phase 1 stub)
+    const L = def.id;
+    assert.ok(m.megaDoor && m.stairs, `${L}: mega door and stairs`);
+    assert.ok(m.arenaSpawns.length >= 4 && m.arenaSpawns.length <= 6, `${L}: 4-6 X tiles`);
+    const forbidden = new Set(['W', 'S', 'O', 'B', ...Object.keys(def.wallbuys)]);
+    for (const k of m.arenaTiles) {
+      const tx = k % m.cols, ty = (k - tx) / m.cols;
+      assert.ok(!forbidden.has(def.ascii[ty][tx]), `${L}: '${def.ascii[ty][tx]}' in arena at ${tx},${ty}`);
+      for (const [dx, dy] of N4) {
+        const c = code(m, tx + dx, ty + dy);
+        assert.ok(c !== 2 && c !== 4 && c !== 5, `${L}: window/box/wall buy next to arena tile ${tx},${ty}`);
+      }
+    }
+    for (const sp of m.spawnPoints) assert.equal(inArena(m, sp.x, sp.y), false, `${L}: spawn ${sp.id} in arena`);
+    for (const x of m.arenaSpawns) assert.equal(inArena(m, x.x, x.y), true, `${L}: X ${x.id} outside arena`);
+    const adj = (list) => list.some((t) => N4.some(([dx, dy]) => m.arenaTiles.has((t.ty + dy) * m.cols + t.tx + dx)));
+    assert.ok(adj(m.megaDoor.tiles), `${L}: mega door borders the arena`);
+    assert.ok(adj(m.stairs.tiles), `${L}: stairs border the arena`);
+    assert.equal(inArena(m, m.playerStart.x, m.playerStart.y), false);
+    // arena unreachable until the mega door opens, reachable after
+    openAll(m);
+    const zt = worldToTile(m.bossSpawn.x, m.bossSpawn.y);
+    assert.equal(playerBfs(m)[zt.ty * m.cols + zt.tx], -1, `${L}: arena reachable before mega door`);
+    assert.equal(openMegaDoor(m), true);
+    assert.ok(playerBfs(m)[zt.ty * m.cols + zt.tx] >= 0, `${L}: arena unreachable with mega door open`);
+    const active = m.activeSpawnIds.size;
+    openStairs(m);
+    assert.equal(m.activeSpawnIds.size, active, `${L}: stairs open no spawns`);
   }
 });

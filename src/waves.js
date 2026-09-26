@@ -3,7 +3,8 @@
 import { ROUNDS, ZOMBIE } from './config.js';
 import * as events from './events.js';
 import { dist } from './math.js';
-import { spawnZombie } from './zombie.js';
+// WO5: namespace import so this module links while zombie.js is being rewritten.
+import * as zombieMod from './zombie.js';
 // Namespace import so this module still links while map.js is being extended (WO4 doors).
 import * as mapMod from './map.js';
 
@@ -27,29 +28,46 @@ export function createRoundState() {
     spawnInterval: ROUNDS.spawnIntervalStart,
     pausedUntil: 0,
     killedThisRound: 0,
+    suspended: false, // WO5: true during a boss fight (see updateRounds)
   };
+}
+
+// WO5: only kind 'normal' zombies (or zombies without a kind: pre-WO5 / test fakes) belong to
+// the round. Boss and minions never touch alive / killedThisRound.
+export function isRoundZombie(z) {
+  return !z || z.kind === undefined || z.kind === null || z.kind === 'normal';
 }
 
 export function initRounds(state) {
   for (const u of unsubs) u();
   unsubs = [
-    events.on('zombie:spawned', () => {
+    events.on('zombie:spawned', (p) => {
       const r = state.rounds;
-      if (r) r.alive++;
+      if (r && isRoundZombie(p && p.zombie)) r.alive++;
     }),
-    events.on('zombie:killed', () => {
+    events.on('zombie:killed', (p) => {
       const r = state.rounds;
-      if (!r) return;
+      if (!r || !isRoundZombie(p && p.zombie)) return;
       r.alive = Math.max(0, r.alive - 1);
       r.killedThisRound++;
     }),
   ];
 }
 
-export function zombiesForRound(round) {
+function baseZombiesForRound(round) {
   const r = Math.max(1, Math.floor(round));
   if (r <= ROUNDS.earlyCounts.length) return ROUNDS.earlyCounts[r - 1];
   return Math.round(0.000058 * r ** 3 + 0.074032 * r ** 2 + 0.718119 * r + 14.738699);
+}
+
+// WO5: ceil(base * difficulty.countMult). No difficulty (or a bad countMult) = multiplier 1.
+// The 1e-9 guard stops float noise (e.g. 1.15^n products) from rounding an exact integer up.
+export function zombiesForRound(round, difficulty) {
+  const base = baseZombiesForRound(round);
+  const m = difficulty && Number.isFinite(difficulty.countMult) && difficulty.countMult > 0
+    ? difficulty.countMult : 1;
+  if (m === 1) return base;
+  return Math.max(1, Math.ceil(base * m - 1e-9));
 }
 
 export function spawnIntervalForRound(round) {
@@ -96,7 +114,7 @@ function startRound(state) {
   r.round++;
   r.phase = 'active';
   r.timer = 0;
-  r.toSpawn = zombiesForRound(r.round);
+  r.toSpawn = zombiesForRound(r.round, state.level ? state.level.difficulty : undefined);
   r.killedThisRound = 0;
   r.spawnInterval = spawnIntervalForRound(r.round);
   r.spawnTimer = 0; // first zombie appears on the first active frame
@@ -107,6 +125,8 @@ function startRound(state) {
 export function updateRounds(state, dt) {
   const r = state.rounds;
   if (!r) return;
+  // WO5 boss fight: no spawning, no round-end check, break/spawn timers frozen.
+  if (r.suspended) return;
 
   if (r.phase === 'break') {
     r.timer -= dt;
@@ -119,17 +139,43 @@ export function updateRounds(state, dt) {
   if (r.toSpawn > 0 && r.alive < ZOMBIE.maxAlive && state.time >= r.pausedUntil && r.spawnTimer <= 0) {
     const sp = pickSpawnPoint(state);
     if (sp) {
-      (spawnImpl || spawnZombie)(state, sp);
+      const spawn = spawnImpl || zombieMod.spawnZombie;
+      if (typeof spawn === 'function') spawn(state, sp, { kind: 'normal' });
       r.toSpawn--;
       r.spawnTimer = r.spawnInterval;
     }
   }
 
-  if (r.toSpawn === 0 && r.alive === 0) {
-    events.emit('round:end', { round: r.round });
-    r.phase = 'break';
-    r.timer = ROUNDS.breakSeconds;
+  if (r.toSpawn === 0 && r.alive === 0) endRound(state);
+}
+
+function endRound(state) {
+  const r = state.rounds;
+  events.emit('round:end', { round: r.round });
+  r.phase = 'break';
+  r.timer = ROUNDS.breakSeconds;
+}
+
+function liveRoundZombies(state) {
+  let n = 0;
+  for (const z of state.zombies || []) {
+    if (z && !z._killed && z.mode !== 'dying' && isRoundZombie(z)) n++;
   }
+  return n;
+}
+
+// WO5 3.3 (boss.finishFight): stop spawning for the current round and recount live normal
+// zombies. If none are left the round ends now (round:end + break); otherwise it ends through
+// updateRounds when the last one dies. No-op outside an active round (a fight that started
+// during a break just lets the break continue). Returns true if the round ended here.
+export function endRoundNow(state) {
+  const r = state && state.rounds;
+  if (!r) return false;
+  r.toSpawn = 0;
+  r.alive = liveRoundZombies(state);
+  if (r.phase !== 'active' || r.alive > 0) return false;
+  endRound(state);
+  return true;
 }
 
 export function pauseSpawning(state, seconds) {

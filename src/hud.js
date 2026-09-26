@@ -5,6 +5,7 @@
 import { on } from './events.js';
 import { POWERUP_LABEL } from './powerups.js';
 import { createFaceState, updateFaceState, faceEvent, faceFrameKey, composeFace } from './sprites/face.js';
+import * as bossMod from './boss.js'; // WO5: boss bar reads bossHpFrac lazily (guarded)
 
 // Fallback labels in case powerups.js does not (yet) provide a key.
 const FALLBACK_LABEL = {
@@ -38,6 +39,20 @@ let grinBlockT = 0;              // seconds left during which grin events are ig
 // that was never seen before (buy, box take) counts as "getting a new gun" and grins.
 let seenWeapons = new WeakSet();
 let seenPlayer = null;           // the player whose weapons were last marked as seen
+// WO5 3.6: banner queue. Every banner (FIRE SALE!, BOSS: .., STAIRS OPENED, LEVEL n — NAME)
+// plays the same 3 s CSS animation on the one banner element; a banner requested while another
+// is showing waits its turn, so back-to-back banners never clobber each other.
+const BANNER_QUEUE_MAX = 4;
+let bannerQueue = [];
+let bannerBusy = false;
+let bannerStartedAt = 0;         // performance.now() when the current banner started
+const BANNER_FALLBACK_MS = 3400; // CSS animation is 3 s; advance anyway if animationend is lost
+// WO5 3.6: boss bar damage-lag (white bar holds, then drains to the red bar).
+const BOSS_LAG_HOLD = 0.45;      // seconds the white lag bar holds after a hit
+const BOSS_LAG_RATE = 0.6;       // lag drain speed, fraction of max HP per second
+let bossLag = 1;
+let bossLagHold = 0;
+let bossBarKey = null;           // bossId of the fight the lag belongs to
 
 // ---------- small DOM helpers ----------
 
@@ -128,7 +143,18 @@ function build() {
 
   const screen = el('div', 'hud-screen hidden');
 
-  root.append(points, round, weapon, powerups, bottomCenter, screen, faceBox, vitals);
+  // WO5 3.6: persistent level label under the round counter, boss bar below the power-up chips.
+  const levelLabel = el('div', 'hud-level hidden');
+  round.append(levelLabel);
+  const bossBar = el('div', 'hud-boss hidden');
+  const bossName = el('div', 'hud-boss-name');
+  const bossTrack = el('div', 'hud-boss-track');
+  const bossLagEl = el('div', 'hud-boss-lag');
+  const bossFill = el('div', 'hud-boss-fill');
+  bossTrack.append(bossLagEl, bossFill);
+  bossBar.append(bossName, bossTrack);
+
+  root.append(points, round, weapon, powerups, bossBar, bottomCenter, screen, faceBox, vitals);
   faceCtx = faceCanvas.getContext('2d');
 
   els = {
@@ -137,13 +163,11 @@ function build() {
     weapon, weaponSecondary, weaponName, weaponAmmo, ammoMag, ammoSep, ammoReserve, weaponReload,
     powerups, banner, prompt, screen,
     faceBox, vitals, health, healthValue, faceCanvas, kills, killsValue,
+    levelLabel, bossBar, bossName, bossLag: bossLagEl, bossFill,
   };
 
   // Self-cleaning animations.
-  banner.addEventListener('animationend', () => {
-    banner.classList.remove('show');
-    setHidden(banner, true);
-  });
+  banner.addEventListener('animationend', endBanner);
   round.addEventListener('animationend', (ev) => {
     if (ev.target === round) round.classList.remove('round-start');
   });
@@ -223,8 +247,64 @@ function onRoundStart() {
 
 function onPowerupCollected(p) {
   if (!els || !p || p.type !== 'fireSale') return;
+  queueBanner('FIRE SALE!');
+}
+
+// WO5 3.6 banners. Queued (see bannerQueue); an identical text already waiting is not re-added.
+function queueBanner(text) {
+  if (!els || !text) return;
+  if (bannerQueue.includes(text)) return;
+  if (bannerQueue.length >= BANNER_QUEUE_MAX) bannerQueue.shift();
+  bannerQueue.push(text);
+  if (!bannerBusy) playNextBanner();
+}
+
+function nowMs() {
+  return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+}
+
+function endBanner() {
+  if (!els) return;
+  els.banner.classList.remove('show');
+  setHidden(els.banner, true);
+  bannerBusy = false;
+  playNextBanner();
+}
+
+function playNextBanner() {
+  if (!els || bannerBusy || bannerQueue.length === 0) return;
+  const text = bannerQueue.shift();
+  bannerBusy = true;
+  bannerStartedAt = nowMs();
+  setText(els.banner, text);
+  setClass(els.banner, 'long', text.length > 14);
   setHidden(els.banner, false);
   retrigger(els.banner, 'show');
+}
+
+// The banner lives in .hud-bottom-center, which is display:none on menu/game over; a CSS
+// animation never ends there, so the queue is flushed when the game leaves 'playing'/'paused'.
+function resetBanners() {
+  bannerQueue = [];
+  bannerBusy = false;
+  if (!els) return;
+  els.banner.classList.remove('show');
+  setHidden(els.banner, true);
+}
+
+function onBossStart(p) {
+  const name = (p && p.name) || 'BOSS';
+  queueBanner('BOSS: ' + name);
+}
+
+function onBossDefeated() {
+  queueBanner('STAIRS OPENED');
+}
+
+function onLevelStart(p) {
+  if (!p || !(p.index > 0)) return; // no banner for the first level of a new game
+  const n = (p.index | 0) + 1;
+  queueBanner(p.name ? `LEVEL ${n} — ${String(p.name).toUpperCase()}` : `LEVEL ${n}`);
 }
 
 function onPlayerDamaged() {
@@ -269,6 +349,11 @@ export function initHud(rootEl) {
   grinBlockT = GRIN_SUPPRESS_SECONDS;
   seenWeapons = new WeakSet();
   seenPlayer = null;
+  bannerQueue = [];
+  bannerBusy = false;
+  bossLag = 1;
+  bossLagHold = 0;
+  bossBarKey = null;
   build();
   unsubs.push(
     on('points:changed', onPointsChanged),
@@ -279,6 +364,9 @@ export function initHud(rootEl) {
     on('weapon:equipped', onWeaponEquipped),
     on('game:start', onGameStart),
     on('game:restart', onGameStart),
+    on('boss:start', onBossStart),
+    on('boss:defeated', onBossDefeated),
+    on('level:start', onLevelStart),
   );
 }
 
@@ -292,6 +380,7 @@ export function updateHud(state) {
     const showScreen = phase === 'menu' || phase === 'gameover' || phase === 'paused';
     if (showScreen) buildScreen(state);
     setHidden(els.screen, !showScreen);
+    if (phase === 'menu' || phase === 'gameover') resetBanners();
   }
 
   updatePoints(state.player);
@@ -299,8 +388,54 @@ export function updateHud(state) {
   updateWeapon(state.player);
   updatePowerups(state);
   updatePrompt(state.shop && state.shop.prompt);
+  if (bannerBusy && nowMs() - bannerStartedAt > BANNER_FALLBACK_MS) endBanner();
   updateStatus(state);
+  updateLevelLabel(state);
+  updateBossBar(state);
   markSeenWeapons(state.player);
+}
+
+// WO5 3.6: small "L2 CATACOMBS" label under the round counter (shown whenever state.level exists).
+function updateLevelLabel(state) {
+  const lv = state.level;
+  setHidden(els.levelLabel, !lv);
+  if (!lv) return;
+  const n = ((lv.index | 0) + 1);
+  const name = lv.name || (lv.def && lv.def.name) || '';
+  setText(els.levelLabel, name ? `L${n} ${String(name).toUpperCase()}` : `L${n}`);
+}
+
+// WO5 3.6: boss bar, visible only while state.boss.phase === 'active'.
+function updateBossBar(state) {
+  const b = state.boss;
+  const active = !!b && b.phase === 'active';
+  setHidden(els.bossBar, !active);
+  if (!active) { bossBarKey = null; return; }
+  let frac = 0;
+  try {
+    frac = typeof bossMod.bossHpFrac === 'function' ? Number(bossMod.bossHpFrac(state)) : 0;
+  } catch { frac = 0; }
+  if (!Number.isFinite(frac)) frac = 0;
+  frac = Math.max(0, Math.min(1, frac));
+  const key = b.bossId != null ? b.bossId : (b.startedAt || 0);
+  if (key !== bossBarKey) { bossBarKey = key; bossLag = frac; bossLagHold = 0; }
+  const dt = lastPhase === 'playing' ? Math.max(0, Number(state.dt) || 0) : 0;
+  if (frac >= bossLag) {
+    bossLag = frac;
+    bossLagHold = 0;
+  } else if (els.bossFill.__frac != null && frac < els.bossFill.__frac) {
+    bossLagHold = BOSS_LAG_HOLD; // fresh hit: hold the white bar before it drains
+  } else if (bossLagHold > 0) {
+    bossLagHold = Math.max(0, bossLagHold - dt);
+  } else {
+    bossLag = Math.max(frac, bossLag - BOSS_LAG_RATE * dt);
+  }
+  els.bossFill.__frac = frac;
+  setText(els.bossName, String(b.name || 'BOSS').toUpperCase());
+  const fw = (frac * 100).toFixed(2) + '%';
+  const lw = (bossLag * 100).toFixed(2) + '%';
+  if (els.bossFill.__w !== fw) { els.bossFill.__w = fw; els.bossFill.style.width = fw; }
+  if (els.bossLag.__w !== lw) { els.bossLag.__w = lw; els.bossLag.style.width = lw; }
 }
 
 // Debug/QA helper (main.js __game.debug.face): fire a face event directly, bypassing the

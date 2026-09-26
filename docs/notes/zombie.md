@@ -171,3 +171,96 @@ Tests that need the real `player.damagePlayer` or map functions are skipped whil
   - A zombie knocked through an open window walks back in.
   - A zombie knocked into a pocket that is then boarded tears back out after the stun.
   - `applyKnockback` with stun 0, negative, NaN, Infinity or non-numeric returns `false` and sets no velocity.
+
+## WO5 (Agent C) - zombie kinds, difficulty, boss AI (WORK_ORDER_5.md 3.2)
+- **`spawnZombie(state, spawnPoint, opts = {})`**, where `opts.kind` is `'normal'` (the default), `'minion'` or
+  `'boss'`. Every zombie gets `z.kind`. Every zombie also stores its own combat stats: `damage`,
+  `attackWindup` and `attackCooldown`. The attack code reads these fields and falls back to `ZOMBIE.*` when a
+  field is missing, so older test fakes keep working. `zombie:spawned` and `zombie:killed` payloads now
+  carry `kind`, so waves.js can filter by it.
+- **Difficulty** is read from `state.level.difficulty`. When it is absent, the level-1 values apply
+  (`difficultyOf(d)` is exported).
+  - Normal zombies: health is `healthForRound(round, diff)`, which is the WO4 curve x `healthMult`, rounded
+    when the multiplier is not 1. Speed is multiplied by `speedMult`. The tier is rolled with
+    `tierForRound(round + sprintShift, rng)`. The rng is used in the same order as before, so level-1
+    runs are unchanged.
+  - Waves.js owns the zombie count.
+- **Minion**:
+  - Radius 10, speed = sprint x 1.1 x speedMult (+-10 % jitter).
+  - HP = round(`healthForRound(round, diff)` x 0.45). Damage 25, cooldown 0.8 s, the normal wind-up,
+    and tier `'sprint'` (used for the sprite).
+  - Never tied to a barricade (`barricadeId` is null even if the spawn point has one). Minions are always
+    `inside` and skip the pocket/tearing logic. Otherwise they run the normal AI, including stun and
+    Zombie Blood wandering.
+- **Boss**:
+  - Radius 34, speed 90 x speedMult. Damage 75, wind-up 0.5 s, cooldown 1.4 s.
+  - HP = round(4000 x healthMult x (1 + 0.12 x round)) (`bossHealthFor(round, diff)` is exported).
+  - `z.name` and `z.tint` come from `opts.name`/`opts.tint`, then `state.level.def.boss`, then the
+    defaults `'THE WARDEN'` / `#7a1f1f`.
+  - `z.charge = { timer, phase, dx, dy, t }`, plus the extras `hit` and `wall`. `z.summonTimer` is kept for
+    the contract, but boss.js owns the summon clock (`state.boss.summonTimer`).
+- **Reach scales with body size**: the attack range is `ZOMBIE.attackRange + (z.radius - ZOMBIE.radius)`
+  (normal 34, boss 54, minion 30). The spacing between two zombies is
+  `separationMinDist x (ra + rb) / 28`. Overlap pushes are split by mass (radius^2), so minions give way to
+  the boss. The boss has no steering separation and no contact blocking; it shoulders through its minions.
+- **Boss AI** runs before the normal AI. The boss has no pocket logic, never tears and is never stunned.
+  Zombie Blood does not affect it. The charge state machine:
+  - **idle**: `charge.timer` counts down while the boss chases or attacks normally. At 0 it starts a
+    charge, as long as the player is up and no melee wind-up is in progress. A swing that has started
+    always completes first.
+  - **telegraph** (0.6 s): the boss stands still. `boss:charge {x, y}` is emitted once, at the start.
+  - **dash**: the direction is locked on the player's position at the end of the telegraph. Speed is
+    speed x 3.5, moved in sub-steps of at most 10 px, with the normal `settle` (resolveCircle + bounds).
+    The dash ends in one of three ways:
+    - **Wall**: a sub-step gains less than half its intended distance. Phase `recover`, `wall = true`,
+      shake 0.35 s / 8.
+    - **Player contact**: centres within `rb + rp + 2`. `damagePlayer(75)`, the player is pushed 40 px
+      along the dash in steps of at most 20 px, each through `map.resolveCircle` (player collision, so no
+      wall clipping). Shake 0.4 s / 10, `attackCd` is set to 1.4 s, then `recover`.
+    - **Timeout** at 1.1 s: `recover` with no shake.
+  - **recover** (0.4 s): the boss stands still. After it: `idle`, and the timer resets to 7 s.
+- **Damage rules**:
+  - Insta-Kill on the boss: the hit becomes at least `BOSS.instaKillFrac x maxHp` (5 %). It is a floor, so a
+    bigger hit is not reduced, and the boss can still die from it at low HP.
+  - A non-finite hit on the boss (a Thundergun near-cone "kill" passes `Infinity`) becomes
+    `BOSS.thunderNearFrac x maxHp` (15 %).
+  - Minions follow the normal rules.
+- **Boss death**:
+  - `dyingT = BOSS.deathLinger` (2 s).
+  - Effects: an extra big blood decal (`radius 44`, `boss: true`, 12 s), a 0.3 s `flash` effect and a
+    0.6 s / 10 shake.
+  - `zombie:killed` carries the real cause plus `kind: 'boss'`. player.js pays 10; boss.js pays the other 190.
+- **Knockback**:
+  - `applyKnockback` on the boss is an instant displacement of `min(|v| / knockFriction,
+    BOSS.thunderNearKnock)` px (60 px for the Thundergun's 720 px/s) along the knock. It applies no stun,
+    does not cancel a wind-up and leaves the charge alone.
+  - **New export `pushZombie(state, z, dx, dy)`**: an exact displacement with wall collision, in steps of
+    at most 20 px, with no stun. Weapons (Agent D) should use it for the spec distances: near 60, far 40.
+  - **New helpers** `isBoss(z)` and `isMinion(z)`.
+- Tests: difficulty health/speed/sprintShift, minion and boss stats and kinds in payloads, Insta-Kill 5 %,
+  boss displacement-only knockback, the charge state machine (telegraph -> dash -> wall stop -> recover ->
+  idle, emitted once), charge hit (75 damage, exact 40 px knock), dash timeout, Zombie Blood (boss hunts,
+  minions wander), minions never tear in a boarded pocket, boss melee stats and reach.
+
+## WO5 FIX-2 (balance, docs/qa/wo5-balance.md #3, #4, #5, #7, #8, #9; review M1)
+- **Boss HP (#4):** `bossHealthFor` = `BOSS.baseHealth (4500) x healthMult x (1 + 0.12 x min(round,
+  BOSS.roundScaleCap = 12))`.
+- **Minion HP (#5):** new export `minionHealthFor(round, difficulty)` = `BOSS.minion.health (300) x
+  healthMult` (round independent). Falls back to `healthFrac x round health` if `health` is absent.
+- **Speed cap (#3):** new export `maxSpeedFor(kind)`. Normal zombies are clamped to
+  `ZOMBIE.maxSpeed` (214) after tier x speedMult x jitter; minions to `ZOMBIE.maxSpeed x
+  BOSS.minion.maxSpeedMult` (235.4); the boss is not clamped.
+- **Boss hit rules (#7, #8, M1):** new export `bossHitDamage(amount, maxHp, cause, instaKill)`, used
+  by `damageZombie` for the boss:
+  - Fractional effects keep their own fraction, no cap and no Insta-Kill bonus: cause `'nuke'`
+    (10 %), and the Thundergun near share (amount exactly `thunderNearFrac x maxHp`, or Infinity,
+    which becomes that share). The Thundergun is recognised by value because `weapons.js` passes
+    cause `'weapon'`; no gun hit can equal it since ordinary hits are capped below it.
+  - Everything else: x `BOSS.instaKillMult` (2) while Insta-Kill is active, then capped at
+    `BOSS.maxHitFrac` (0.03) x maxHp. The cap applies to every single damage instance (bullet,
+    pellet, Ray Gun direct and splash), which is where it lives rather than in `weapons.js`.
+  - **Deviation from spec 1.2:** 1.2 says Insta-Kill hits deal 5 % of boss max HP. That floor applied
+    per pellet/bullet and killed the boss in ~20 hits (review M1). Lead decision: x2 damage instead.
+    `BOSS.instaKillFrac` is kept only for the contract test and is unused.
+- **Thundergun near share (#9):** `BOSS.thunderNearFrac` 0.15 -> 0.08 (config).
+- Minions still die instantly to Insta-Kill.

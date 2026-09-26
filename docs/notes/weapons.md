@@ -125,3 +125,101 @@ export yet (Agent H's work in progress). This is not a weapons issue. It should 
   +/-PI, a wall blocking both kills and knockback, a real-map test (zombie behind a wall and a
   tearing pocket zombie behind a boarded window survive inside `killRange`; the one in clear LOS
   dies), miss stats, 4/12 reload/refill.
+
+## WO5 (Agent D, WORK_ORDER_5 3.4 / 1.2)
+
+**New guns** (all `tier: 2`, `sprite` = id, also in the box). Stats per 3.4; unspecified spreads chosen
+per class:
+
+| id | name | cls | cost | dmg | rpm | auto | mag/res | reload | extra |
+|----|------|-----|------|-----|-----|------|---------|--------|-------|
+| manowar | Man-O-War | ar | 250 | 120 | 520 | yes | 25/200 | 2.6 | pen 2, spread 0.035 |
+| xr2 | XR-2 | ar | 225 | 85 | 900 | yes | 30/270 | 2.1 | spread 0.02 |
+| weevil | Weevil | smg | 200 | 60 | 950 | yes | 48/288 | 2.0 | spread 0.06 |
+| marshal16 | Marshal 16 | shotgun | 225 | 70x8 | 110 | no | 2/40 | 1.6 | spread 0.16, range 650 |
+| gorgon | Gorgon | lmg | 300 | 130 | 400 | yes | 48/240 | 4.0 | pen 3, spread 0.05 |
+| dredge48 | 48 Dredge | lmg | 275 | 70 | 850 | yes | 48/288 | 3.6 | spread 0.07 |
+
+`haymaker12` cost `null -> 250`, `drakon` cost `null -> 300` (also `tier: 2`). `WALL_WEAPON_IDS` is
+still "every def with a numeric cost", so it grows 13 -> 21. Level 1's `wallbuys` (Agent A) keeps
+only the WO4 guns, so level 1 is unchanged. `ammoCost` works for all of them (`round(cost * 0.5)`,
+so Haymaker ammo 125, Drakon 150).
+
+**Box weights (decision).** The level-2 guns keep weight **2** (`SHOP.boxWeights.boxOnly`), as 3.4 /
+1.3 say ("box pool the same everywhere plus the new guns at box-only weight 2"), and Haymaker/Drakon
+stay at their old box-only weight 2. This keeps the relative odds of every WO4 box gun unchanged.
+Mechanism: `def()` gets a `tier` field (default 1). New export **`BOX_WALL_WEIGHT_IDS`** = wall ids
+with `tier !== 2` (exactly the 13 WO4 wall guns); `BOX_WEIGHTS` gives weight 3 only to those.
+**For shop.js (Agent G):** `boxWeights(boxIds, wallIds)` must default `wallIds` to
+`weapons.BOX_WALL_WEIGHT_IDS` (not `WALL_WEAPON_IDS`), otherwise its defaults disagree with
+`weapons.BOX_WEIGHTS` (shop.test "deepEqual weapons.BOX_WEIGHTS"). Checked at hand-off: shop.js
+already does this (with a `WALL_WEAPON_IDS` fallback).
+
+**Thundergun vs boss (1.2).** In `fireCone`, a zombie with `z.kind === 'boss'` goes through
+`thunderBoss` instead of the kill/knock bands (same angle, range and wall LOS test first):
+- near (d <= killRange): `damageZombie(state, z, maxHp * BOSS.thunderNearFrac, 'weapon', z.x, z.y)`
+  (maxHp = `z.maxHp`, else `state.boss.maxHp`, else `z.hp`), then, if it is still alive,
+  a knockback of `BOSS.thunderNearKnock` (60) px;
+- far: knockback of `BOSS.thunderFarKnock` (40) px only, no damage.
+- New export `bossKnock(px) -> { speed, stun }` converts a pixel distance into zombie.js's velocity
+  knock model: `speed = px * ZOMBIE.knockFriction + ZOMBIE.stunMinSpeed` (slide = (v0 - vMin)/k
+  exactly), `stun = ln(speed / vMin) / k` (~0.49 s for 60 px), i.e. the stun only lasts as long as
+  the slide itself, so there is no thundergun stun. `applyKnockback` needs a positive stun, and per
+  3.2 it ignores the stun for the boss anyway (displacement only), so this works with either
+  zombie.js behaviour. Minions are `kind: 'minion'` and behave like normal zombies (die in
+  killRange, 720 knock + 1.2 s stun beyond).
+
+Tests (`tests/weapons.test.js`, "WO5" block): new defs/stats/sprites/ammo, Marshal pellets and semi,
+Gorgon penetration, wall ids and box weights (level-1 wall ids unchanged at 3), `bossKnock`
+replayed through the zombie.js slide integration, boss near/far cone with fakes, `state.boss.maxHp`
+fallback, lethal chip skips knock, walls block the boss. WO4 table test updated to 21 wall ids.
+
+## WO5 FIX-4 (QA playtest #2, balance #10 and #12): tier-2 retune
+
+User requirement: level-2 guns must be "more powerful". Every tier-2 gun now kills a level-2
+round-8 zombie (`healthForRound(8, {healthMult: 1.5})` = 1275 HP) in <= 0.85x the KN-44's time,
+price tracks power, and each gun keeps its identity. The table above (WO5, Agent D) shows the
+original 3.4 values; these supersede them:
+
+| id | cost | dmg | rpm | reload | other |
+|----|------|-----|-----|--------|-------|
+| weevil | 200 | 60 -> 65 | 950 | 2.0 | |
+| xr2 | 225 | 85 -> 80 | 900 -> 800 | 2.1 | was the best gun at 225; now mid-pack |
+| marshal16 | 225 | 70 -> 100 (x8) | 110 -> 150 | 1.6 -> 1.5 | 2-shot kill at L2 R8 (80 % pellets) |
+| manowar | 250 | 120 -> 140 | 520 | 2.6 | |
+| haymaker12 | 250 | 25 -> 32 (x8) | 300 -> 330 | 3.0 | |
+| dredge48 | 275 | 70 -> 85 | 850 -> 900 | 3.6 | balance #12 |
+| gorgon | 300 | 130 -> 175 | 400 -> 480 | 4.0 | pen 3, best sustained DPS |
+| drakon | 300 | 220 -> 380 | 200 | 2.5 | pen 3, 4-shot kill at L2 R8 |
+
+**TTK model** (`ttkSeconds` in tests/weapons.test.js): sustained single-target fire from a full
+mag, 60/rpm between shots, `max(interval, reloadTime)` after the shot that empties the mag, pellet
+guns land 80 % of pellets, single-bullet guns hit every shot. "Mean" = average over L2 rounds 6-12
+(975-1896 HP), which smooths shots-to-kill steps such as the Marshal's 2-shot cliff.
+
+| gun | cost | R8 TTK before | R8 after | x KN-44 | mean L2 R6-12 before | after | x KN-44 |
+|-----|------|------|------|------|------|------|------|
+| KN-44 (L1) | 150 | 1.543 | 1.543 | 1.00 | 1.714 | 1.714 | 1.00 |
+| Weevil | 200 | 1.326 | 1.200 | 0.78 | 1.471 | 1.353 | 0.79 |
+| XR-2 | 225 | 0.933 | 1.125 | 0.73 | 1.086 | 1.296 | 0.76 |
+| Marshal 16 | 225 | 2.145 | 0.400 | 0.26 | 2.686 | 1.257 | 0.73 |
+| Man-O-War | 250 | 1.154 | 1.038 | 0.67 | 1.319 | 1.137 | 0.66 |
+| Haymaker 12 | 250 | 1.400 | 1.091 | 0.71 | 1.657 | 1.169 | 0.68 |
+| 48 Dredge | 275 | 1.271 | 0.933 | 0.60 | 1.412 | 1.086 | 0.63 |
+| Gorgon | 300 | 1.350 | 0.875 | 0.57 | 1.564 | 0.946 | 0.55 |
+| Drakon | 300 | 1.500 | 0.900 | 0.58 | 1.800 | 0.943 | 0.55 |
+
+Tests pin: R8 and mean TTK <= 0.85x KN-44 for all eight; Gorgon and Drakon beat every other tier-2
+gun on mean TTK; XR-2 is not the best; Weevil (cheapest) is the weakest; Dredge beats all 225-250
+guns; a gun 50+ points dearer always has the lower mean TTK; identity checks (Marshal biggest pull
+and 2-shot R8 kill, Drakon highest per-bullet damage + pen 3, Gorgon best sustained DPS + pen 3,
+Dredge fastest LMG with a 48 mag, Weevil highest rpm, Man-O-War heavier/slower than XR-2, XR-2
+tightest auto spread, Haymaker auto multi-pellet).
+
+**Ammo (balance #10).** `ammoCost(id)` uses 0.3x the price for `tier === 2` guns
+(`PRICES.wallAmmoMultTier2` if config defines it, else the local `TIER2_AMMO_MULT = 0.3`); tier 1
+keeps `PRICES.wallAmmoMult` (0.5). New ammo: Weevil 60, XR-2 68, Marshal 16 68, Man-O-War 75,
+Haymaker 12 75, 48 Dredge 83, Gorgon 90, Drakon 90. Level-1 prices unchanged.
+
+Also updated the thundergun "lethal chip" test to derive the boss HP from `BOSS.thunderNearFrac`
+(FIX-2 lowered it 0.15 -> 0.08, so the old 500 HP boss survived the 320 chip).

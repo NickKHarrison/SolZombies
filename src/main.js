@@ -15,6 +15,8 @@ import * as shop from './shop.js';
 import * as render from './render.js';
 import * as hud from './hud.js';
 import * as audio from './audio.js';
+import * as boss from './boss.js';
+import * as level from './level.js';
 
 const canvas = document.getElementById('game');
 const hudRoot = document.getElementById('hud');
@@ -25,18 +27,26 @@ let state = null;
 let flowTimer = 0;       // seconds since the last flow field rebuild
 let timeScale = 1;       // debug only
 let lastNow = 0;
+let flowMap = null;      // map object / version the current flow field was built for (WO5)
+let flowVersion = -1;
 
 // ---------------------------------------------------------------------------
 // State construction and wiring
 // ---------------------------------------------------------------------------
 
+// WO5: the map comes from level.startLevel(state, 0) (level 1 of the registry). The player is
+// created first (startLevel moves it to map.playerStart) and rounds exist so startLevel resets
+// them in place. Runs before initAll, so the index-0 level:start reaches no listener (HUD/audio
+// suppress index 0 anyway).
 function buildState(seed) {
   const s = createEmptyState(seed);
-  s.map = map.loadMap();
-  s.player = player.createPlayer(s.map.playerStart.x, s.map.playerStart.y);
+  s.player = player.createPlayer(0, 0);
   s.rounds = waves.createRoundState();
   s.debug = DEBUG_URL;
+  level.startLevel(s, 0);
   player.giveWeapon(s, PLAYER.startWeapon);
+  flowMap = null;
+  flowVersion = -1;
   updateCamera(s);
   return s;
 }
@@ -52,6 +62,7 @@ function initAll(s) {
   waves.initRounds(s);
   powerups.initPowerups(s);
   shop.initShop(s);
+  boss.initBoss(s);
   events.on('player:down', onPlayerDown);
 }
 
@@ -102,16 +113,32 @@ function updateCamera(s) {
 function update(s, inp, dt) {
   s.dt = dt;
   s.time += dt;
+  // WO5: level transition first. While it runs (fade out, swap at the midpoint, fade in) no
+  // gameplay system updates; render/HUD still run from tick().
+  level.updateLevel(s, dt);
   updateCamera(s);
+  if (s.transition) {
+    // WO5 FIX-1 (QA review L2): timed power-ups store absolute expiry times (state.time based);
+    // push them forward so the fade (nothing playable) costs them no time.
+    const act = s.powerups && s.powerups.active;
+    if (act) for (const k in act) if (typeof act[k] === 'number') act[k] += dt;
+    render.updateEffects(s, dt);
+    return;
+  }
   const aim = { x: inp.mouseX + s.camera.x, y: inp.mouseY + s.camera.y };
   player.updatePlayer(s, inp, aim, dt);
   waves.updateRounds(s, dt);
   flowTimer += dt;
-  if (!s.flow || flowTimer >= LOOP.flowRebuildInterval) {
+  // Rebuild on the interval, and at once when the map object (new level) or its version (doors,
+  // mega door seal/unseal, stairs) changed.
+  if (!s.flow || flowTimer >= LOOP.flowRebuildInterval || s.map !== flowMap || s.map.version !== flowVersion) {
     flowTimer = 0;
+    flowMap = s.map;
+    flowVersion = s.map.version;
     s.flow = pathfinding.buildFlowField(s.map, s.player.x, s.player.y);
   }
   zombie.updateZombies(s, dt);
+  boss.updateBoss(s, dt);
   weapons.updateBullets(s, dt);
   powerups.updatePowerups(s, dt);
   shop.updateShop(s, inp, dt);
@@ -263,6 +290,56 @@ function installDebug() {
     doors() {
       return (state.map.doors || []).map((d) => ({ id: d.id, letter: d.letter, cost: d.cost, open: d.open }));
     },
+    // WO5. openMegaDoor opens every normal door and then the mega door (free, no purchase:made).
+    openMegaDoor() {
+      debug.openAllDoors();
+      const ok = map.openMegaDoor(state.map);
+      if (ok) state.flow = null;
+      return ok;
+    },
+    // Teleports the player onto the arena tile nearest the mega door and starts the fight.
+    startBoss() {
+      const m = state.map;
+      if (!m.megaDoor || !m.arenaTiles || !m.arenaTiles.size) return false;
+      if (state.boss && state.boss.phase !== 'idle') return false;
+      if (!m.megaDoor.open && !m.megaDoor.sealed) debug.openMegaDoor();
+      const T = m.width / m.cols;
+      let best = null, bd = Infinity;
+      for (const i of m.arenaTiles) {
+        const x = (i % m.cols + 0.5) * T, y = (Math.floor(i / m.cols) + 0.5) * T;
+        const d = Math.hypot(x - m.megaDoor.cx, y - m.megaDoor.cy);
+        if (d < bd) { bd = d; best = { x, y }; }
+      }
+      state.player.x = best.x;
+      state.player.y = best.y;
+      const ok = boss.startFight(state);
+      state.flow = null;
+      return ok;
+    },
+    // Kills the live boss with cause 'weapon' (pays like a real kill: 10 + 190 = 200).
+    killBoss() {
+      const z = boss.bossZombie(state);
+      if (!z) return false;
+      zombie.killZombie(state, z, 'weapon');
+      return true;
+    },
+    boss() { return state.boss; },
+    // Starts the stairs descent (opens the stairs first if they are still closed).
+    descend() {
+      if (state.map.stairs && !state.map.stairs.open) map.openStairs(state.map);
+      return level.beginDescent(state);
+    },
+    // Loads level i (absolute progression index) at once, no fade.
+    setLevel(i = 0) {
+      state.transition = null;
+      const lv = level.startLevel(state, i);
+      return { index: lv.index, name: lv.name, loop: lv.loop, difficulty: { ...lv.difficulty } };
+    },
+    // Merges fields into the current level difficulty ({ healthMult, speedMult, countMult, sprintShift }).
+    setDifficulty(obj = {}) {
+      Object.assign(state.level.difficulty, obj);
+      return { ...state.level.difficulty };
+    },
     // Extras for QA:
     damagePlayer(n) { player.damagePlayer(state, n); return state.player.health; },
     teleport(x, y) { state.player.x = x; state.player.y = y; },
@@ -272,7 +349,7 @@ function installDebug() {
   window.__game = {
     get state() { return state; },
     debug,
-    modules: { events, input, player, weapons, zombie, pathfinding, waves, powerups, map, shop, render, hud, audio },
+    modules: { events, input, player, weapons, zombie, pathfinding, waves, powerups, map, shop, render, hud, audio, boss, level },
   };
 }
 

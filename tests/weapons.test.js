@@ -7,6 +7,7 @@ import {
   createWeapon, updateWeapon, tryFire, startReload, refillReserve, refillAll,
   createDeathMachine, updateBullets, ammoCost, hitscan, setWeaponDeps, resetWeaponDeps,
 } from '../src/weapons.js';
+import { healthForRound } from '../src/zombie.js';
 import { raycastWalls as realRaycastWalls, TILE_FLOOR as F, TILE_WALL as W, TILE_WINDOW as WIN, TILE_SPAWN_POCKET as P } from '../src/map.js';
 
 // Fake deps: no walls unless told, damage just subtracts hp and records calls.
@@ -32,7 +33,7 @@ test('weapon tables', () => {
   assert.ok(!WALL_WEAPON_IDS.includes('mr6'));
   assert.ok(WALL_WEAPON_IDS.includes('sheiva') && WALL_WEAPON_IDS.includes('argus'));
   assert.ok(!WALL_WEAPON_IDS.includes('raygun'));
-  assert.equal(WALL_WEAPON_IDS.length, 13);
+  assert.equal(WALL_WEAPON_IDS.length, 21); // WO5: 13 WO4 wall guns + 6 new + haymaker12 + drakon
   assert.ok(!BOX_WEAPON_IDS.includes('mr6') && !BOX_WEAPON_IDS.includes('deathmachine'));
   assert.equal(BOX_WEAPON_IDS.length, Object.keys(WEAPONS).length - 2);
   assert.equal(BOX_WEIGHTS.raygun, 1);
@@ -296,8 +297,9 @@ import { WONDER_WEAPON_IDS } from '../src/weapons.js';
 import { WEAPON_FX, SHOP } from '../src/config.js';
 
 function coneSetup({ wallT = Infinity } = {}) {
-  const calls = { kill: [], knock: [], ray: [] };
+  const calls = { kill: [], knock: [], ray: [], push: [] };
   setWeaponDeps({
+    pushZombie: (state, z, dx, dy) => { calls.push.push({ z, dx, dy }); return true; },
     raycastWalls: (map, ox, oy, dx, dy, max) => { calls.ray.push({ dx, dy, max }); return wallT; },
     damageZombie: (state, z, amount, cause, x, y) => { calls.kill.push({ z, amount, cause, x, y }); z.hp -= amount; if (z.hp <= 0) z.mode = 'dying'; },
     applyKnockback: (state, z, vx, vy, stun) => { calls.knock.push({ z, vx, vy, stun }); },
@@ -458,4 +460,244 @@ test('WO2 thundergun: semi-auto, 4/12 reload and refill', () => {
   refillAll(w);
   assert.equal(w.mag, 4);
   assert.equal(w.reserve, 12);
+});
+
+// ---------------------------------------------------------------------------------------------
+// WO5 3.4 (Agent D): level-2 guns, wall prices, box weights; 1.2 Thundergun vs boss.
+import { BOX_WALL_WEIGHT_IDS, bossKnock } from '../src/weapons.js';
+import { BOSS, ZOMBIE } from '../src/config.js';
+import { GUN_SPRITES, gunSpriteFor } from '../src/sprites/guns.js';
+
+const WO5_NEW = {
+  manowar:   { name: 'Man-O-War',  cls: 'ar',      cost: 250, damage: 140, rpm: 520, auto: true,  mag: 25, reserve: 200, reloadTime: 2.6, penetration: 2 },
+  xr2:       { name: 'XR-2',       cls: 'ar',      cost: 225, damage: 80,  rpm: 800, auto: true,  mag: 30, reserve: 270, reloadTime: 2.1, spread: 0.02 },
+  weevil:    { name: 'Weevil',     cls: 'smg',     cost: 200, damage: 65,  rpm: 950, auto: true,  mag: 48, reserve: 288, reloadTime: 2.0 },
+  marshal16: { name: 'Marshal 16', cls: 'shotgun', cost: 225, damage: 100, rpm: 150, auto: false, mag: 2,  reserve: 40,  reloadTime: 1.5, pellets: 8, spread: 0.16, range: 650 },
+  gorgon:    { name: 'Gorgon',     cls: 'lmg',     cost: 300, damage: 175, rpm: 480, auto: true,  mag: 48, reserve: 240, reloadTime: 4.0, penetration: 3 },
+  dredge48:  { name: '48 Dredge',  cls: 'lmg',     cost: 275, damage: 85,  rpm: 900, auto: true,  mag: 48, reserve: 288, reloadTime: 3.6 },
+};
+const WO4_WALL = ['rk5', 'lcar9', 'sheiva', 'krm262', 'kuda', 'vmp', 'vesper', 'pharo', 'bootlegger', 'kn44', 'hvk30', 'icr1', 'argus'];
+
+test('WO5 new weapon defs match 3.4 and use their own gun sprites', () => {
+  for (const [id, want] of Object.entries(WO5_NEW)) {
+    const d = WEAPONS[id];
+    assert.ok(d, `WEAPONS.${id} missing`);
+    assert.equal(d.id, id);
+    for (const [k, v] of Object.entries(want)) assert.equal(d[k], v, `${id}.${k}`);
+    assert.equal(d.sprite, id);
+    assert.equal(d.tier, 2);
+    assert.ok(Object.isFrozen(d));
+    assert.equal(gunSpriteFor(d), GUN_SPRITES[id], `${id} resolves to its own sprite`);
+    assert.equal(ammoCost(id), Math.round(want.cost * 0.3), `${id} tier-2 ammo = 0.3x price`);
+    const w = createWeapon(id);
+    assert.equal(w.mag, want.mag);
+    assert.equal(w.reserve, want.reserve);
+  }
+  assert.equal(WEAPONS.xr2.penetration, 1);
+});
+
+test('WO5 new guns fire per their stats (marshal16: 8 pellets, 1 round, semi-auto)', () => {
+  const { state, calls } = setup();
+  state.zombies.push(zombie(1, 40, 0, 1e6)); // close enough that every jittered pellet hits
+  const m = createWeapon('marshal16');
+  assert.equal(tryFire(state, m, 0, 0, 1, 0), true);
+  assert.equal(m.mag, 1);
+  assert.equal(calls.zombie.length, 8);
+  assert.ok(calls.zombie.every((c) => c.amount === WEAPONS.marshal16.damage));
+  assert.equal(tryFire(state, m, 0, 0, 1, 0), false, 'semi-auto: held trigger does not refire');
+  const g = setup();
+  g.state.zombies.push(zombie(1, 100, 0), zombie(2, 150, 0), zombie(3, 200, 0), zombie(4, 250, 0));
+  assert.equal(tryFire(g.state, createWeapon('gorgon'), 0, 0, 1, 0), true);
+  assert.equal(g.calls.zombie.length, 3, 'gorgon penetration 3');
+});
+
+test('WO5 wall prices: haymaker12 250, drakon 300; all level-2 guns are wall ids and in the box', () => {
+  assert.equal(WEAPONS.haymaker12.cost, 250);
+  assert.equal(WEAPONS.drakon.cost, 300);
+  const lvl2 = [...Object.keys(WO5_NEW), 'haymaker12', 'drakon'];
+  for (const id of lvl2) {
+    assert.ok(WALL_WEAPON_IDS.includes(id), `wall ${id}`);
+    assert.ok(BOX_WEAPON_IDS.includes(id), `box ${id}`);
+    assert.equal(BOX_WEIGHTS[id], SHOP.boxWeights.boxOnly, `${id} box weight = boxOnly`);
+    assert.ok(!BOX_WALL_WEIGHT_IDS.includes(id));
+    const c = WEAPONS[id].cost;
+    assert.ok(c >= 200 && c <= 350, `${id} level-2 price ${c} in 200..350`);
+  }
+  // Level-1 (WO4) wall guns unchanged: same ids, weight 3.
+  assert.deepEqual([...BOX_WALL_WEIGHT_IDS].sort(), [...WO4_WALL].sort());
+  for (const id of WO4_WALL) assert.equal(BOX_WEIGHTS[id], SHOP.boxWeights.wall);
+  assert.deepEqual([...WALL_WEAPON_IDS].sort(), [...WO4_WALL, ...lvl2].sort());
+  // Existing box-only guns / wonder weapons keep their weights.
+  assert.equal(BOX_WEIGHTS.locus, 2);
+  assert.equal(BOX_WEIGHTS.dingo, 2);
+  assert.equal(BOX_WEIGHTS.raygun, 1);
+  assert.equal(BOX_WEIGHTS.thundergun, 1);
+  assert.equal(BOX_WEAPON_IDS.length, Object.keys(WEAPONS).length - 2);
+});
+
+test('WO5 bossKnock: speed/stun give the requested slide under zombie.js stun physics', () => {
+  for (const px of [BOSS.thunderNearKnock, BOSS.thunderFarKnock]) {
+    const { speed, stun } = bossKnock(px);
+    assert.ok(stun > 0 && stun < 1);
+    // replay zombie.js updateStunned (no walls/separation) at 60 fps
+    const k = ZOMBIE.knockFriction, dt = 1 / 60;
+    let v = speed, x = 0, t = stun;
+    while (t > 0) {
+      const decay = Math.exp(-k * dt);
+      x += v * (1 - decay) / k;
+      v *= decay;
+      if (v < ZOMBIE.stunMinSpeed) v = 0;
+      t -= dt;
+    }
+    assert.ok(Math.abs(x - px) < 3, `slide ${x.toFixed(1)} ~ ${px}`);
+  }
+  assert.deepEqual(bossKnock(0), { speed: 0, stun: 0 });
+});
+
+test('WO5 thundergun vs boss: near cone = thunderNearFrac of max HP + 60 px knock; minions still die', () => {
+  const { state, calls } = coneSetup();
+  const nearBoss = zombie(1, 200, 0, 8000); nearBoss.kind = 'boss'; nearBoss.radius = 34;
+  const minion = zombie(2, 150, 20, 300); minion.kind = 'minion';
+  state.zombies.push(nearBoss, minion);
+  const w = createWeapon('thundergun');
+  assert.equal(tryFire(state, w, 0, 0, 1, 0), true);
+
+  const bossHit = calls.kill.find((c) => c.z === nearBoss);
+  assert.ok(bossHit, 'boss damaged');
+  assert.ok(Math.abs(bossHit.amount - 8000 * BOSS.thunderNearFrac) < 1e-9, 'near: 15% of max HP');
+  assert.equal(bossHit.cause, 'weapon');
+  assert.equal(nearBoss.hp, 8000 - 8000 * BOSS.thunderNearFrac);
+  assert.notEqual(nearBoss.mode, 'dying');
+  const minionHit = calls.kill.find((c) => c.z === minion);
+  assert.equal(minionHit.amount, Infinity, 'minions die like normal zombies');
+
+  // Integrator: the boss is pushed an exact 60 px via zombie.pushZombie (no velocity knock).
+  assert.equal(calls.knock.filter((c) => c.z === nearBoss).length, 0);
+  assert.equal(calls.push.length, 1);
+  const kb = calls.push[0];
+  assert.equal(kb.z, nearBoss);
+  assert.ok(Math.abs(kb.dx - BOSS.thunderNearKnock) < 1e-9 && Math.abs(kb.dy) < 1e-9);
+  assert.equal(state.stats.shotsHit, 1);
+});
+
+test('WO5 thundergun vs boss: far cone = 40 px knock only, no damage', () => {
+  const { state, calls } = coneSetup();
+  const farBoss = zombie(3, 0, 400, 8000); farBoss.kind = 'boss';
+  state.zombies.push(farBoss);
+  assert.equal(tryFire(state, createWeapon('thundergun'), 0, 0, 0, 1), true);
+  assert.equal(calls.kill.length, 0, 'far cone never damages the boss');
+  assert.equal(calls.knock.length, 0);
+  assert.equal(calls.push.length, 1);
+  assert.ok(Math.abs(calls.push[0].dy - BOSS.thunderFarKnock) < 1e-9 && Math.abs(calls.push[0].dx) < 1e-9);
+  assert.equal(farBoss.hp, 8000);
+  assert.equal(state.stats.shotsHit, 1);
+});
+
+test('WO5 thundergun vs boss: state.boss.maxHp fallback; lethal chip skips knock; walls block', () => {
+  const { state, calls } = coneSetup();
+  state.boss = { maxHp: 4000 };
+  const lethalHp = Math.floor(4000 * BOSS.thunderNearFrac) - 20; // chip >= hp -> dies (any near frac)
+  const b = zombie(1, 100, 0, lethalHp); b.kind = 'boss'; delete b.maxHp;
+  state.zombies.push(b);
+  assert.equal(tryFire(state, createWeapon('thundergun'), 0, 0, 1, 0), true);
+  assert.equal(calls.kill[0].amount, 4000 * BOSS.thunderNearFrac);
+  assert.equal(calls.knock.length + calls.push.length, 0, 'dead boss is not knocked');
+
+  const s2 = coneSetup({ wallT: 20 });
+  const b2 = zombie(2, 100, 0, 8000); b2.kind = 'boss';
+  s2.state.zombies.push(b2);
+  tryFire(s2.state, createWeapon('thundergun'), 0, 0, 1, 0);
+  assert.equal(s2.calls.kill.length + s2.calls.knock.length + s2.calls.push.length, 0, 'wall blocks the boss too');
+});
+
+// ---------------------------------------------------------------------------
+// WO5 FIX-4 (playtest #2, balance #12): tier-2 TTK calculator. Sustained single-target fire from
+// a full mag: first shot at t=0, then 60/rpm per shot; the shot that empties the mag is followed
+// by max(interval, reloadTime). Pellet weapons land 80 % of their pellets; single-bullet guns hit
+// every shot (equal accuracy for the KN-44 comparison). Uses expected damage, so shots-to-kill =
+// ceil(hp / (damage * pellets * acc)).
+// ---------------------------------------------------------------------------
+
+const TIER2_IDS = ['weevil', 'xr2', 'marshal16', 'manowar', 'haymaker12', 'dredge48', 'gorgon', 'drakon'];
+const L2 = { healthMult: 1.5 };
+
+function ttkSeconds(d, hp) {
+  const acc = d.pellets > 1 ? 0.8 : 1;
+  const shots = Math.ceil(hp / (d.damage * d.pellets * acc) - 1e-9);
+  const interval = 60 / d.rpm;
+  let t = 0, mag = d.mag;
+  for (let i = 1; i < shots; i++) {
+    mag -= 1;
+    if (mag <= 0) { t += Math.max(interval, d.reloadTime); mag = d.mag; } else t += interval;
+  }
+  return t;
+}
+// Mean TTK over level-2 rounds 6..12 (smooths the shots-to-kill steps, e.g. the Marshal's 2-shot cliff).
+function meanTtkL2(d) {
+  let sum = 0;
+  for (let r = 6; r <= 12; r++) sum += ttkSeconds(d, healthForRound(r, L2));
+  return sum / 7;
+}
+
+test('WO5 tier-2 TTK: every level-2 gun kills an L2 round-8 zombie in <= 0.85x the KN-44 time', () => {
+  const hp = healthForRound(8, L2);
+  assert.equal(hp, 1275);
+  const kn = ttkSeconds(WEAPONS.kn44, hp);
+  assert.ok(Math.abs(kn - 18 * 60 / 700) < 1e-9, 'KN-44: 19 shots, no reload');
+  for (const id of TIER2_IDS) {
+    assert.equal(WEAPONS[id].tier, 2, `${id} is tier 2`);
+    const t = ttkSeconds(WEAPONS[id], hp);
+    assert.ok(t <= 0.85 * kn, `${id} R8 TTK ${t.toFixed(3)} s > 0.85 x KN-44 ${kn.toFixed(3)} s`);
+    assert.ok(meanTtkL2(WEAPONS[id]) <= 0.85 * meanTtkL2(WEAPONS.kn44), `${id} mean L2 TTK`);
+  }
+});
+
+test('WO5 tier-2 TTK: price tracks power (Sanctum guns strongest, XR-2 not the best)', () => {
+  const mean = Object.fromEntries(TIER2_IDS.map((id) => [id, meanTtkL2(WEAPONS[id])]));
+  const others = TIER2_IDS.filter((id) => id !== 'gorgon' && id !== 'drakon');
+  for (const top of ['gorgon', 'drakon']) {
+    for (const id of others) assert.ok(mean[top] < mean[id], `${top} (${mean[top].toFixed(3)}) beats ${id} (${mean[id].toFixed(3)})`);
+  }
+  assert.ok(Math.min(...Object.values(mean)) < mean.xr2, 'XR-2 is not the best gun');
+  // The cheapest gun is the weakest; the 275-point Dredge beats every 200-250 point gun.
+  for (const id of TIER2_IDS) if (id !== 'weevil') assert.ok(mean[id] < mean.weevil, `${id} beats the 200-point Weevil`);
+  for (const id of ['xr2', 'marshal16', 'manowar', 'haymaker12']) assert.ok(mean.dredge48 < mean[id], `dredge48 beats ${id}`);
+  // Price-weighted: cost order never inverts by more than one price step (225 < 250 < 275 < 300).
+  for (const a of TIER2_IDS) for (const b of TIER2_IDS) {
+    if (WEAPONS[a].cost - WEAPONS[b].cost >= 50) assert.ok(mean[a] < mean[b], `${a} (${WEAPONS[a].cost}) beats ${b} (${WEAPONS[b].cost})`);
+  }
+});
+
+test('WO5 tier-2 identities hold after the retune', () => {
+  const W = WEAPONS;
+  const t2 = TIER2_IDS.map((id) => W[id]);
+  // Marshal 16: devastating close range = biggest single trigger pull, two-shot kill at L2 R8.
+  const pull = (d) => d.damage * d.pellets * (d.pellets > 1 ? 0.8 : 1);
+  for (const d of t2) if (d.id !== 'marshal16') assert.ok(pull(W.marshal16) > pull(d), `marshal16 pull > ${d.id}`);
+  assert.equal(W.marshal16.mag, 2);
+  assert.ok(2 * pull(W.marshal16) >= healthForRound(8, L2));
+  // Drakon: highest per-bullet damage and penetrating, long range.
+  for (const d of t2) if (d.id !== 'drakon') assert.ok(W.drakon.damage > d.damage, `drakon dmg > ${d.id}`);
+  assert.ok(W.drakon.penetration >= 3 && W.drakon.range >= 2000);
+  // Gorgon: heavy penetrating LMG, the best sustained single-target gun.
+  assert.equal(W.gorgon.cls, 'lmg');
+  assert.ok(W.gorgon.penetration >= 3);
+  const dps = (d) => pull(d) * d.mag / ((d.mag - 1) * 60 / d.rpm + Math.max(60 / d.rpm, d.reloadTime));
+  for (const d of t2) if (d.id !== 'gorgon') assert.ok(dps(W.gorgon) > dps(d), `gorgon sustained DPS > ${d.id}`);
+  // 48 Dredge: high-volume LMG (fastest LMG, big mag); Weevil: fastest-firing tier-2 gun.
+  assert.ok(W.dredge48.rpm > W.gorgon.rpm && W.dredge48.mag >= 48);
+  for (const d of t2) if (d.id !== 'weevil') assert.ok(W.weevil.rpm > d.rpm, `weevil rpm > ${d.id}`);
+  // Man-O-War: heavy AR (hits harder, fires slower than the XR-2, penetrates). XR-2: most accurate auto.
+  assert.ok(W.manowar.damage > W.xr2.damage && W.manowar.rpm < W.xr2.rpm && W.manowar.penetration >= 2);
+  for (const d of t2) if (d.auto && d.id !== 'xr2') assert.ok(W.xr2.spread < d.spread, `xr2 spread < ${d.id}`);
+  // Haymaker 12: automatic shotgun.
+  assert.ok(W.haymaker12.auto && W.haymaker12.pellets > 1);
+});
+
+test('WO5 balance #10: tier-2 wall ammo costs 0.3x the price, tier-1 keeps 0.5x', () => {
+  const want = { weevil: 60, xr2: 68, marshal16: 68, manowar: 75, haymaker12: 75, dredge48: 83, gorgon: 90, drakon: 90 };
+  for (const [id, c] of Object.entries(want)) assert.equal(ammoCost(id), c, id);
+  for (const id of WALL_WEAPON_IDS) {
+    if (WEAPONS[id].tier !== 2) assert.equal(ammoCost(id), Math.round(WEAPONS[id].cost * 0.5), id);
+  }
 });

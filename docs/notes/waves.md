@@ -58,3 +58,26 @@ None added. Everything comes from `ROUNDS` and `ZOMBIE.maxAlive` in config.js.
 - New export `spawnPointActive(map, sp)` (helper, used by the filter).
 - Tests: only active ids are picked, an empty active set falls back to all, a fake map without
   `activeSpawnIds` treats all as active, and `updateRounds` spawns only from the active point.
+
+## WO5 (Agent G, WORK_ORDER_5 3.3)
+
+- `rounds.suspended` (new field, `false` in `createRoundState`; absent counts as false). While
+  true, `updateRounds` returns at once: no spawning, no round-end check, and the break timer and
+  spawn timer are frozen (`pausedUntil` is still compared against `state.time`, so a Nuke pause
+  that expires during the fight simply no longer applies afterwards).
+- `zombiesForRound(round, difficulty)`: `ceil(base * difficulty.countMult)`. A missing difficulty
+  or a non-finite / non-positive `countMult` means 1 (unchanged WO4 counts). `ceil` subtracts
+  1e-9 first so float noise from `1.15^n` never rounds an exact integer up. `startRound` passes
+  `state.level?.difficulty`.
+- Kind filtering: new helper export `isRoundZombie(z)` is true for `kind` `'normal'`, missing
+  `kind` (pre-WO5 zombies, test fakes) or a missing zombie in the payload. The
+  `zombie:spawned` / `zombie:killed` listeners ignore everything else, so the boss and minions
+  never touch `alive` or `killedThisRound`.
+- `endRoundNow(state)`: `toSpawn = 0`, `alive` = recount of live (`!_killed`, mode not
+  `'dying'`) round zombies in `state.zombies`. If the round is `active` and `alive === 0` it
+  emits `round:end` and starts the normal break (returns true). With live normal zombies left
+  it returns false and `updateRounds` ends the round when the last one dies. During a break it
+  only zeroes `toSpawn` and recounts (no `round:end`: the fight began in a break, the break
+  just continues). It does not touch `suspended` (boss.finishFight clears it).
+- The spawner is now called as `spawnZombie(state, sp, { kind: 'normal' })` via a namespace
+  import of zombie.js (guarded with `typeof`).
