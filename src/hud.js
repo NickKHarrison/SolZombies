@@ -53,6 +53,10 @@ const BOSS_LAG_RATE = 0.6;       // lag drain speed, fraction of max HP per seco
 let bossLag = 1;
 let bossLagHold = 0;
 let bossBarKey = null;           // bossId of the fight the lag belongs to
+// WO6: touch HUD. mobileHud swaps the key hints for touch hints and hides .hud-prompt (the touch
+// ACTION button carries the prompt). Kept across initHud so either call order works.
+let mobileHud = false;
+let lastState = null;            // for rebuilding the centre screen when mobileHud flips
 
 // ---------- small DOM helpers ----------
 
@@ -183,10 +187,15 @@ function buildScreen(state) {
   if (phase === 'menu') {
     s.append(
       el('div', 'screen-title', 'SOL ZOMBIES'),
-      el('div', 'screen-sub blink', 'Click / press Enter to start'),
+      el('div', 'screen-sub blink', mobileHud ? 'Tap to start' : 'Click / press Enter to start'),
     );
     const list = el('ul', 'screen-controls');
-    const controls = [
+    const controls = mobileHud ? [
+      ['Left stick', 'Move (full = sprint)'],
+      ['Right stick', 'Aim + fire'],
+      ['RELOAD / SWAP / ‖', 'Reload / swap weapon / pause'],
+      ['ACTION', 'Buy / open / rebuild (hold)'],
+    ] : [
       ['WASD / Arrows', 'Move'],
       ['Shift', 'Sprint'],
       ['Mouse', 'Aim / Fire'],
@@ -216,11 +225,11 @@ function buildScreen(state) {
       row.append(el('span', 'stat-k', k), el('span', 'stat-v', String(v)));
       table.append(row);
     }
-    s.append(table, el('div', 'screen-sub blink', 'Press Enter to restart'));
+    s.append(table, el('div', 'screen-sub blink', mobileHud ? 'Tap to restart' : 'Press Enter to restart'));
   } else if (phase === 'paused') {
     s.append(
       el('div', 'screen-title', 'PAUSED'),
-      el('div', 'screen-sub', 'Press Esc / P to resume'),
+      el('div', 'screen-sub', mobileHud ? 'Tap ‖ to resume' : 'Press Esc / P to resume'),
     );
   }
   s.dataset.phase = phase;
@@ -354,7 +363,9 @@ export function initHud(rootEl) {
   bossLag = 1;
   bossLagHold = 0;
   bossBarKey = null;
+  lastState = null;
   build();
+  root.classList.toggle('mobile', mobileHud);
   unsubs.push(
     on('points:changed', onPointsChanged),
     on('round:start', onRoundStart),
@@ -373,6 +384,7 @@ export function initHud(rootEl) {
 export function updateHud(state) {
   if (!root || !els || !state) return;
 
+  lastState = state;
   const phase = state.phase || 'menu';
   if (phase !== lastPhase) {
     lastPhase = phase;
@@ -393,6 +405,47 @@ export function updateHud(state) {
   updateLevelLabel(state);
   updateBossBar(state);
   markSeenWeapons(state.player);
+}
+
+// ---------- WO6: mobile HUD + rotate overlay ----------
+
+// Touch hints instead of key hints: "Tap to start" / "Tap to restart", the touch controls list,
+// and .hud-prompt hidden (touch.js shows the prompt on its ACTION button). Safe before initHud
+// (the flag is applied when the HUD is built) and idempotent.
+export function setMobileHud(onOff) {
+  const want = !!onOff;
+  if (want === mobileHud && (!root || root.classList.contains('mobile') === want)) return;
+  mobileHud = want;
+  if (!root || !els) return;
+  root.classList.toggle('mobile', want);
+  if (want) setHidden(els.prompt, true);
+  // Rebuild the centre screen now if one is showing, else on the next phase change.
+  const phase = lastPhase;
+  if (lastState && (phase === 'menu' || phase === 'gameover' || phase === 'paused')) buildScreen(lastState);
+}
+
+// Full-screen "Rotate your phone" plate. Lives on <body> (position: fixed, z-index above #stage
+// and #touch) so it covers the whole portrait screen, not just the 16:9 stage strip. Re-init
+// safe: reuses an existing .hud-rotate element, never creates a second one.
+export function setRotateOverlay(onOff) {
+  if (typeof document === 'undefined' || !document.body) return;
+  let plate = document.querySelector('.hud-rotate');
+  if (!onOff && !plate) return;
+  if (!plate) {
+    plate = el('div', 'hud-rotate hidden');
+    plate.setAttribute('role', 'alert');
+    plate.append(
+      el('div', 'hud-rotate-phone'),
+      el('div', 'hud-rotate-text', 'Rotate your phone'),
+      el('div', 'hud-rotate-sub', 'Sol Zombies plays in landscape'),
+    );
+    // Swallow gestures on the plate (no scroll / zoom / stray stick input).
+    const stop = (ev) => { if (ev.cancelable) ev.preventDefault(); };
+    plate.addEventListener('touchmove', stop, { passive: false });
+    plate.addEventListener('contextmenu', stop);
+    document.body.append(plate);
+  }
+  setHidden(plate, !onOff);
 }
 
 // WO5 3.6: small "L2 CATACOMBS" label under the round counter (shown whenever state.level exists).
@@ -569,7 +622,7 @@ function updatePowerups(state) {
 }
 
 function updatePrompt(prompt) {
-  const show = !!(prompt && prompt.text) && lastPhase === 'playing';
+  const show = !mobileHud && !!(prompt && prompt.text) && lastPhase === 'playing';
   setHidden(els.prompt, !show);
   if (!show) return;
   setText(els.prompt, prompt.text);

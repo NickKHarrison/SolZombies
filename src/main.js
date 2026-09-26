@@ -17,9 +17,13 @@ import * as hud from './hud.js';
 import * as audio from './audio.js';
 import * as boss from './boss.js';
 import * as level from './level.js';
+import * as touch from './touch.js';
+import * as device from './device.js';
 
 const canvas = document.getElementById('game');
 const hudRoot = document.getElementById('hud');
+const stageEl = document.getElementById('stage');
+const touchLayer = document.getElementById('touch');
 const DEBUG_URL = /[?&]debug=1\b/.test(location.search);
 const START_KEYS = new Set(['Enter', 'NumpadEnter', 'Space']);
 
@@ -29,6 +33,17 @@ let timeScale = 1;       // debug only
 let lastNow = 0;
 let flowMap = null;      // map object / version the current flow field was built for (WO5)
 let flowVersion = -1;
+// WO6 mobile / touch.
+let mobile = false;       // device.isMobile() at boot
+let rotatePaused = false; // the game was auto-paused because the phone turned to portrait
+let lastRotate = null;    // last value sent to hud.setRotateOverlay (null = resend)
+let lastPrompt;           // last value sent to touch.setTouchPrompt (undefined = resend)
+
+// touch.js / hud.js mobile exports are optional at runtime: call only when present.
+function call(mod, name, ...args) {
+  const fn = mod && mod[name];
+  return typeof fn === 'function' ? fn(...args) : undefined;
+}
 
 // ---------------------------------------------------------------------------
 // State construction and wiring
@@ -64,6 +79,55 @@ function initAll(s) {
   shop.initShop(s);
   boss.initBoss(s);
   events.on('player:down', onPlayerDown);
+  applyMobile();
+}
+
+// WO6: (re)apply the touch scheme. Runs after hud.initHud so the HUD mobile mode survives restarts.
+function applyMobile() {
+  lastRotate = null;
+  lastPrompt = undefined;
+  rotatePaused = false;
+  if (!mobile) return;
+  try {
+    call(touch, 'initTouch', touchLayer, canvas);
+    call(touch, 'setTouchEnabled', true);
+    call(hud, 'setMobileHud', true);
+  } catch (err) {
+    console.error('[main] mobile setup error', err);
+  }
+}
+
+// "Press F to buy Sheiva [50]" -> "Buy Sheiva [50]" (touch ACTION button label).
+function touchPromptText(text) {
+  if (!text) return null;
+  const t = String(text).replace(/^(press f to|press f for|hold f to)\s+/i, '');
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : null;
+}
+
+// Per-frame touch ACTION label (after the shop update, so it matches this frame's prompt).
+function updateTouchPrompt(s) {
+  if (!mobile) return;
+  const prompt = s.phase === 'playing' && s.shop && s.shop.prompt ? touchPromptText(s.shop.prompt.text) : null;
+  if (prompt !== lastPrompt) {
+    lastPrompt = prompt;
+    call(touch, 'setTouchPrompt', prompt);
+  }
+}
+
+// Per-frame portrait handling (rotate overlay + auto-pause), before the gameplay update.
+function updateOrientation(s) {
+  if (!mobile) return;
+  const portrait = device.isPortrait();
+  if (portrait !== lastRotate) {
+    lastRotate = portrait;
+    call(hud, 'setRotateOverlay', portrait);
+  }
+  if (portrait) {
+    if (s.phase === 'playing') { s.phase = 'paused'; rotatePaused = true; }
+  } else if (rotatePaused) {
+    rotatePaused = false;
+    if (s.phase === 'paused') s.phase = 'playing';
+  }
 }
 
 function onPlayerDown(p) {
@@ -125,7 +189,11 @@ function update(s, inp, dt) {
     render.updateEffects(s, dt);
     return;
   }
-  const aim = { x: inp.mouseX + s.camera.x, y: inp.mouseY + s.camera.y };
+  // WO6: touch aim stick gives a direction; aim 300 px along it from the player.
+  const av = inp.aimVector;
+  const aim = av
+    ? { x: s.player.x + av.x * 300, y: s.player.y + av.y * 300 }
+    : { x: inp.mouseX + s.camera.x, y: inp.mouseY + s.camera.y };
   player.updatePlayer(s, inp, aim, dt);
   waves.updateRounds(s, dt);
   flowTimer += dt;
@@ -166,6 +234,7 @@ function tick(dt, inp) {
     if (state.phase === 'playing') state.phase = 'paused';
     else if (state.phase === 'paused') state.phase = 'playing';
   }
+  try { updateOrientation(state); } catch (err) { console.error('[main] mobile frame error', err); }
 
   try {
     if (state.phase === 'playing' && dt > 0) {
@@ -181,6 +250,7 @@ function tick(dt, inp) {
     }
     render.render(state);
     hud.updateHud(state);
+    updateTouchPrompt(state);
   } catch (err) {
     console.error('[main] frame error', err);
   }
@@ -199,6 +269,15 @@ function onKeyDown(e) {
 
 function onCanvasClick() {
   if (state && state.phase === 'menu') startGame();
+}
+
+// WO6: on touch devices any tap on the stage is the user gesture that goes immersive and
+// starts (menu) or restarts (game over) the game; game:start then creates/resumes audio.
+function onStagePointerDown() {
+  if (!mobile || !state) return;
+  device.requestImmersive();
+  if (state.phase === 'menu') startGame();
+  else if (state.phase === 'gameover') restartGame();
 }
 
 // ---------------------------------------------------------------------------
@@ -345,11 +424,13 @@ function installDebug() {
     teleport(x, y) { state.player.x = x; state.player.y = y; },
     start() { if (state.phase === 'menu') startGame(); },
     restart() { restartGame(); },
+    // WO6: the boot-time touch detection result (true = touch scheme active).
+    mobile() { return mobile; },
   };
   window.__game = {
     get state() { return state; },
     debug,
-    modules: { events, input, player, weapons, zombie, pathfinding, waves, powerups, map, shop, render, hud, audio, boss, level },
+    modules: { events, input, player, weapons, zombie, pathfinding, waves, powerups, map, shop, render, hud, audio, boss, level, touch, device },
   };
 }
 
@@ -358,10 +439,12 @@ function installDebug() {
 // ---------------------------------------------------------------------------
 
 function boot() {
+  mobile = device.isMobile();
   state = buildState(Date.now());
   initAll(state);
   window.addEventListener('keydown', onKeyDown);
   canvas.addEventListener('click', onCanvasClick);
+  if (stageEl) stageEl.addEventListener('pointerdown', onStagePointerDown, { capture: true });
   if (DEBUG_URL) installDebug();
   requestAnimationFrame(frame);
 }

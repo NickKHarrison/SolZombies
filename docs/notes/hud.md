@@ -204,3 +204,54 @@ placed in the bottom-left. Points sit directly above them.
 - `.hud-weapon` has a faint backing (`rgba(0,0,0,.38)`) for the same reason; the reload pulse
   keyframes now start from a dark-red 0.4 alpha so the plate never lightens while reloading.
 - The face box is already an opaque steel frame; no change. No `hud.js` change was needed.
+
+## WO6 (Agent B) — touch layer styles, mobile HUD, rotate overlay
+
+### Built
+- **styles.css**
+  - `html, body`: `touch-action: none`, `overscroll-behavior: none`, `(-webkit-)user-select: none`,
+    `-webkit-touch-callout: none`, transparent tap highlight. `#game` keeps `cursor: crosshair`.
+  - `#touch` (sibling of `#hud` in `#stage`): absolute inset 0, `z-index: 3`, `pointer-events: none`,
+    `touch-action: none`, and its own `container-type: size` so `cqh` inside it = 1% of stage
+    height (same as in `#hud`). Children (zones, buttons) get `pointer-events: auto`; base, knob and
+    `.tbtn-label` are `pointer-events: none`.
+  - `.tj-zone.tj-left/.tj-right`: transparent full-height halves (z 1). `.tj-base` 26cqh ring
+    (touch.js travel radius = 13% of the layer height), `.tj-knob` 10cqh; both absolute and
+    centred on the inline `left/top` touch.js sets (percent of the zone) via the individual
+    `translate: -50% -50%` property, so an inline `transform` would compose rather than replace.
+    `--tj-x/--tj-y` fallback if touch.js ever switches to CSS vars. Right (aim) stick is red-tinted.
+  - `.tbtn` (z 2, above the zones): 13x11cqh translucent dark rounded rect, light border, bold
+    2.4cqh label; `.pressed` = brighter fill/border + scale 0.95. RELOAD right 3cqh / bottom 19cqh,
+    SWAP stacked above (bottom 31.5cqh) — both above the weapon readout (bottom 3cqh, ~12.6cqh tall,
+    ~15cqh while "RELOADING"). PAUSE top-right, 8cqh square. ACTION bottom-centre gold pill, 11cqh
+    tall, min 34cqh, max width = gap between the health/kills block and its mirror image.
+  - Hidden states: touch.js uses inline `display: none` (not fought). Also `#touch .hidden`,
+    and ACTION hides when empty or its `.tbtn-label` is empty. Buttons are hidden on menu / game
+    over via `#hud[data-phase=...] ~ #touch .tbtn` (tap anywhere starts); while paused only PAUSE
+    shows.
+  - `#hud.mobile .hud-prompt` hidden; `#hud.mobile .hud-bottom-center` moves to bottom 16cqh so
+    banners clear the ACTION pill.
+  - `.hud-rotate`: fixed full-viewport plate, z-index 1000, CSS-drawn phone (border + speaker slot
+    + home dot) rotating 0 -> -90deg on a loop, "ROTATE YOUR PHONE" + sub line, sized in vmin.
+- **hud.js**
+  - `setMobileHud(on)`: module flag (survives `initHud`; `initHud` re-applies the `mobile` class).
+    Menu sub "Tap to start", touch controls list (Left stick / Right stick / RELOAD / SWAP / ‖ /
+    ACTION), game over "Tap to restart", paused "Tap ‖ to resume"; `updatePrompt` never shows
+    `.hud-prompt` while mobile. Rebuilds the centre screen immediately if one is showing. Desktop
+    text unchanged when off.
+  - `setRotateOverlay(on)`: creates one `.hud-rotate` on `<body>` lazily (reuses an existing one,
+    so repeated calls / re-init / a second module instance never duplicate it) and toggles
+    `.hidden`. It lives on body because in portrait the stage is only a 16:9 strip and `#hud`'s
+    size containment would trap `position: fixed`. It takes pointer events (swallows touches and
+    prevents touchmove), so a tap on it does not reach the stage's first-gesture listener.
+
+### Verified (port 8192, `?debug=1`, injected sample `#touch` with the contract classes)
+- 1604x902 stage: face 185–322 x 27–183; vitals 185–399 x 795–875; points y718–783; round
+  x185–311; chips 729–1191 x 23–59; long banner 720–1200 x 698–758; weapon 1622–1735 x 761–875;
+  RELOAD 1617–1735 x 631–731; SWAP x 521–615; PAUSE 1663–1735 x 27–99; ACTION 805–1115 x 776–875.
+  No overlaps (checked by rect intersection); boss bar (WO5: x707–1212 y73–126) clear of PAUSE.
+- Forced 800x450 and 640x360 stages: everything scales, no overlaps.
+- Rotate plate covers the full viewport, single instance after repeated calls, top at hit-test;
+  hides cleanly. Menu / game over texts switch between touch and desktop wording. No console
+  errors. `node --check src/hud.js` OK, `npm test` green.
+- Still needs a real-phone check (safe-area insets / notches were not tested).

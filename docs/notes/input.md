@@ -42,3 +42,15 @@
 
 ## Bugs found elsewhere
 None.
+
+## WO6 (touch)
+- `input.js` imports `touch.js`. `getInput()` gains `aimVector` (`{x, y}` unit, last non-zero touch
+  aim; `null` on desktop / before any touch aim) and `autoFire` (true while the touch aim stick is
+  past 0.35).
+- When `touch.isTouchActive()`: move stick overrides WASD when deflected; sprint/fire/firePressed/
+  reload/swap/interact/interactHeld/pause are OR-ed with keyboard/mouse; a layer tap sets both
+  `start` and `restart`. Keyboard and mouse keep working.
+- `endFrame()` also calls `touch.endTouchFrame()`.
+- player.js: after firing, `if (input.autoFire && w.mag > 0) w.triggerHeld = false` so semi-autos
+  cycle at their rpm (kept held on an empty mag so `weapon:empty` isn't emitted every frame).
+  Covered by `tests/autofire.test.js`.

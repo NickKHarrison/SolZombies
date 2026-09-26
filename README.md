@@ -55,6 +55,25 @@ on). Restarting always returns to level 1.
 | Esc / P | Pause |
 | Backquote | Toggle debug overlay |
 
+## Mobile (touch)
+
+Phones and tablets are detected automatically (coarse pointer, or a touch screen whose shorter
+side is under 900 css px) and switch to a twin-stick touch scheme. Desktop is unchanged.
+
+- Play in **landscape**. In portrait a "Rotate your phone" overlay is shown and the game pauses;
+  it resumes when you turn the phone back. The first tap requests fullscreen and a landscape
+  lock (best effort, depending on the browser).
+- **Tap anywhere** to start, and to restart after game over.
+- **Left half:** touch anywhere to spawn a move stick; drag to move, push to the edge to sprint.
+- **Right half:** aim stick. Drag to aim; drag past about a third of the way to auto-fire.
+  Releasing keeps the last facing.
+- **Buttons:** RELOAD and SWAP (bottom right), pause (top right), and an ACTION button
+  (bottom centre) that appears next to a wall buy, door, box or barricade. Tap it to buy or open;
+  hold it to rebuild a barricade.
+- **Override:** add `?touch=1` to force the touch scheme (e.g. to try it in desktop Chrome; the
+  mouse drives the sticks) or `?touch=0` to force desktop controls on a touch device.
+  With `?debug=1`, `__game.debug.mobile()` returns the detection result.
+
 ## Debug
 
 Open http://localhost:8080/?debug=1 to expose `window.__game` with helpers such as

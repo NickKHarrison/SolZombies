@@ -31,6 +31,13 @@ html, body {
   height: 100%;
   overflow: hidden;
   background: #000;
+  /* WO6: the page never scrolls, zooms, bounces or selects text on touch. */
+  touch-action: none;
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* ---------- stage: 16:9, centered, scale-to-fit ---------- */
@@ -588,4 +595,244 @@ html, body {
 .hud-boss-fill {
   background: linear-gradient(180deg, #ff4a3a 0%, #c81414 55%, #7d0a0a 100%);
   box-shadow: inset 0 0.3cqh 0 rgba(255, 255, 255, 0.25);
+}
+
+/* ---------- WO6: touch controls layer (#touch, built by src/touch.js) ---------- */
+/* #touch is a sibling of #hud inside #stage, so it is its own size container: cqh here is 1% of
+   the stage height, exactly as inside #hud. The layer itself never takes pointer events; its
+   children (stick zones, buttons) do. Layout (16:9, cqh):
+     - PAUSE      top-right, 8cqh square (clear of the top-centre chips / boss bar).
+     - RELOAD     right 3cqh, bottom 19cqh (above the weapon readout: bottom 3cqh, ~15cqh tall
+                  incl. "RELOADING"); SWAP stacked above it. 13x11cqh each.
+     - ACTION     bottom-centre pill, bottom 3cqh, 11cqh tall, never wider than the gap between the
+                  health/kills block and its mirror image; on mobile the banner column moves up
+                  above it (#hud.mobile .hud-bottom-center).
+   Nothing sits over the face box (top-left), points/health/kills (bottom-left) or round counter
+   (left-centre). */
+
+#touch {
+  position: absolute;
+  inset: 0;
+  z-index: 3;                    /* above #hud; the rotate plate (.hud-rotate, fixed on body) is higher */
+  pointer-events: none;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  container-type: size;
+  overflow: hidden;
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  color: #f2f2f2;
+}
+
+#touch > *,
+#touch .tj-zone,
+#touch .tbtn { pointer-events: auto; touch-action: none; }
+#touch .tj-base, #touch .tj-knob, #touch .tbtn-label { pointer-events: none; }
+#touch .hidden,
+#touch[hidden] { display: none !important; }
+
+/* Dynamic-stick zones: transparent full-height halves. */
+.tj-zone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 50%;
+  z-index: 1;
+  background: transparent;
+}
+.tj-zone.tj-left { left: 0; }
+.tj-zone.tj-right { right: 0; }
+
+/* Stick base + knob, centred on the left/top touch.js sets inline (or on --tj-x/--tj-y). The
+   centring uses the individual `translate` property, so an inline `transform` on the knob (drag
+   offset) composes with it instead of replacing it. */
+.tj-base,
+.tj-knob {
+  position: absolute;
+  left: var(--tj-x, 50%);
+  top: var(--tj-y, 50%);
+  translate: -50% -50%;
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+
+.tj-base {
+  width: 26cqh;                  /* touch.js travel radius = 13% of the layer height */
+  height: 26cqh;
+  border: 0.5cqh solid rgba(255, 255, 255, 0.45);
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.04) 0 55%, rgba(255, 255, 255, 0.12) 100%);
+  box-shadow: 0 0 1.5cqh rgba(0, 0, 0, 0.5), inset 0 0 1.5cqh rgba(0, 0, 0, 0.35);
+}
+
+.tj-knob {
+  width: 10cqh;
+  height: 10cqh;
+  border: 0.4cqh solid rgba(255, 255, 255, 0.85);
+  background: radial-gradient(circle at 40% 35%, rgba(255, 255, 255, 0.55), rgba(200, 200, 210, 0.3) 70%);
+  box-shadow: 0 0 1.2cqh rgba(0, 0, 0, 0.6);
+}
+/* Knob nested inside the base: centred on the base unless touch.js positions it. */
+.tj-base > .tj-knob { left: var(--tj-kx, 50%); top: var(--tj-ky, 50%); }
+.tj-zone.tj-right .tj-base { border-color: rgba(255, 110, 90, 0.5); }
+.tj-zone.tj-right .tj-knob { border-color: rgba(255, 150, 130, 0.9); }
+
+/* Buttons: translucent dark rounded squares, light border, bold label. */
+.tbtn {
+  position: absolute;
+  z-index: 2;                    /* above the stick zones */
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 13cqh;
+  height: 11cqh;
+  padding: 0 0.8cqh;
+  border: 0.35cqh solid rgba(255, 255, 255, 0.55);
+  border-radius: 1.8cqh;
+  background: rgba(10, 10, 14, 0.45);
+  box-shadow: 0 0.4cqh 1.2cqh rgba(0, 0, 0, 0.45);
+  color: #f2f2f2;
+  font-size: 2.4cqh;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  line-height: 1.1;
+  text-align: center;
+  text-shadow: 0 0.1cqh 0.3cqh rgba(0, 0, 0, 0.9);
+  white-space: nowrap;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  transition: background-color 0.08s ease, border-color 0.08s ease, transform 0.08s ease;
+}
+
+.tbtn.pressed {
+  background: rgba(255, 255, 255, 0.32);
+  border-color: rgba(255, 255, 255, 0.95);
+  color: #ffffff;
+  transform: scale(0.95);
+}
+
+.tbtn-reload { right: 3cqh; bottom: 19cqh; }
+.tbtn-swap   { right: 3cqh; bottom: 31.5cqh; }
+
+.tbtn-pause {
+  top: 3cqh;
+  right: 3cqh;
+  width: 8cqh;
+  height: 8cqh;
+  padding: 0;
+  border-radius: 1.4cqh;
+  font-size: 3.6cqh;
+  letter-spacing: 0;
+}
+
+.tbtn-action {
+  left: 50%;
+  bottom: 3cqh;
+  translate: -50% 0;
+  width: auto;
+  min-width: 34cqh;
+  max-width: calc(100% - 2 * (var(--status-left) + var(--status-w) + 2cqh));
+  height: 11cqh;
+  padding: 0 4cqh;
+  border-radius: 5.5cqh;
+  border-color: rgba(255, 213, 74, 0.8);
+  background: rgba(30, 22, 4, 0.55);
+  color: #ffd54a;
+  font-size: 3cqh;
+  white-space: normal;
+  text-wrap: balance;
+}
+.tbtn-action.pressed { background: rgba(255, 213, 74, 0.35); border-color: #ffe98a; color: #fff6d0; }
+.tbtn-action .tbtn-label { overflow: hidden; text-overflow: ellipsis; }
+
+/* ACTION is hidden with .hidden, or when its label (or the button itself) is empty. */
+.tbtn-action:empty,
+.tbtn-action:has(> .tbtn-label:empty) { display: none; }
+
+/* Gameplay buttons are hidden on the menu / game over (tapping anywhere starts / restarts);
+   PAUSE stays while paused so it can resume. */
+#hud[data-phase="menu"] ~ #touch .tbtn,
+#hud[data-phase="gameover"] ~ #touch .tbtn,
+#hud[data-phase="paused"] ~ #touch .tbtn:not(.tbtn-pause) { display: none; }
+
+/* Mobile HUD (hud.setMobileHud(true)): the ACTION button carries the shop prompt, and the banner
+   column moves up so banners clear the ACTION pill. */
+#hud.mobile .hud-prompt { display: none !important; }
+#hud.mobile .hud-bottom-center { bottom: 16cqh; }
+
+/* ---------- WO6: "Rotate your phone" plate (hud.setRotateOverlay) ---------- */
+/* Appended to <body> (not #hud): the stage is only a 16:9 strip in portrait, and #hud's size
+   containment would trap position:fixed. Above #stage and #touch; swallows touches. */
+.hud-rotate {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5vmin;
+  background: #050505;
+  color: #f2f2f2;
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  text-align: center;
+  pointer-events: auto;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.hud-rotate.hidden { display: none; }
+
+.hud-rotate-phone {
+  position: relative;
+  width: 16vmin;
+  height: 28vmin;
+  border: 1.4vmin solid #f2f2f2;
+  border-radius: 3vmin;
+  box-sizing: border-box;
+  animation: hud-rotate-phone 2.4s ease-in-out infinite;
+}
+/* Speaker slot + home dot. */
+.hud-rotate-phone::before {
+  content: "";
+  position: absolute;
+  top: 1.2vmin;
+  left: 50%;
+  width: 4vmin;
+  height: 0.8vmin;
+  translate: -50% 0;
+  border-radius: 0.4vmin;
+  background: #f2f2f2;
+}
+.hud-rotate-phone::after {
+  content: "";
+  position: absolute;
+  bottom: 1.2vmin;
+  left: 50%;
+  width: 2.2vmin;
+  height: 2.2vmin;
+  translate: -50% 0;
+  border-radius: 50%;
+  border: 0.5vmin solid #f2f2f2;
+  box-sizing: border-box;
+}
+
+@keyframes hud-rotate-phone {
+  0%, 20% { transform: rotate(0deg); }
+  55%, 85% { transform: rotate(-90deg); }
+  100% { transform: rotate(0deg); }
+}
+
+.hud-rotate-text {
+  font-size: 5.5vmin;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.hud-rotate-sub {
+  font-size: 3.4vmin;
+  color: #9a9a9a;
 }

@@ -124,6 +124,9 @@ export function updatePlayer(state, input, aim, dt) {
     if (!fired && w.mag <= 0 && !w.reloading && w.reserve > 0) weapons.startReload(w);
   }
   w.triggerHeld = !!input.fire;
+  // WO6: touch auto-fire releases the trigger each frame so semi-autos cycle at their rpm.
+  // Keep it held on an empty mag so 'weapon:empty' is not re-emitted every frame.
+  if (input.autoFire && w.mag > 0) w.triggerHeld = false;
 }
 
 export function damagePlayer(state, amount) {

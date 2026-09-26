@@ -11,8 +11,14 @@
 //   slot  : 0 (no digit pressed this frame) | 1 | 2  (1-based weapon slot chosen with digit keys)
 //   wheel : -1 | 0 | 1 wheel direction this frame (also sets swap = true)
 //   resetInput() : releases everything (optional helper for restart/tests)
+//
+// WO6 (touch): getInput() also returns
+//   aimVector : {x, y} unit (last non-zero touch aim) while touch is active, else null (desktop)
+//   autoFire  : true while the touch aim stick is past the fire threshold (semi-autos cycle at rpm)
+// and merges touch.getTouchState() when touch.isTouchActive(). Keyboard/mouse keep working.
 
 import { INPUT } from './config.js';
+import * as touch from './touch.js';
 
 const WHEEL_THRESHOLD = INPUT.wheelThreshold; // config.js (moved by integrator) // min |deltaY| to count as a wheel step (ignores trackpad jitter of 0)
 
@@ -165,7 +171,7 @@ export function getInput() {
     mx *= inv;
     my *= inv;
   }
-  return {
+  const out = {
     moveX: mx,
     moveY: my,
     mouseX,
@@ -184,10 +190,35 @@ export function getInput() {
     debugKey: edge.debugKey,
     slot: edge.slot,
     wheel: edge.wheel,
+    aimVector: null,
+    autoFire: false,
   };
+  if (touch.isTouchActive()) mergeTouch(out, touch.getTouchState());
+  return out;
+}
+
+/** WO6: fold the touch snapshot into an input snapshot (touch wins for movement when the stick is used). */
+function mergeTouch(out, t) {
+  if (t.moveX !== 0 || t.moveY !== 0) {
+    out.moveX = t.moveX;
+    out.moveY = t.moveY;
+  }
+  out.sprint = out.sprint || t.sprint;
+  if (t.aimX !== 0 || t.aimY !== 0) out.aimVector = { x: t.aimX, y: t.aimY };
+  out.fire = out.fire || t.fire || t.firePressed;
+  out.firePressed = out.firePressed || t.firePressed;
+  out.autoFire = t.fire;
+  out.reload = out.reload || t.reload;
+  out.swap = out.swap || t.swap;
+  out.interact = out.interact || t.interact;
+  out.interactHeld = out.interactHeld || t.interactHeld;
+  out.pause = out.pause || t.pause;
+  out.start = out.start || t.start;
+  out.restart = out.restart || t.start;
 }
 
 /** Clear edge-triggered flags. Call once at the end of each frame. */
 export function endFrame() {
   clearEdges();
+  touch.endTouchFrame();
 }
