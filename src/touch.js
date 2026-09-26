@@ -12,7 +12,8 @@
 //
 // DOM created (styled by styles.css, Agent B):
 //   .tj-zone.tj-left / .tj-zone.tj-right  (full-height halves)
-//   .tj-base + .tj-knob inside each zone (hidden until touched; left/top set in % of the zone)
+//   .tj-base + .tj-knob inside each zone (always visible at a FIXED position set by CSS; only the
+//   knob moves while dragged, left/top in % of the zone; released knob recentres on the base)
 //   .tbtn.tbtn-reload "RELOAD", .tbtn.tbtn-swap "SWAP", .tbtn.tbtn-pause "‖", .tbtn.tbtn-action (> .tbtn-label)
 //   pressed state: class .pressed
 
@@ -21,6 +22,7 @@ const MOVE_DEADZONE = 0.08;   // move stick magnitude below this = no movement
 const SPRINT_MAG = 0.92;      // move stick magnitude above this = sprint
 const AIM_DEADZONE = 0.12;    // aim direction only updates above this magnitude (keeps last aim)
 const FIRE_MAG = 0.35;        // aim stick magnitude above this = auto-fire
+const GRAB_RADIUS = 2.2;      // a touch within this many stick radii of a fixed stick grabs it
 
 let layer = null;
 let enabled = false;
@@ -60,20 +62,21 @@ function accepts(e) {
 
 // ---------------------------------------------------------------- sticks
 
+// Fixed sticks (mobile follow-up): base and knob are always shown; `on` only marks the stick active.
 function stickVisible(s, on) {
   if (!s.base) return;
-  s.base.style.display = on ? '' : 'none';
-  s.knob.style.display = on ? '' : 'none';
   s.zone.classList.toggle('active', on);
+}
+
+// Fixed centre of a stick in client coordinates, read from its CSS-positioned base.
+function stickCentre(s) {
+  const b = s.base.getBoundingClientRect();
+  return { x: b.left + b.width / 2, y: b.top + b.height / 2 };
 }
 
 function placeStick(s) {
   const r = s.zone.getBoundingClientRect();
   const w = r.width || 1, h = r.height || 1;
-  const bx = ((s.ox - r.left) / w) * 100;
-  const by = ((s.oy - r.top) / h) * 100;
-  s.base.style.left = bx + '%';
-  s.base.style.top = by + '%';
   s.knob.style.left = (((s.ox + s.dx * s.radius) - r.left) / w) * 100 + '%';
   s.knob.style.top = (((s.oy + s.dy * s.radius) - r.top) / h) * 100 + '%';
 }
@@ -82,13 +85,12 @@ function stickDown(s, e) {
   const lr = layer.getBoundingClientRect();
   s.pointerId = e.pointerId;
   s.radius = Math.max(8, (lr.height || 400) * STICK_RADIUS_H);
-  s.ox = e.clientX;
-  s.oy = e.clientY;
-  s.dx = 0; s.dy = 0; s.mag = 0;
+  const c = stickCentre(s);
+  s.ox = c.x;
+  s.oy = c.y;
   try { s.zone.setPointerCapture(e.pointerId); } catch (_) { /* synthetic / already gone */ }
-  placeStick(s);
   stickVisible(s, true);
-  if (s.side === 'right') updateAim(s);
+  stickMove(s, e); // the finger's offset from the fixed centre applies at once
 }
 
 function stickMove(s, e) {
@@ -107,6 +109,7 @@ function stickUp(s) {
   }
   s.pointerId = null;
   s.dx = 0; s.dy = 0; s.mag = 0;
+  if (s.knob) { s.knob.style.left = ''; s.knob.style.top = ''; } // spring back to the base centre
   stickVisible(s, false);
   if (s.side === 'right') firing = false; // aimX/aimY are kept (last aim retention)
 }
@@ -209,14 +212,17 @@ function onPointerDown(e) {
   }
   // Anything that is not a button is a "tap" for menu start / gameover restart (main decides by phase).
   edge.start = true;
-  const zoneEl = e.target && e.target.closest ? e.target.closest('.tj-zone') : null;
-  let side = zoneEl && zoneEl.dataset.stick;
-  if (!side) {
-    const r = layer.getBoundingClientRect();
-    side = e.clientX < r.left + r.width / 2 ? 'left' : 'right';
+  const lr = layer.getBoundingClientRect();
+  const r = Math.max(8, (lr.height || 400) * STICK_RADIUS_H);
+  let best = null, bestD = Infinity;
+  for (const side of ['left', 'right']) {
+    const st = sticks[side];
+    if (!st.base || st.pointerId !== null) continue;
+    const c = stickCentre(st);
+    const d = Math.hypot(e.clientX - c.x, e.clientY - c.y);
+    if (d < bestD) { bestD = d; best = st; }
   }
-  const s = sticks[side];
-  if (s.pointerId === null) stickDown(s, e);
+  if (best && bestD <= r * GRAB_RADIUS) stickDown(best, e);
   if (e.pointerType === 'mouse') e.preventDefault();
 }
 

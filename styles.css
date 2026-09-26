@@ -632,7 +632,8 @@ html, body {
 #touch .hidden,
 #touch[hidden] { display: none !important; }
 
-/* Dynamic-stick zones: transparent full-height halves. */
+/* Stick zones: transparent full-height halves that hold the fixed sticks (mobile follow-up:
+   sticks are always shown at fixed positions; touch.js grabs the nearest one within reach). */
 .tj-zone {
   position: absolute;
   top: 0;
@@ -674,6 +675,14 @@ html, body {
 }
 /* Knob nested inside the base: centred on the base unless touch.js positions it. */
 .tj-base > .tj-knob { left: var(--tj-kx, 50%); top: var(--tj-ky, 50%); }
+/* Fixed positions: inward of the bottom-left health/points and bottom-right ammo/buttons.
+   --tj-x/--tj-y place both base and resting knob; touch.js moves only the knob while dragged. */
+.tj-zone.tj-left  { --tj-x: 40cqh; --tj-y: calc(100% - 20cqh); }
+.tj-zone.tj-right { --tj-x: calc(100% - 36cqh); --tj-y: calc(100% - 20cqh); }
+.tj-zone .tj-base, .tj-zone .tj-knob { display: block; }
+/* Idle sticks stay visible but quieter; they brighten while held. */
+.tj-zone:not(.active) .tj-base { opacity: 0.55; }
+.tj-zone:not(.active) .tj-knob { opacity: 0.7; }
 .tj-zone.tj-right .tj-base { border-color: rgba(255, 110, 90, 0.5); }
 .tj-zone.tj-right .tj-knob { border-color: rgba(255, 150, 130, 0.9); }
 
@@ -734,6 +743,7 @@ html, body {
   width: auto;
   min-width: 34cqh;
   max-width: calc(100% - 2 * (var(--status-left) + var(--status-w) + 2cqh));
+  max-width: min(calc(100% - 2 * (var(--status-left) + var(--status-w) + 2cqh)), calc(100% - 112cqh));
   height: 11cqh;
   padding: 0 4cqh;
   border-radius: 5.5cqh;
@@ -760,7 +770,7 @@ html, body {
 /* Mobile HUD (hud.setMobileHud(true)): the ACTION button carries the shop prompt, and the banner
    column moves up so banners clear the ACTION pill. */
 #hud.mobile .hud-prompt { display: none !important; }
-#hud.mobile .hud-bottom-center { bottom: 16cqh; }
+#hud.mobile .hud-bottom-center { bottom: 36cqh; } /* above the fixed sticks */
 
 /* ---------- WO6: "Rotate your phone" plate (hud.setRotateOverlay) ---------- */
 /* Appended to <body> (not #hud): the stage is only a 16:9 strip in portrait, and #hud's size

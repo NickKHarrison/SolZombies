@@ -41,3 +41,15 @@ half/full move (0.5, sprint at full), aim up/right, auto-fire + firePressed edge
 `input.endFrame()`, last-aim retention after release, simultaneous stick + 3 buttons, ACTION
 label/show/hide/held, mouse-as-touch with `touch=1`, touchmove preventDefault, disable. No console errors.
 A real phone test is still needed.
+
+## Fixed sticks (lead, direct change)
+
+User request: the sticks should sit at fixed positions and always show, instead of spawning
+under the finger. Both bases and knobs are now always visible (idle at 55 % / 70 % opacity,
+full while held). CSS fixes their centres via `--tj-x/--tj-y`: left stick 40cqh from the left,
+right stick 36cqh from the right, both 20cqh above the bottom, clear of health/points, the
+ammo readout and RELOAD/SWAP. A touch within 2.2 stick radii of a free stick grabs the nearest
+one and the offset is measured from its fixed centre (so touching off-centre applies at once);
+touches further away grab nothing (they still count as a start/restart tap). Only the knob moves
+and it springs back to the base centre on release. The ACTION pill is capped to the gap between
+the sticks, and mobile banners moved up to 36cqh so they clear the sticks.
