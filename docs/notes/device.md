@@ -42,3 +42,13 @@
   keyboard and click start path is unchanged.
 - Debug: `__game.debug.mobile()` returns the boot detection boolean. `__game.modules` gains
   `touch` and `device`.
+
+## Mobile camera zoom (lead, direct change)
+
+Touch devices showed the same world area as desktop, so the level looked tiny. `CAMERA` in
+`config.js` now holds `{ zoom: 1, mobileZoom: 1.4 }`. `main.updateCamera` picks the zoom
+(mobile -> mobileZoom), stores it in `state.zoom`, and sizes/clamps the camera to
+`canvas / zoom` so the player stays centred. Mouse aim divides by the zoom before adding the
+camera offset. `render()` does `ctx.scale(zoom, zoom)` for world space and shrinks the culling
+view to `W / zoom x H / zoom`; screen-space overlays and the DOM HUD are untouched. On a phone
+the visible world is 914x514 px instead of 1280x720.

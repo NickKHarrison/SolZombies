@@ -127,14 +127,16 @@ export function render(state) {
   const shake = shakeOffset(state, t);
   const camX = Math.round((cam.x || 0) + shake.x);
   const camY = Math.round((cam.y || 0) + shake.y);
+  const zoom = state.zoom > 0 ? state.zoom : 1;
   const view = viewScratch;
-  view.x = camX; view.y = camY; view.w = W; view.h = H;
+  view.x = camX; view.y = camY; view.w = W / zoom; view.h = H / zoom;
 
   ctx.fillStyle = '#050506';
   ctx.fillRect(0, 0, W, H);
 
   // ---- world space ----
   ctx.save();
+  ctx.scale(zoom, zoom);
   ctx.translate(-camX, -camY);
 
   const theme = themeOf(state);

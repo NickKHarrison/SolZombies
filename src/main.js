@@ -1,6 +1,6 @@
 // main.js (Integrator) — boot, game loop, menu / pause / game over / restart, debug hooks.
 // WORK_ORDER.md 5.13 (flow) and 3.7 (update order).
-import { CANVAS, FIXED_DT_CAP, PLAYER, LOOP } from './config.js';
+import { CANVAS, FIXED_DT_CAP, PLAYER, LOOP, CAMERA } from './config.js';
 import * as events from './events.js';
 import { createEmptyState } from './state.js';
 import * as input from './input.js';
@@ -166,7 +166,9 @@ function restartGame() {
 function updateCamera(s) {
   const p = s.player, m = s.map;
   if (!p || !m) return;
-  const vw = canvas ? canvas.width : CANVAS.width, vh = canvas ? canvas.height : CANVAS.height;
+  const z = mobile ? CAMERA.mobileZoom : CAMERA.zoom;
+  s.zoom = z;
+  const vw = (canvas ? canvas.width : CANVAS.width) / z, vh = (canvas ? canvas.height : CANVAS.height) / z;
   let cx = p.x - vw / 2, cy = p.y - vh / 2;
   cx = m.width <= vw ? (m.width - vw) / 2 : Math.max(0, Math.min(m.width - vw, cx));
   cy = m.height <= vh ? (m.height - vh) / 2 : Math.max(0, Math.min(m.height - vh, cy));
@@ -193,7 +195,7 @@ function update(s, inp, dt) {
   const av = inp.aimVector;
   const aim = av
     ? { x: s.player.x + av.x * 300, y: s.player.y + av.y * 300 }
-    : { x: inp.mouseX + s.camera.x, y: inp.mouseY + s.camera.y };
+    : { x: inp.mouseX / (s.zoom || 1) + s.camera.x, y: inp.mouseY / (s.zoom || 1) + s.camera.y };
   player.updatePlayer(s, inp, aim, dt);
   waves.updateRounds(s, dt);
   flowTimer += dt;

@@ -7,6 +7,7 @@ export function createEmptyState(seed = Date.now()) {
     rng: createRng(seed),
     seed,
     camera: { x: 0, y: 0 },   // top-left of viewport in world units (main computes)
+    zoom: 1,                  // camera zoom (CAMERA.mobileZoom on touch devices); render scales world space by it
     map: null,                // map.loadMap()
     player: null,             // player.createPlayer()
     zombies: [],
