@@ -1,6 +1,7 @@
 // map.js (Agent H) — tile map, collision, raycasts, barricades, interactables.
 // Pure logic: no DOM access. Imports config, events, math and the level registry (WO5).
 import { TILE, MAP, DOORS } from './config.js';
+import * as config from './config.js';
 import { emit } from './events.js';
 import { clamp, dist } from './math.js';
 import { LEVELS } from './levels/levels.js';
@@ -19,6 +20,17 @@ export const TILE_DOOR = 7; // closed buyable door; opening sets its tiles to TI
 // positions live in map.arenaSpawns) so pathfinding.js, which walks only 0/2/3/6, needs no change.
 export const TILE_ARENA_SPAWN = 8;
 export const TILE_STAIRS = 9; // closed staircase ('T'): blocks like a wall; openStairs -> TILE_FLOOR
+// WO7: perk machine (letters from config PERKS.list[*].letter: J Q C N U K). Blocks movers and
+// rays like a wall buy; pathfinding walks only 0/2/3/6, so it blocks zombies automatically.
+export const TILE_PERK = 10;
+
+// Perk machine letter -> perk id, built from config PERKS (namespace read: guarded).
+export const PERK_LETTERS = (() => {
+  const out = {};
+  const list = config.PERKS && config.PERKS.list;
+  if (list) for (const [id, p] of Object.entries(list)) if (p && p.letter) out[p.letter] = id;
+  return out;
+})();
 
 // Boards per barricade.
 const MAX_BOARDS = MAP.maxBoards; // config.js (moved by integrator)
@@ -49,6 +61,12 @@ const CHAR_CODE = {
 
 function charToCode(ch, wallbuyMap) {
   if (ch in CHAR_CODE) return CHAR_CODE[ch];
+  if (Object.prototype.hasOwnProperty.call(PERK_LETTERS, ch)) {
+    if (Object.prototype.hasOwnProperty.call(wallbuyMap, ch)) {
+      throw new Error(`map: tile char '${ch}' is both a perk machine and a wall buy`);
+    }
+    return TILE_PERK;
+  }
   if (Object.prototype.hasOwnProperty.call(wallbuyMap, ch)) return TILE_WALLBUY;
   if (ch in DOOR_MAP) return TILE_DOOR;
   throw new Error(`map: unknown tile char '${ch}'`);
@@ -131,6 +149,7 @@ export function loadMap(levelOrAscii = LEVELS[0], opts = {}) {
     // WO5
     levelId: def ? def.id : LEVEL1.id, name: def ? def.name : LEVEL1.name, theme, wallbuyMap,
     megaDoor: null, bossSpawn: null, arenaSpawns: [], arenaTiles: new Set(), stairs: null,
+    perkMachines: [], // WO7: { id, perkId, tx, ty, x, y, w, h, soldOut }
   };
 
   const windows = [];
@@ -160,6 +179,9 @@ export function loadMap(levelOrAscii = LEVELS[0], opts = {}) {
       else if (ch === 'O') opens.push({ tx, ty });
       else if (code === TILE_DOOR) (doorTiles[ch] ||= []).push({ tx, ty });
       else if (ch === 'B') map.box = { ...rect, tx, ty };
+      else if (code === TILE_PERK) {
+        map.perkMachines.push({ id: map.perkMachines.length + 1, perkId: PERK_LETTERS[ch], tx, ty, ...rect, soldOut: false });
+      }
       else if (code === TILE_WALLBUY) {
         map.wallBuys.push({ id: map.wallBuys.length + 1, weaponId: wallbuyMap[ch], tx, ty, ...rect });
       }
@@ -506,7 +528,7 @@ export function resolveCircle(map, x, y, r, forZombie = false) {
 
 function blocksRay(code) {
   return code === TILE_WALL || code === TILE_WINDOW || code === TILE_BOX || code === TILE_WALLBUY ||
-    code === TILE_DOOR || code === TILE_STAIRS;
+    code === TILE_DOOR || code === TILE_STAIRS || code === TILE_PERK;
 }
 
 // DDA grid march. dx,dy should be a unit vector (normalized defensively).
@@ -573,6 +595,9 @@ function distToRect(x, y, r) {
 
 // Nearest wall buy, box, closed door, mega door (closed and not sealed; returned even while
 // locked so the shop can show the blocked prompt), open stairs, or damaged barricade whose tile edge is within range of (x, y).
+// WO7: perk machines ({ kind: 'perk', ref: machine }, sold-out ones included so the shop can show
+// the blocked prompt). Ties (equal edge distance) go to the first kind considered: wall buy, box,
+// perk, door, mega door, stairs, barricade.
 export function nearestInteractable(map, x, y, range) {
   let best = null;
   const consider = (kind, ref) => {
@@ -581,6 +606,7 @@ export function nearestInteractable(map, x, y, range) {
   };
   for (const wb of map.wallBuys) consider('wallbuy', wb);
   if (map.box) consider('box', map.box);
+  if (map.perkMachines) for (const pm of map.perkMachines) consider('perk', pm);
   if (map.doors) for (const d of map.doors) if (!d.open) consider('door', d);
   if (map.megaDoor && !map.megaDoor.open && !map.megaDoor.sealed) consider('megadoor', map.megaDoor);
   if (map.stairs && map.stairs.open) consider('stairs', map.stairs);

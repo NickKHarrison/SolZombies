@@ -309,3 +309,122 @@
   pool after `killBoss` (1 boss blood effect, ring gone after 0.6 s); injected "MEGA DOOR OPENED"
   text expired on seal; L2 boss + 10 minions + 24 zombies: minions clearly distinct from the
   tan/green zombies, render 0.32 ms/frame (telegraph active), step 0.77 ms. No console errors.
+
+## WO7 (Agent C): zombie sprites, perk machines, knife, acid, lab flicker
+- **Zombies (T1).** `drawZombies` draws `ZOMBIE_SPRITES` via `zombieSpriteFor(z)` (namespace
+  import `zombieArt`, guarded). A kind whose art is still the Phase 0 placeholder (the explicit
+  `sprite.placeholder === true` flag only; `pixel.isPlaceholder` is not used because it flags
+  any 'x' pixel) or a sprite draw that throws falls back to the pre-WO7 vector art
+  (`drawZombieLegacy`, vector boss inside `drawBoss`). `globalThis.__zombieSpritesForce = true`
+  draws placeholders anyway (art debugging).
+  - Layers: shadow ellipse, legs frame rotated to the **tracked movement heading**, body rotated
+    to the player while `chasing`/`attacking`, else to the movement heading. Damaged overlay
+    (`normal.damaged`, same transform as the body) below 50 % HP. Tearing uses Agent A's
+    per-tier `spr.tearing` (extra field), else `normal.tearing`. Hit flash = cached white
+    silhouette of the body drawn over it at `0.85 * min(1, hitFlash/0.08)`.
+  - Tracker: module `Map` keyed by `z.id` (object fallback) -> `{x, y, mx, my, legA, bodyA,
+    dist, still, seen}`. The heading is a low-passed delta (`m = 0.7 m + d`) so path jitter does
+    not flip the legs. Moves > 60 px in one frame (teleports) are not walked. Walk frame =
+    `floor(dist / stride * n) % n` with `SPRITES.zombieStride` (boss: `bossStride`); after 8 still
+    frames the legs show frame 0. Pruned every 64 frames (entries unseen for 120 frames), cleared
+    on `game:restart`. Only zombies in view are tracked.
+  - Dying: corpse sprite (per-tier `corpseVariants` via `zombieSpriteFor`) at the last body
+    angle, alpha = `dyingT / deathLinger` (no shrink any more). Stunned (Thundergun): corpse
+    sprite rotated to `knockAngle` + the WO2 dust puff (replaces the `scale(1, 0.6)` circle, which
+    could not be drawn crisp).
+  - Boss: legs + body (or `boss.charge` during `telegraph`/`dash`) recoloured with `pixel.tint`:
+    pixels whose RGB equals `boss.tintColor` (Agent A: `PALETTE.p` `#b44dff`, used only for the
+    crown) become `levelDef.boss.tint`. If a future marker is magenta, darker `r === b, g === 0`
+    shades are scaled too. Cached per sprite x tint. Charge lane, dash streak, expanding ring,
+    recover stars unchanged; the telegraph flash is now a white silhouette + red ring.
+    Acid bosses (`z.acid.phase === 'telegraph'`): additive green glow, pulsing ring that speeds
+    up with `acid.t / BOSS.acid.telegraph`, and a glob swelling at the mouth.
+  - Every layer goes through `drawCrisp` (32 directions, 1x rotation cache). Cost measured on
+    L3 with 24 zombies + boss + 10 minions: `render()` 0.30 ms/call, `step(1/60)` 0.66 ms.
+- **Perk machines (T2).** `paintPerkMachines` (static layer, after wall buys): recess, cabinet in
+  `PERKS.list[perkId].color` with roof, side trims, glowing panel (shadowBlur), bottle glyph,
+  upright perk letter on the roof, dispenser slot, soft glow onto the floor in front. The front
+  faces the first open floor side; a `paintWallBuyLabel` plate (name / price) goes on every
+  open floor side, painted after all cabinets. Sold out: cabinet at 28 % brightness, dark
+  panel, no glow, price line `SOLD OUT` in red (`paintWallBuyLabel` gained an optional
+  `soldOut` arg). `featureFlags` includes the machine count and a sold-out bitmask, so a sell-out
+  repaints the layer. `T_PERK = 10` counts as solid (`isSolidCode`). Missing `map.perkMachines`
+  = nothing drawn. Note: shop.js appears to re-derive `soldOut` from `player.reviveUses` each
+  frame, so tests must set `reviveUses` rather than `soldOut`.
+- **Knife (T3).** `resolveTorsoPose`: when `anim.pose === 'knife'` (Agent B) — or, without the
+  animator, `player.meleeT > 0` — the torso is `SOLDIER.torso.knife[anim.meleeFrame]` (fallback
+  frame from `meleeT`: cocked for the first 40 %), composed with the helmet but **no gun** and no
+  reload offset. Gun pose lookups use `anim.gunPose` so `torso.idle['knife']` is never indexed.
+  `slash` effect `{x, y, angle, ttl, maxTtl}` (default ttl `MELEE.swingTime`): white crescent at
+  `14 + 0.75 * MELEE.reach` that sweeps across `angle ± MELEE.halfAngle` in the first 55 % of
+  its life, then fades; tip glint. Drawn right after the player.
+- **Acid (T5).** Pools (`state.hazards` kind `acid`): drawn after blood decals, lobed dark rim +
+  green body + glossy core, spread-in over 0.3 s, fade over the last 1 s, 6 bubble slots that
+  grow and pop (deterministic from time + id), faint fumes. Globs: per Agent H they live in
+  **`state.acidGlobs`** (not `state.bullets`): ground position = lerp(`sx,sy` -> `tx,ty`) by
+  `1 - ttl/maxTtl`, a visual parabola (peak 70 px), a ground shadow, a 4-dot trail and a
+  dashed landing ring that tightens as it falls. `state.bullets` entries with `kind === 'acid'`
+  (the 3.3 wording) are drawn as green blobs with a velocity trail instead of ray-gun orbs.
+- **Flicker (T5).** `theme.flicker` (resolved into the theme, not part of the static key):
+  after the ambient tint, a near-black screen fill in bursts. Game time is cut into 0.9 s
+  windows; ~1 in 5 windows gets a 0.1-0.35 s burst of 2-4 dark strobes (alpha 0.25-0.55).
+  Deterministic from `state.time` (freezes when paused). Measured ~1.3 % of frames darkened.
+  INT: `level.js loopTheme()` does not copy `flicker` (scaffold note 6).
+- **Quick Revive down** (`player.downT > 0`, `player.down` false): lying sprite on a small pool
+  plus a cyan (`PERKS.list.revive.color`) ring filling over `downSeconds`; torso/muzzle are
+  suppressed (`getMuzzleWorld` returns null).
+- Render-local tunables (could move to `RENDER`): `Z_TRACK_JUMP 60`, `Z_STILL_FRAMES 8`,
+  `GLOB_ARC 70`, `FLICKER_WINDOW 0.9`, slash radius factor 0.75.
+- **Verified** on `localhost:8204/?debug=1` with Agent A's real art, B's knife torso/animator,
+  G's machines and H's acid boss: all three tiers walking, damaged overlay, hit flash, stunned
+  corpse, fading corpse, minions, L3 boss with green crown + acid telegraph, L1 boss charge lane
+  + white telegraph flash, fake acid pool and glob, slash arc with knife torso, Quick Revive
+  machine normal and SOLD OUT, Stamin-Up machine facing down, revive-down ring, flicker by pixel
+  sampling. No console errors. `npm test` 496/496, `node --check` clean.
+
+## WO7 FIX-1: lab flicker, perk machines, lab walls, plates, popups, player ring, acid rings
+Tunables are in `RENDER` in `src/config.js`: `flicker`, `buyPlateOverPlayerAlpha`, `playerRing`, `textMergeTime`, `textMergeDist` and `labTankMaxTiles`. They replace the render-local `FLICKER_WINDOW`.
+
+- **Flicker (playtest #1).**
+  - Game time is cut into `flicker.period` windows of 14 s. Each window has one burst, starting at a hashed offset in `[0, period - minGap]`, so bursts start 8-20 s apart.
+  - A burst is 1..`maxDips` (2) smooth sin² dips of `dipTime` (0.24 s), with starts `dipGap` (0.42 s) apart. That is at most 2 flashes in any second, which meets WCAG 2.3.1.
+  - Peak alpha is `alphaMin`..`alphaMax` (0.08-0.18).
+  - The effect is still a full-screen `#02040a` fill after the ambient tint. It is deterministic from `state.time`.
+  - It is skipped when `matchMedia('(prefers-reduced-motion: reduce)')` matches. The media query object is looked up once, and `.matches` is read live.
+  - Simulated over 10 min: max alpha 0.177, darkened 2.0 % of the time, minimum dip spacing 0.41 s, burst gaps 8.9-17.8 s.
+- **Plates over the player (#3).**
+  - `labelKind` is set to `'buy'` while `paintWallBuy` and `paintPerkMachines` run, so their `labelRects` entries carry `buy: true`.
+  - `drawLabelsOverPlayer` re-blits buy plates at 0.35 and door, mega door and stairs plates at 0.75.
+- **Perk machines (#10).**
+  - Local frame: the front faces +y. When the tile behind the machine is `T_WALL`, the cabinet extends 8 px into it.
+  - Layers, back to front:
+    - A drop shadow.
+    - A dark frame and a perk-colour body with side trims.
+    - A lit marquee: `shadeHex(color, 1.6)`, glow, a white top line and a bulb row.
+    - A logo panel with a bold 15 px letter.
+    - A dispenser alcove holding a 5×10 bottle glyph.
+    - A steel coin-slot plate with a red LED.
+  - The letter and the bottle are drawn through `upright()`, which counter-rotates them so they are always screen-upright.
+  - Sold out: the same shapes, darkened, with no glow.
+  - The plate price is `m.price` when it is finite (FIX-3: `shop.syncPerkMachines` sets it for the escalating Quick Revive, 50/150/300, and bumps `map.version`, which is in the static key). Otherwise it is `def.cost`.
+- **LABORATORY walls (#5).**
+  - `buildTheme` resolves `wallStyle`. An explicit `raw.wallStyle` wins. Otherwise a name matching `/LABORATORY/i` gives `'panel'` and anything else `'brick'`. `wallStyle` is part of `sig`.
+  - `'panel'` runs `paintLabWalls` instead of `paintBrickwork`, which draws:
+    - Steel plates at `shadeHex(wall, 1.22)`, with a lit top edge, a dark bottom edge, a random half seam, four rivets and dark tile seams.
+    - `findDecorBlocks`: 4-connected components over every non-floor code except the box. A component that does not touch the map border and has ≤ `labTankMaxTiles` `T_WALL` tiles is decor. Its wall tiles are painted by `paintGlassTank`: a steel base with rivets, a glass circle, a liquid gradient below a hashed level line, a specimen silhouette, bubbles, a highlight streak and a rim.
+    - `paintHazardStripes`: for every door and the mega door, a 12 px band on each plain wall tile at either end of the doorway gets black with yellow 45° stripes 5 px wide. On L3 this covers the decon blocks, the corridor tanks, the cryo pods and the arena pillars. The lab benches (11 tiles) and the reactor core stay steel.
+- **Player ring (#9).** `drawPlayerRing` draws an ellipse of radius `radius + 3` under the legs, before the shadow: a dark 3 px stroke, then a 1.5 px `playerRing.color` stroke, at `playerRing.alpha` (0.4).
+- **Points popups (#12).**
+  - `onPointsChanged` tags text effects with `pts`.
+  - In `flushPending`, `mergePointsPopup` folds a new popup into an existing `pts` popup of the same colour that is younger than 0.3 s and within 44 px. The merged popup becomes one "+N".
+  - The old popup's `y` is shifted by its current rise, so restarting its life does not move it on screen.
+- **Acid landing rings (#14).** A 4 px `rgba(8,20,4,0.85)` outline, then a 2 px `#c8ff3a` dash (6/4), at alpha 0.55-0.95.
+- **Verified** on `localhost:8231/?debug=1` and `&touch=1`, L3:
+  - Quick Revive (facing east) and Double Tap (facing down) machines, with the player standing on the plate. The player is visible.
+  - Price plate 50 → 150 after `reviveUses = 1`.
+  - Tanks, panels and stripes at the doors.
+  - THE SUBJECT telegraph with the new rings.
+  - The player ring in a boss and minion crowd.
+  - Popup merge: +10/+5/+10/+5 shows as "+30".
+  - `render()` took 0.23 ms per call with the boss, minions and 41 zombies (22 in view).
+  - No console errors. `npm test` 511/511. `node --check` is clean.

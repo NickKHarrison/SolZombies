@@ -200,3 +200,36 @@ taken, and the barricade hold repairs and pays. The skip is based on
   spends/opens/emits/pushes text, repeat refused, broke -> denied, blocked -> no charge and no
   `openMegaDoor` call, stairs prompt only when open, `useStairs` starts one descent, and no
   prompt / no purchase during a transition.
+
+## WO7 (Agent G): perks
+
+- Prompt (`buildPrompt` kind `perk` -> `perkPrompt(state, machine)`):
+  `{ kind: 'perk', weaponId: null, perkId, machineId, cost, canAfford, blocked, text }`.
+  Texts: `Press F for Juggernog [250]`; blocked `Quick Revive sold out` (checked first),
+  `Already have <name>`, `Perk limit reached` (`perks.length >= PERKS.maxPerks`).
+  `perkBlockReason(player, machine)` returns `'soldout' | 'owned' | 'limit' | 'unknown' | null`.
+- `buyPerk(state, machine) -> bool`: refused (false, no charge, no event) when blocked, during a
+  level transition, or while `player.down` / `player.downT > 0`. Unaffordable ->
+  `purchase:denied { kind: 'perk', cost, have }`. Otherwise `spendPoints`, then
+  `player.addPerk(state, perkId)` (namespace read; a list-only fallback is used if player.js has
+  no `addPerk`); if addPerk returns false the points are refunded silently. On success:
+  `purchase:made { kind: 'perk', id: perkId, cost }` then `perk:bought { perkId, cost }`.
+  `stats.perksBought` is counted by `addPerk`, not here.
+- Quick Revive: buyable while not held and `player.reviveUses < maxUses` (and under the perk
+  cap, which addPerk enforces). A successful purchase increments `player.reviveUses`.
+- Sold out: `syncPerkMachines(state)` sets `soldOut` on every `revive` machine of `state.map`
+  from `reviveUses >= maxUses` (all other machines false) and bumps `map.version` only when a
+  flag changes. Called after a revive purchase and at the top of every `updateShop`, so the
+  machines of a newly loaded level pick up the sold-out state on the first frame.
+- `updateShop` also hides the prompt while `player.downT > 0` (Quick Revive pause).
+- Helpers exported for tests/HUD: `perkDef`, `reviveSoldOut`, `perkBlockReason`, `perkPrompt`,
+  `syncPerkMachines`. Constants that could move to config: none (all read from `PERKS`).
+
+## WO7 FIX-3
+
+- **L2:** `updateShop` calls `syncPerkMachines(state)` before the transition early-return. A sold-out Quick Revive on a level loaded mid-fade is dark from the first frame.
+- **Balance #6:** Quick Revive now has an escalating price, `PERKS.list.revive.costs: [50, 150, 300]`, chosen by purchase number (`player.reviveUses`, clamped to the last entry).
+  - New export `perkCost(player, perkId)`: it uses `costs` when present, else `def.cost`, and returns `null` for an unknown perk.
+  - `perkPrompt` text and cost, `buyPerk` charge, `purchase:made`, `perk:bought` and `purchase:denied` all use it.
+  - `syncPerkMachines` also sets `machine.price` to the next price and bumps `map.version` when it changes.
+  - **Open item for render:** the machine plate still paints `def.cost`. It should use `m.price` when that is finite.

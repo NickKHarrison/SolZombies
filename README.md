@@ -36,9 +36,38 @@ is the **Catacombs**, a new layout with torch-lit bone-and-stone walls, tougher 
 health, faster, more of them, more sprinters) and new, stronger guns on the walls (Weevil, XR-2,
 Man-O-War, Marshal 16, 48 Dredge, Gorgon, plus Haymaker 12 and Drakon; 200-350 points). The new
 guns are also in the mystery box. You keep your points, weapons, ammo, health, active power-ups
-and round number; doors, barricades, the box and the boss reset. After the last level the stairs
-loop back to level 1's layout with a compounding difficulty multiplier (level 3 = loop 1, and so
-on). Restarting always returns to level 1.
+and round number; doors, barricades, the box and the boss reset.
+
+Level 3 is the **Laboratory**: a clinical lab of pale green-grey tiles, steel-blue walls, glass
+tanks and flickering fluorescent lights, with tougher zombies again (2x health, 1.2x speed, 1.5x
+count). Its walls sell the three tier-3 guns (HG 40 350, M8A7 375, Peacekeeper MK2 400; also in
+the box) plus the Gorgon and Drakon. Its boss, **THE SUBJECT**, does not charge: every 6 s it
+stops, gurgles and lobs three acid globs at you; each leaves a green pool for 5 s that burns 25
+HP/s while you stand in it. After the last level the stairs loop back to level 1's layout with a
+compounding difficulty multiplier (level 4 = BUNKER II, and so on). Restarting always returns to
+level 1.
+
+Perks: every level has six perk machines in its walls (Quick Revive in the start room, Mule Kick
+in the deepest zone). Stand next to one and press F to buy; you can hold at most **four** perks
+and they carry over when you descend.
+
+| Perk | Cost | Effect |
+|------|------|--------|
+| Juggernog | 250 | Max health 150 -> 250 (heals to full) |
+| Quick Revive | 50 | When you go down you get back up after 1.5 s at full health with 2 s of invulnerability, but lose **all** your perks. Three purchases per game, then the machine is SOLD OUT |
+| Speed Cola | 300 | Reloads twice as fast |
+| Double Tap II | 200 | Fire rate x1.33 and bullet damage x2 (hitscan guns only for the damage; the Death Machine is unaffected) |
+| Stamin-Up | 200 | Move speed x1.07, sprint x1.2 |
+| Mule Kick | 400 | Third weapon slot (key 3); losing the perk drops the third gun |
+
+Knife: press **V** (or the KNIFE touch button) for a quick melee swing: 150 damage to up to three
+zombies in a short arc in front of you, a small knockback, and a knife kill pays 15 (10 + 5 bonus).
+It has a 0.5 s cooldown and cancels a reload.
+
+High scores: the game over screen shows a run summary (rounds, kills, points, accuracy, time,
+level, bosses, perks, favourite weapon), your rank ("#3 ALL TIME", "NEW BEST ROUND!") and the top 5.
+The menu shows your best run and the top 5. The top 10 are saved in the browser's localStorage
+(`solzombies.scores.v1`); in private mode the table lasts only for the session.
 
 ## Controls
 
@@ -50,7 +79,8 @@ on). Restarting always returns to level 1.
 | Shift | Sprint |
 | R | Reload |
 | F or E | Buy / open doors / interact (hold to rebuild barricades) |
-| 1 / 2, Q, mouse wheel | Swap weapon |
+| V | Knife |
+| 1 / 2 / 3, Q, mouse wheel | Swap weapon (3 = Mule Kick slot) |
 | Enter / Space | Start / restart |
 | Esc / P | Pause |
 | Backquote | Toggle debug overlay |
@@ -67,8 +97,8 @@ side is under 900 css px) and switch to a twin-stick touch scheme. Desktop is un
 - **Left half:** touch anywhere to spawn a move stick; drag to move, push to the edge to sprint.
 - **Right half:** aim stick. Drag to aim; drag past about a third of the way to auto-fire.
   Releasing keeps the last facing.
-- **Buttons:** RELOAD and SWAP (bottom right), pause (top right), and an ACTION button
-  (bottom centre) that appears next to a wall buy, door, box or barricade. Tap it to buy or open;
+- **Buttons:** RELOAD, KNIFE and SWAP (bottom right), pause (top right), and an ACTION button
+  (bottom centre) that appears next to a wall buy, perk machine, door, box or barricade. Tap it to buy or open;
   hold it to rebuild a barricade.
 - **Override:** add `?touch=1` to force the touch scheme (e.g. to try it in desktop Chrome; the
   mouse drives the sticks) or `?touch=0` to force desktop controls on a touch device.
@@ -84,9 +114,14 @@ Boss and levels: `openMegaDoor()` (opens every door, then the mega door, for fre
 `startBoss()` (teleports into the arena and starts the fight), `killBoss()` (kills the boss
 like a weapon kill: 200 points, stairs open), `boss()` (fight state), `descend()` (opens the
 stairs if needed and starts the fade to the next level), `setLevel(i)` (loads level index `i`
-at once; 0 = bunker, 1 = catacombs, 2 = bunker loop 1, ...), and
+at once; 0 = bunker, 1 = catacombs, 2 = laboratory, 3 = bunker II, ...), and
 `setDifficulty({ healthMult, speedMult, countMult, sprintShift })` (edits the current level's
 difficulty).
+
+Perks, knife and scores: `givePerk(id)` (free, through the normal cap/uniqueness rules; ids
+`jugg`, `revive`, `speed`, `dtap`, `stamin`, `mule`), `perks()`, `removePerks()`, `knife()` (one
+swing, respects the cooldown), `scores()` (best + top 5), `clearScores()` (wipes the saved
+table).
 
 ## Tests
 

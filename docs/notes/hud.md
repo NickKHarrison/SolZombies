@@ -255,3 +255,117 @@ placed in the bottom-left. Points sit directly above them.
   hides cleanly. Menu / game over texts switch between touch and desktop wording. No console
   errors. `node --check src/hud.js` OK, `npm test` green.
 - Still needs a real-phone check (safe-area insets / notches were not tested).
+
+## WO7 (Agent D) — perk row, revive overlay, KNIFE button, high scores
+
+### hud.js
+- **Imports** (namespaces, guarded): `config.js` (`PERKS`) and `weapons.js` (`WEAPONS`, used only
+  for the favourite weapon's display name; falls back to the id in upper case).
+- **Perk row** `.hud-perks` (bottom-left, above HEALTH/KILLS): one `.hud-perk` bottle per id in
+  `player.perks`, in purchase order. The inline `--perk-color` comes from `PERKS.list[id].color`,
+  and the letter sits on a dark round label. Quick Revive has a `.hud-perk-uses` badge showing
+  `maxUses - player.reviveUses`. The row is rebuilt only when the list or the uses change. `#hud`
+  gets `.has-perks` (a direct `classList.toggle`, because `build()` resets `root.className`) so
+  the points block moves up by `--perk-row-h`.
+- **Down overlay** `.hud-down`: shown while `player.downT > 0` in playing/paused. It shows
+  "REVIVING…" and a blue bar that fills over `PERKS.list.revive.downSeconds`
+  (`1 - downT/downSeconds`). The HUD reads `downT` only. `player.down` (the real death) is
+  unchanged.
+- **perk:bought** queues the banner `PERK NAME` (upper case) through the WO5 banner queue.
+- **`setScores({ best, top })`**: stored at module level and kept across `initHud`. On the menu
+  it adds "BEST: ROUND 12 · 3,450 PTS" under the title (from `best`, else `top[0]`; hidden when
+  `round` < 1) and a TOP RUNS table (# / ROUND / POINTS / KILLS / TIME / LVL, max 5) to the right
+  of the controls list. If the menu is showing, it is rebuilt immediately.
+- **`setGameOverSummary(summary)`**: accepts the stats spread (`roundReached, kills,
+  pointsEarned, shotsFired, shotsHit, timeSurvived, levelReached, bossesKilled, bestWeaponId`)
+  plus `rank, isBestRound, isBestPoints, top` and optionally `entry` or `perks`.
+  - Missing fields fall back to `entry`, then to `state.stats` / `state.player.perks`, so a
+    partial summary still renders.
+  - Rows shown: Rounds, Kills, Points earned, Accuracy, Time (m:ss), Level reached, Bosses, Perks
+    (full names, or "None"), Favourite weapon.
+  - Rank line: "NEW BEST ROUND!" (or "NEW BEST SCORE!" when only the points are a best), in the
+    banner style with a glow, followed by "#N ALL TIME". The TOP RUNS table highlights this run's
+    row.
+  - The summary can be set before or after the phase flips to gameover. It is cleared when the
+    phase changes to playing or menu (restart), so a stale summary never reaches the next death.
+  - Without a summary, the game-over screen shows the same rows from `state.stats`.
+  - Deviation: "NEW BEST ROUND!" is drawn inside the game-over screen rather than through the
+    banner queue, because `.hud-bottom-center` is `display:none` on game over.
+- **Controls lists**: desktop adds `V` Knife and "Buy guns / perks / doors / rebuild (hold)".
+  Mobile adds `KNIFE` Melee swing.
+
+### styles.css
+- **Bottom-left stack**: vitals (3–12cqh), then the perk row (bottom 12.6cqh, 5.8cqh tall), then
+  points (`bottom` now includes `--perk-h`, which is 0 until the first perk). The perk row and
+  down overlay are hidden on menu/game over.
+- **`.tbtn-knife`**: `right 17.5cqh; bottom 19cqh` (left of RELOAD, 1.5cqh gap), steel-blue tint.
+  - To clear it, the right stick moved from `--tj-x: calc(100% - 36cqh)` to `calc(100% - 45cqh)`.
+    touch.js reads the base rect, so no JS change is needed.
+  - The ACTION pill cap became `calc(100% - 118cqh)` (was 112).
+- **Mobile weapon readout**: `max-width: 26cqh`, name at 2.6cqh that may wrap to two lines, and
+  the secondary weapon name hidden. This keeps the readout clear of the moved stick and below
+  RELOAD/KNIFE even for "PEACEKEEPER MK2" while reloading.
+- **Screens**: `.screen-cols` (two columns, max width 100% − 44cqh), `.screen-best`,
+  `.screen-rank`, `.screen-top*`. The game-over title shrinks to 9.5cqh and the stats to 2.6cqh
+  so the 9 rows and the table fit 16:9. Long perk lists wrap (`.stat-v` max 44cqh).
+
+### Verified (port 8205, 1604x902 stage)
+- **Desktop**: the menu shows the best line and top-5. The perk row (4 bottles, Q badge "2")
+  measured y736–788, between the points (≤725) and vitals (≥795) with no overlap. The perk:bought
+  banner showed "DOUBLE TAP II". The REVIVING bar was at 60% with downT 0.6. The game-over screen
+  showed "NEW BEST ROUND! #1 ALL TIME", the summary and the highlighted table, clear of the face
+  box and vitals.
+- **Mobile (`&touch=1`)**: KNIFE was at 1487–1604 × 631–731, RELOAD at 1617–1735, and the right
+  stick base at 1239–1473 × 604–839. The weapon readout (reloading, "Peacekeeper MK2") was at
+  1500–1735 × 741–875, and the ACTION pill (long text) at 690–1230, clear of both stick bases
+  (left ends at 636). Nothing overlapped. The mobile menu and game over (#3 ALL TIME, wrapped
+  perks) fit the screen.
+- Restart cleared the game-over summary and hid the perk row. There were no console errors.
+- `node --check src/hud.js` passed and `npm test` passed 496/496.
+
+## WO7 FIX-2 — weapon list, perks used, phone legibility, screen backdrops, Q badge
+
+### hud.js
+- **Holstered weapons** (playtest #2 / review L5): `updateWeaponSecondary(player)` replaces the
+  single secondary name. `.hud-weapon-secondary` holds one `.hud-weapon-sec` line per held weapon
+  other than the active one (every slot weapon while a temp weapon is out), in slot order, each
+  with a `.hud-weapon-sec-slot` digit and the upper-case name. Rebuilt only when the slot/name key
+  changes.
+- **Perks used** (playtest #6): the game-over row is labelled "Perks used" and reads
+  `summary.perksRun` (FIX-3: every perk bought this run) first, then `summary.perks`, the entry,
+  then `player.perks`. Duplicates are removed.
+- **Top-5 table**: the KILLS and LVL cells carry `.c-opt` so the touch layout can drop them.
+- **Quick Revive badge** (playtest #11): shows the revives in hand, always "×1" while the perk is
+  held. It no longer shows `maxUses - reviveUses`; purchases left belong to the machine prompt.
+  The perk row key is now the perk list only.
+
+### styles.css
+- Desktop: holstered lines with a small outlined slot digit; the menu / game-over overlay is
+  darker (radial 0.78 → 0.93) and the controls list, the run summary and TOP RUNS sit on
+  `rgba(0,0,0,0.6)` rounded panels.
+- Touch (`#hud.mobile`):
+  - Holstered weapons on one line (`MR6 · SHEIVA`, no digits, `max(10px, 2.4cqh)`), ellipsised at
+    the 26cqh readout width and hidden while reloading.
+  - Floors: top-5 cells `max(11.5px, 2.2cqh)`, headers / TOP RUNS title / controls 11 px, summary
+    rows 11.5 px, HEALTH/KILLS/level labels 10 px, Q badge 9 px. The top-5 shows
+    # / ROUND / POINTS / TIME.
+- The stick zones are hidden on menu and game over (`#hud[data-phase=…] ~ #touch .tj-zone`). Taps
+  still start / restart through main.js's capture `pointerdown` on `#stage`.
+
+### Verified (port 8232)
+- Desktop 1422x800: Mule Kick + kn44 + rk5 (slot 3 active) showed "1 MR6 / 2 KN-44" above RK5. Q badge
+  "×1". Game over with `perksRun ['mule','revive','jugg','revive']` showed "Perks used: Mule Kick,
+  Quick Revive, Juggernog" on the panel, and the world stayed dimmed behind it.
+- Touch, #stage forced to 844x390:
+  - The menu fits with the 4-column top-5 (th 11 px, td 11.5 px, controls 11 px).
+  - HUD labels are 10 px.
+  - The weapon readout with "MR6 · HAYMAKER 12" over "PEACEKEEPER MK2" measured 731–832 × 319–378. It
+    clears RELOAD/KNIFE (bottom 316) and the right stick base (right edge 719), including while
+    reloading.
+  - Game over: the summary (5 perks wrapping to 3 lines) and the top-5 fit with no overlap with the
+    face box or vitals. The sticks were hidden, and a tap restarted the game (phase `playing`,
+    sticks back).
+- There were no console errors. `node --check src/hud.js` passed and `npm test` passed 501/501.
+- Follow-up (playtest #13): if `summary.rankText` is set (main.js sends "Not ranked" for runs that
+  die before round 1), the game-over rank line shows only that text and drops the best / "#N ALL
+  TIME" lines. `npm test` passed 511/511.

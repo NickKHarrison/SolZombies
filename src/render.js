@@ -10,6 +10,7 @@ import * as pixel from './sprites/pixel.js';
 import * as soldierMod from './sprites/soldier.js';
 import * as gunsMod from './sprites/guns.js';
 import * as animMod from './sprites/animator.js';
+import * as zombieArt from './sprites/zombie.js'; // WO7 T1 (Agent A): ZOMBIE_SPRITES, zombieSpriteFor
 
 // Tunables live in config.js RENDER (moved by integrator).
 const EFFECT_CAP = RENDER.effectCap;
@@ -23,6 +24,7 @@ const NUKE_SHAKE = RENDER.nukeShake;
 const T_FLOOR = 0, T_WALL = 1, T_WINDOW = 2, T_POCKET = 3, T_BOX = 4, T_WALLBUY = 5, T_OPEN = 6;
 const T_DOOR = 7; // WO4 2.1: closed buyable door (opening sets its tiles to T_FLOOR)
 const T_ARENA = 8, T_STAIRS = 9; // WO5 3.1: arena minion spawn (floor), staircase (solid until opened)
+const T_PERK = 10; // WO7 T2: perk machine (blocking, like a wall buy)
 const DOOR_FX_TTL = 0.6;
 const DOOR_SHAKE = { ttl: 0.35, magnitude: 3 };
 // WO5 3.6 tunables (config RENDER; local fallbacks keep older configs working)
@@ -66,7 +68,7 @@ export function initRender(c) {
   unsubs.push(events.on('points:changed', onPointsChanged));
   unsubs.push(events.on('player:damaged', onPlayerDamaged));
   unsubs.push(events.on('powerup:collected', onPowerupCollected));
-  unsubs.push(events.on('game:restart', () => { pending = []; resetAnim(); }));
+  unsubs.push(events.on('game:restart', () => { pending = []; resetAnim(); zTrack.clear(); }));
   unsubs.push(events.on('weapon:fired', onWeaponFired));
   unsubs.push(events.on('purchase:made', onPurchaseMade));
   unsubs.push(events.on('boss:start', onBossStart));
@@ -145,11 +147,14 @@ export function render(state) {
   drawBarricades(map, view);
   drawBox(state, map, t);
   drawEffectsOfType(state, 'blood', view);
+  drawHazards(state, view, t);          // WO7 T5: acid pools on the floor
   // FIX-3 (playtest #1): power-ups above every blood decal so the boss's Max Ammo stays visible.
   drawPowerups(state, t, view);
   drawZombies(state, view);
   drawBullets(state);
+  drawAcidGlobs(state, view);           // WO7 T5: lobbed globs (state.acidGlobs) in flight
   drawPlayer(state);
+  drawEffectsOfType(state, 'slash', view); // WO7 T3: knife arc
   drawLabelsOverPlayer(state);
   drawBoxLabel(state, map, t);
   drawEffectsOfType(state, 'bossDeath', view);
@@ -166,6 +171,7 @@ export function render(state) {
 
   // ---- screen space ----
   drawAmbient(theme, W, H);
+  if (theme.flicker) drawFlicker(t, W, H); // WO7 T5: failing fluorescent tubes (LABORATORY)
   drawZombieBloodTint(state, W, H);
   drawDamageVignette(state, W, H);
   drawFlash(state, W, H);
@@ -183,11 +189,39 @@ function onPointsChanged(p) {
   textJitter = (textJitter + 1) % 7;
   pending.push({
     type: 'text', x: p.x + (textJitter - 3) * 4, y: p.y - 18,
-    text: '+' + p.delta, color: COLORS.hudPoints, ttl: TEXT_TTL, maxTtl: TEXT_TTL,
+    text: '+' + p.delta, color: COLORS.hudPoints, ttl: TEXT_TTL, maxTtl: TEXT_TTL, pts: p.delta,
   });
 }
 
-function onPlayerDamaged() {
+// FIX-1 (playtest #12): a points popup spawned within RENDER.textMergeTime s of another one and
+// within textMergeDist px of it (knife kill +10 at the zombie, +5 bonus at the player, chained
+// kills) is folded into that popup as one accumulating "+N". The popup keeps its current
+// on-screen height and restarts its life, so it does not jump. Returns true when merged.
+const TEXT_MERGE_TIME = RENDER.textMergeTime ?? 0.3;
+const TEXT_MERGE_DIST = RENDER.textMergeDist ?? 44;
+function mergePointsPopup(state, e) {
+  const list = state.effects;
+  if (!Array.isArray(list)) return false;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const o = list[i];
+    if (!o || o.type !== 'text' || !(o.pts > 0) || o.color !== e.color) continue;
+    const age = (o.maxTtl || TEXT_TTL) - o.ttl;
+    if (age > TEXT_MERGE_TIME) continue;
+    const dx = o.x - e.x, dy = o.y - e.y;
+    if (dx * dx + dy * dy > TEXT_MERGE_DIST * TEXT_MERGE_DIST) continue;
+    const f = lifeFrac(o);
+    o.y -= TEXT_RISE * (1 - f); // keep the drawn position when the life restarts
+    o.pts += e.pts;
+    o.text = '+' + o.pts;
+    o.ttl = o.maxTtl = TEXT_TTL;
+    return true;
+  }
+  return false;
+}
+
+function onPlayerDamaged(p) {
+  // WO7 INT: acid pools deal damage as per-frame ticks (< 1 HP); no screen shake for those.
+  if (p && Number.isFinite(p.amount) && p.amount < 1) return;
   pending.push({ type: 'shake', ttl: DAMAGE_SHAKE.ttl, maxTtl: DAMAGE_SHAKE.ttl, magnitude: DAMAGE_SHAKE.magnitude });
 }
 
@@ -258,6 +292,7 @@ function flushPending(state) {
   const q = pending; pending = [];
   for (const e of q) {
     if (e.type === 'doorOpen' && !placeDoorEffect(state, e)) continue;
+    if (e.type === 'text' && e.pts > 0 && mergePointsPopup(state, e)) continue;
     addEffect(state, e);
   }
 }
@@ -282,6 +317,7 @@ function defaultTtl(type) {
     case 'explosion': return 0.35;
     case 'doorOpen': return DOOR_FX_TTL;
     case 'bossDeath': return BOSS_RING_TTL;
+    case 'slash': return (CFG.MELEE && CFG.MELEE.swingTime) || 0.25;
     case 'shockwave': return (CFG.WEAPON_FX && CFG.WEAPON_FX.shockwaveTtl) || 0.45;
     default: return 0.3;
   }
@@ -339,7 +375,7 @@ function tileAt(map, tx, ty) {
   return map.tiles[ty * map.cols + tx];
 }
 
-function isSolidCode(c) { return c === T_WALL || c === T_WALLBUY || c === T_BOX || c === T_WINDOW; }
+function isSolidCode(c) { return c === T_WALL || c === T_WALLBUY || c === T_BOX || c === T_WINDOW || c === T_PERK; }
 
 function roundRect(c, x, y, w, h, r) {
   c.beginPath();
@@ -448,6 +484,12 @@ function featureFlags(map) {
   let f = 0;
   if (md) f |= 1 | (md.open ? 2 : 0) | (md.sealed ? 4 : 0);
   if (st) f |= 8 | (st.open ? 16 : 0);
+  // WO7 T2: perk machines (count in bits 5-9, sold-out mask from bit 10) so a sell-out repaints.
+  const pm = map.perkMachines;
+  if (Array.isArray(pm) && pm.length) {
+    f |= (Math.min(31, pm.length) << 5);
+    for (let i = 0; i < pm.length && i < 20; i++) if (pm[i] && pm[i].soldOut) f |= (1 << (10 + i));
+  }
   return f;
 }
 
@@ -482,11 +524,16 @@ function buildTheme(raw) {
     doorIron: str(raw.doorIron, WO4_DOOR_IRON),
     ambient: str(raw.ambient, null),   // null / '' = no tint
     torch: !!raw.torch,
+    flicker: !!raw.flicker, // WO7 T5: failing fluorescent tubes (screen pass only, not in sig)
+    // FIX-1 (#5): 'panel' = steel panels + glass-tank decor blocks + door hazard stripes. An
+    // explicit raw.wallStyle wins; otherwise any LABORATORY theme (incl. loop names) gets panels.
+    wallStyle: raw.wallStyle === 'panel' || raw.wallStyle === 'brick' ? raw.wallStyle
+      : (/LABORATORY/i.test(str(raw.name, '')) ? 'panel' : 'brick'),
   };
   // A theme with a distinct floorAlt gets the checker, accent flecks and wall brickwork. Level 1
   // (floorAlt = floor) therefore keeps the flat WO4 look exactly.
   t.textured = t.floorAlt.toLowerCase() !== t.floor.toLowerCase();
-  t.sig = [t.name, t.floor, t.floorAlt, t.wall, t.wallEdge, t.accent, t.doorWood, t.doorIron, t.torch ? 1 : 0].join('|');
+  t.sig = [t.name, t.floor, t.floorAlt, t.wall, t.wallEdge, t.accent, t.doorWood, t.doorIron, t.torch ? 1 : 0, t.wallStyle].join('|');
   return t;
 }
 // map.theme first (map.js 3.1), then the level def (state.level.def.theme), else the WO4 look.
@@ -633,7 +680,8 @@ function paintStatic(c, map, width, height, theme) {
   if (Array.isArray(map.wallBuys)) {
     for (const wb of map.wallBuys) c.fillRect(wb.x, wb.y, wb.w || TILE, wb.h || TILE);
   }
-  if (th.textured) paintBrickwork(c, map, th, cols, rows);
+  if (th.wallStyle === 'panel') paintLabWalls(c, map, th, cols, rows);
+  else if (th.textured) paintBrickwork(c, map, th, cols, rows);
   // Edges: draw per-tile edges only where a wall borders a non-solid tile (clean outlines)
   if (map.tiles) {
     c.strokeStyle = th.wallEdge;
@@ -657,9 +705,15 @@ function paintStatic(c, map, width, height, theme) {
   }
 
   // Wall buys: chalk outline + name + price
-  if (Array.isArray(map.wallBuys)) {
-    for (const wb of map.wallBuys) paintWallBuy(c, map, wb);
-  }
+  // FIX-1 (#3): their plates are tagged 'buy' so the over-player re-blit keeps the player visible.
+  labelKind = 'buy';
+  try {
+    if (Array.isArray(map.wallBuys)) {
+      for (const wb of map.wallBuys) paintWallBuy(c, map, wb);
+    }
+    // WO7 T2: perk machines (vending box + label plate on the floor side)
+    paintPerkMachines(c, map);
+  } finally { labelKind = 'door'; }
 
   // WO4: closed doors (planks + iron bands + labels on both sides). Open doors are floor.
   paintDoors(c, map, cols, rows, th);
@@ -886,6 +940,191 @@ function paintBrickwork(c, map, th, cols, rows) {
     }
   }
   c.restore();
+}
+
+// ---------------------------------------------------------------------------
+// FIX-1 (playtest #5): LABORATORY walls. Steel panels (seams, light top edge, corner rivets)
+// instead of brick; free-standing decor blocks drawn as glass specimen tanks; yellow/black hazard
+// stripes on the wall tiles either side of every door. Static layer only.
+// ---------------------------------------------------------------------------
+const LAB_TANK_MAX = RENDER.labTankMaxTiles ?? 6;
+
+// Wall tiles in small free-standing clusters: connected groups of solid tiles (4-neighbour; any
+// non-floor code except the mystery box connects) that do not touch the map border and hold at
+// most LAB_TANK_MAX plain wall tiles. Returns a Set of tile indices (plain T_WALL tiles only).
+function findDecorBlocks(map, cols, rows) {
+  const out = new Set();
+  const T = map.tiles;
+  if (!T) return out;
+  const conn = (code) => code != null && code !== T_FLOOR && code !== T_OPEN && code !== T_ARENA && code !== T_BOX;
+  const seen = new Uint8Array(cols * rows);
+  const stack = [], comp = [];
+  for (let i = 0; i < cols * rows; i++) {
+    if (seen[i] || T[i] !== T_WALL) continue;
+    stack.length = 0; comp.length = 0;
+    stack.push(i); seen[i] = 1;
+    let border = false, walls = 0;
+    while (stack.length) {
+      const j = stack.pop();
+      const x = j % cols, y = (j / cols) | 0;
+      if (T[j] === T_WALL) { comp.push(j); walls++; }
+      if (x === 0 || y === 0 || x === cols - 1 || y === rows - 1) border = true;
+      if (x > 0 && !seen[j - 1] && conn(T[j - 1])) { seen[j - 1] = 1; stack.push(j - 1); }
+      if (x < cols - 1 && !seen[j + 1] && conn(T[j + 1])) { seen[j + 1] = 1; stack.push(j + 1); }
+      if (y > 0 && !seen[j - cols] && conn(T[j - cols])) { seen[j - cols] = 1; stack.push(j - cols); }
+      if (y < rows - 1 && !seen[j + cols] && conn(T[j + cols])) { seen[j + cols] = 1; stack.push(j + cols); }
+    }
+    if (!border && walls <= LAB_TANK_MAX) for (const j of comp) out.add(j);
+  }
+  return out;
+}
+
+function paintLabWalls(c, map, th, cols, rows) {
+  if (!map.tiles) return;
+  const tanks = findDecorBlocks(map, cols, rows);
+  const edge = hexRgb(th.wallEdge) || [90, 125, 158];
+  c.save();
+  // Steel panels: a slightly lighter plate inset in every wall tile, lit top edge, rivets.
+  const plate = shadeHex(th.wall, 1.22);
+  for (let ty = 0; ty < rows; ty++) {
+    for (let tx = 0; tx < cols; tx++) {
+      const i = ty * cols + tx;
+      if (map.tiles[i] !== T_WALL || tanks.has(i)) continue;
+      const x = tx * TILE, y = ty * TILE;
+      c.fillStyle = plate;
+      c.fillRect(x + 1, y + 1, TILE - 2, TILE - 2);
+      c.fillStyle = `rgba(${edge[0]},${edge[1]},${edge[2]},0.22)`;
+      c.fillRect(x + 1, y + 1, TILE - 2, 1);                 // lit top edge
+      c.fillStyle = 'rgba(0,0,0,0.35)';
+      c.fillRect(x + 1, y + TILE - 2, TILE - 2, 1);          // shadowed bottom edge
+      if (hash(tx * 7.7 + ty * 13.1) > 0.55) c.fillRect(x + 1, y + (TILE >> 1), TILE - 2, 1); // half seam
+      c.fillStyle = `rgba(${edge[0]},${edge[1]},${edge[2]},0.55)`;
+      c.fillRect(x + 3, y + 3, 2, 2); c.fillRect(x + TILE - 5, y + 3, 2, 2);
+      c.fillRect(x + 3, y + TILE - 5, 2, 2); c.fillRect(x + TILE - 5, y + TILE - 5, 2, 2);
+    }
+  }
+  // Seams between panels
+  c.strokeStyle = 'rgba(0,0,0,0.5)';
+  c.lineWidth = 1;
+  c.beginPath();
+  for (let ty = 0; ty < rows; ty++) {
+    for (let tx = 0; tx < cols; tx++) {
+      const i = ty * cols + tx;
+      if (map.tiles[i] !== T_WALL || tanks.has(i)) continue;
+      const x = tx * TILE, y = ty * TILE;
+      c.moveTo(x + 0.5, y); c.lineTo(x + 0.5, y + TILE);
+      c.moveTo(x, y + 0.5); c.lineTo(x + TILE, y + 0.5);
+    }
+  }
+  c.stroke();
+  for (const i of tanks) paintGlassTank(c, (i % cols) * TILE, ((i / cols) | 0) * TILE, i);
+  paintHazardStripes(c, map, tanks, cols);
+  c.restore();
+}
+
+// One specimen tank seen from above: steel base plate, glass cylinder, liquid, a dark floating
+// silhouette, bubbles, a highlight streak and a bright rim.
+function paintGlassTank(c, x, y, seed) {
+  const cx = x + TILE / 2, cy = y + TILE / 2, R = TILE / 2 - 3;
+  c.save();
+  c.fillStyle = '#1a232b';
+  c.fillRect(x, y, TILE, TILE);
+  c.fillStyle = '#3a4a58';
+  c.fillRect(x + 1, y + 1, TILE - 2, TILE - 2);
+  c.fillStyle = '#9fb3c4';
+  c.fillRect(x + 3, y + 3, 2, 2); c.fillRect(x + TILE - 5, y + 3, 2, 2);
+  c.fillRect(x + 3, y + TILE - 5, 2, 2); c.fillRect(x + TILE - 5, y + TILE - 5, 2, 2);
+  // Glass body + liquid
+  c.beginPath();
+  c.arc(cx, cy, R, 0, Math.PI * 2);
+  c.fillStyle = 'rgba(150,240,220,0.35)';
+  c.fill();
+  c.save();
+  c.clip();
+  const lvl = y + 9 + Math.floor(hash(seed * 1.37) * 6); // liquid level line
+  const g = c.createLinearGradient(0, lvl, 0, y + TILE);
+  g.addColorStop(0, 'rgba(110,240,170,0.75)');
+  g.addColorStop(1, 'rgba(30,140,110,0.85)');
+  c.fillStyle = g;
+  c.fillRect(x, lvl, TILE, TILE);
+  c.fillStyle = 'rgba(210,255,230,0.8)';
+  c.fillRect(x, lvl, TILE, 1);
+  // Floating specimen
+  const sx = cx + (hash(seed) - 0.5) * 4;
+  c.fillStyle = 'rgba(20,50,40,0.55)';
+  c.beginPath();
+  c.ellipse(sx, cy + 3, 5, 7, (hash(seed * 3.1) - 0.5) * 0.8, 0, Math.PI * 2);
+  c.fill();
+  c.beginPath();
+  c.arc(sx, cy - 5, 3.5, 0, Math.PI * 2);
+  c.fill();
+  // Bubbles
+  c.fillStyle = 'rgba(230,255,240,0.8)';
+  for (let k = 0; k < 3; k++) c.fillRect(Math.round(cx - 7 + hash(seed * 5 + k) * 14), Math.round(lvl + 3 + hash(seed * 7 + k) * 14), 2, 2);
+  // Highlight streak
+  c.fillStyle = 'rgba(255,255,255,0.55)';
+  c.fillRect(cx - R + 4, cy - R + 6, 2, R);
+  c.fillStyle = 'rgba(255,255,255,0.3)';
+  c.fillRect(cx - R + 7, cy - R + 5, 1, R - 4);
+  c.restore();
+  // Rim
+  c.strokeStyle = 'rgba(200,255,245,0.85)';
+  c.lineWidth = 1.5;
+  c.beginPath();
+  c.arc(cx, cy, R, 0, Math.PI * 2);
+  c.stroke();
+  c.strokeStyle = 'rgba(10,30,30,0.7)';
+  c.lineWidth = 1;
+  c.beginPath();
+  c.arc(cx, cy, R + 1.5, 0, Math.PI * 2);
+  c.stroke();
+  c.restore();
+}
+
+// Yellow/black diagonal stripes on a 12 px band of each plain wall tile at either end of a door
+// (and the mega door), on the side nearest the doorway.
+function paintHazardStripes(c, map, tanks, cols) {
+  const list = Array.isArray(map.doors) ? map.doors.slice() : [];
+  if (map.megaDoor) list.push(map.megaDoor);
+  const BAND = 12;
+  for (const d of list) {
+    if (!d) continue;
+    const b = doorBox(d);
+    if (!b) continue;
+    const axis = doorAxis(d, b);
+    const bands = [];
+    if (axis === 'h') {
+      for (let y = b.y; y < b.y + b.h; y += TILE) {
+        bands.push([b.x - TILE, y, b.x - BAND, y, BAND, TILE]);
+        bands.push([b.x + b.w, y, b.x + b.w, y, BAND, TILE]);
+      }
+    } else {
+      for (let x = b.x; x < b.x + b.w; x += TILE) {
+        bands.push([x, b.y - TILE, x, b.y - BAND, TILE, BAND]);
+        bands.push([x, b.y + b.h, x, b.y + b.h, TILE, BAND]);
+      }
+    }
+    for (const [tx0, ty0, x, y, w, h] of bands) {
+      const tx = Math.floor(tx0 / TILE), ty = Math.floor(ty0 / TILE);
+      if (tileAt(map, tx, ty) !== T_WALL || tanks.has(ty * cols + tx)) continue;
+      c.save();
+      c.beginPath();
+      c.rect(x, y, w, h);
+      c.clip();
+      c.fillStyle = '#16140c';
+      c.fillRect(x, y, w, h);
+      c.fillStyle = '#f2c21b';
+      c.beginPath();
+      for (let k = -h; k < w + h; k += 10) {
+        c.moveTo(x + k, y + h); c.lineTo(x + k + 5, y + h); c.lineTo(x + k + 5 + h, y); c.lineTo(x + k + h, y);
+      }
+      c.fill();
+      c.strokeStyle = 'rgba(0,0,0,0.6)';
+      c.lineWidth = 1;
+      c.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+      c.restore();
+    }
+  }
 }
 
 // Torch positions: plain wall tiles that touch floor, every ~6 tiles along a wall run
@@ -1248,6 +1487,163 @@ function paintWallBuy(c, map, wb) {
   for (const s of sides) paintWallBuyLabel(c, wb, w, h, s, name, price);
 }
 
+// ---------------------------------------------------------------------------
+// WO7 T2: perk machines. map.perkMachines = [{ id, perkId, tx, ty, x, y, w, h, soldOut }] (map.js,
+// Agent G). Painted into the static layer: a tall vending box in PERKS.list[perkId].color seen
+// from above/front (dark cabinet sides, coloured front with a glowing panel and a bottle glyph,
+// the perk letter on a cap), plus a name / price plate on every open floor side (wall-buy label
+// helper). Sold out: the cabinet goes dark and the plate reads "SOLD OUT".
+// ---------------------------------------------------------------------------
+
+function perkDef(id) {
+  const L = CFG.PERKS && CFG.PERKS.list;
+  return (L && id != null && L[id]) || null;
+}
+
+function paintPerkMachines(c, map) {
+  const list = map.perkMachines;
+  if (!Array.isArray(list) || !list.length) return;
+  const plates = [];
+  for (const m of list) {
+    if (!m) continue;
+    try { paintPerkMachine(c, map, m, plates); } catch (_) { /* malformed entry: skip */ }
+  }
+  // Labels after every cabinet so a neighbouring box never covers a plate.
+  for (const pl of plates) paintWallBuyLabel(c, pl.b, pl.b.w, pl.b.h, pl.side, pl.name, pl.price, pl.sold);
+}
+
+function perkBox(m) {
+  const w = m.w > 0 ? m.w : TILE, h = m.h > 0 ? m.h : TILE;
+  const x = Number.isFinite(m.x) ? m.x : (m.tx | 0) * TILE;
+  const y = Number.isFinite(m.y) ? m.y : (m.ty | 0) * TILE;
+  return { x, y, w, h };
+}
+
+function paintPerkMachine(c, map, m, plates) {
+  const def = perkDef(m.perkId);
+  const b = perkBox(m);
+  const tx = Number.isFinite(m.tx) ? m.tx : Math.floor((b.x + b.w / 2) / TILE);
+  const ty = Number.isFinite(m.ty) ? m.ty : Math.floor((b.y + b.h / 2) / TILE);
+  const sold = !!m.soldOut;
+  const base = def && typeof def.color === 'string' && hexRgb(def.color) ? def.color : '#888888';
+  const col = sold ? shadeHex(base, 0.28) : base;
+  const letter = def && def.letter ? String(def.letter) : '?';
+  // Floor sides (where the player stands): the machine's front faces the first one.
+  const sides = [{ dx: 0, dy: 1 }, { dx: 0, dy: -1 }, { dx: 1, dy: 0 }, { dx: -1, dy: 0 }]
+    .filter((s) => isOpenFloorCode(tileAt(map, tx + s.dx, ty + s.dy)));
+  if (!sides.length) sides.push({ dx: 0, dy: 1 });
+  const front = sides[0];
+
+  const rot = Math.atan2(front.dy, front.dx) - Math.PI / 2;
+  // FIX-1 (#10): a tall vending cabinet. When the tile behind is wall, the cabinet's top rises
+  // ext px into it so the silhouette is taller than one floor tile.
+  const back = tileAt(map, tx - front.dx, ty - front.dy);
+  const ext = back === T_WALL ? 8 : 0;
+
+  c.save();
+  // Recess / wall behind the cabinet
+  c.fillStyle = '#0c0c0f';
+  c.fillRect(b.x, b.y, b.w, b.h);
+  // Work in a local frame where the front faces +y (down), centred on the tile.
+  c.translate(b.x + b.w / 2, b.y + b.h / 2);
+  c.rotate(rot);
+  const W = (front.dx ? b.h : b.w) - 4, H = (front.dx ? b.w : b.h) - 2;
+  const x0 = -W / 2, y1 = H / 2, y0 = -H / 2 - ext;
+  const Ht = y1 - y0;
+  const [r0, g0, b0] = hexRgb(base);
+  // Glow spilling onto the floor in front (baked, soft)
+  if (!sold) {
+    const g = c.createRadialGradient(0, y1 + 4, 2, 0, y1 + 4, W * 0.95);
+    g.addColorStop(0, `rgba(${r0},${g0},${b0},0.42)`);
+    g.addColorStop(1, `rgba(${r0},${g0},${b0},0)`);
+    c.fillStyle = g;
+    c.fillRect(-W, y1 - 2, W * 2, W);
+  }
+  // Drop shadow on the back wall, then the dark cabinet frame
+  c.fillStyle = 'rgba(0,0,0,0.45)';
+  c.fillRect(x0 + 2, y0 + 2, W, Ht);
+  c.fillStyle = shadeHex(col, 0.28);
+  c.fillRect(x0, y0, W, Ht);
+  // Body in the perk colour, darker side trims (depth)
+  c.fillStyle = col;
+  c.fillRect(x0 + 2, y0 + 2, W - 4, Ht - 3);
+  c.fillStyle = shadeHex(col, 0.6);
+  c.fillRect(x0 + 2, y0 + 2, 3, Ht - 3);
+  c.fillRect(x0 + W - 5, y0 + 2, 3, Ht - 3);
+  // Lit top sign (the machine's marquee) in the perk colour, with a bulb row
+  const signH = 6 + Math.round(ext * 0.5);
+  const sx0 = x0 + 3, sw = W - 6, sy0 = y0 + 2;
+  c.fillStyle = sold ? '#1a1a1f' : shadeHex(base, 1.6);
+  if (!sold) { c.shadowColor = base; c.shadowBlur = 10; }
+  c.fillRect(sx0, sy0, sw, signH);
+  c.shadowBlur = 0;
+  c.fillStyle = sold ? '#24242a' : 'rgba(255,255,255,0.75)';
+  c.fillRect(sx0 + 1, sy0 + 1, sw - 2, 1);
+  if (!sold) {
+    c.fillStyle = 'rgba(255,250,220,0.95)';
+    for (let bx = sx0 + 3; bx < sx0 + sw - 2; bx += 5) c.fillRect(bx, sy0 + signH - 2, 2, 1);
+  }
+  c.fillStyle = shadeHex(col, 0.3);
+  c.fillRect(sx0, sy0 + signH, sw, 1);
+  // Logo panel with the big perk letter (upright in screen space)
+  const pw = W - 10, ph = 14 + Math.round(ext * 0.5);
+  const px = -pw / 2, py = sy0 + signH + 2;
+  c.fillStyle = sold ? '#15151a' : shadeHex(base, 1.3);
+  c.fillRect(px, py, pw, ph);
+  c.fillStyle = sold ? '#1d1d22' : 'rgba(255,255,255,0.45)';
+  c.fillRect(px + 1, py + 1, pw - 2, 1);
+  c.strokeStyle = shadeHex(col, 0.35);
+  c.lineWidth = 1;
+  c.strokeRect(px + 0.5, py + 0.5, pw - 1, ph - 1);
+  const upright = (lx, ly, fn) => { c.save(); c.translate(lx, ly); c.rotate(-rot); fn(); c.restore(); };
+  upright(0, py + ph / 2 + 0.5, () => {
+    c.font = 'bold 15px monospace';
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.lineWidth = 2.5;
+    c.strokeStyle = sold ? '#101014' : shadeHex(base, 0.3);
+    c.strokeText(letter, 0, 0);
+    c.fillStyle = sold ? '#3a3a40' : '#fffaf0';
+    c.fillText(letter, 0, 0);
+  });
+  // Dispenser alcove with a bottle standing in it (upright in screen space)
+  const ah = Math.min(12, y1 - 2 - (py + ph + 2));
+  const aw = 12, ay = y1 - 2 - ah;
+  c.fillStyle = '#0b0b0d';
+  c.fillRect(-aw / 2 - 3, ay, aw, ah);
+  c.fillStyle = shadeHex(col, 0.45);
+  c.fillRect(-aw / 2 - 3, ay, aw, 1);
+  upright(-3, ay + ah / 2, () => {
+    c.fillStyle = sold ? '#2a2a30' : shadeHex(base, 0.75);
+    c.fillRect(-2, -1, 5, 6);   // bottle body
+    c.fillRect(-1, -3, 3, 2);   // shoulder
+    c.fillRect(0, -5, 1, 2);    // neck
+    c.fillStyle = sold ? '#26262c' : '#f4f4ea';
+    c.fillRect(-2, 1, 5, 2);    // label band
+  });
+  // Coin slot on a small steel plate, right of the alcove
+  const cx = aw / 2 - 1, cw = W / 2 - 3 - cx;
+  if (cw >= 4) {
+    c.fillStyle = sold ? '#2a2a2e' : '#b9bec4';
+    c.fillRect(cx, ay + 1, cw, 7);
+    c.fillStyle = '#16161a';
+    c.fillRect(cx + Math.floor(cw / 2) - 0.5, ay + 2, 1, 4);
+    c.fillStyle = sold ? '#3a1414' : '#ff5a3a';
+    c.fillRect(cx + 1, ay + ah - 3, 2, 2); // "insert coin" LED
+  }
+  // Outline
+  c.strokeStyle = '#0b0b0d';
+  c.lineWidth = 1;
+  c.strokeRect(x0 + 0.5, y0 + 0.5, W - 1, Ht - 1);
+  c.restore();
+
+  const name = (def && def.name ? def.name : String(m.perkId || 'PERK')).toUpperCase();
+  // FIX-1: shop.syncPerkMachines sets m.price (escalating Quick Revive 50/150/300) and bumps map.version.
+  const cost = Number.isFinite(m.price) ? m.price : (def && Number.isFinite(def.cost) ? def.cost : null);
+  const price = sold ? 'SOLD OUT' : (cost != null ? String(cost) : '');
+  for (const s of sides) plates.push({ b, side: s, name, price, sold });
+}
+
 function isOpenFloorCode(code) { return code === T_FLOOR || code === T_OPEN || code === T_ARENA; }
 
 // Chalk gun outline centred on (0,0), about 34x16 px, shape by weapon class.
@@ -1266,7 +1662,7 @@ function gunSilhouette(c, cls) {
   }
 }
 
-function paintWallBuyLabel(c, wb, w, h, side, name, price) {
+function paintWallBuyLabel(c, wb, w, h, side, name, price, soldOut) {
   const nameFont = 'bold 12px monospace';
   const priceFont = 'bold 12px monospace';
   c.save();
@@ -1284,7 +1680,7 @@ function paintWallBuyLabel(c, wb, w, h, side, name, price) {
   else if (side.dx === 1) { px = wb.x + w + gap; py = wb.y + h / 2 - plateH / 2; }
   else { px = wb.x - gap - plateW; py = wb.y + h / 2 - plateH / 2; }
   px = Math.round(px); py = Math.round(py);
-  if (labelRects) labelRects.push({ x: px, y: py, w: plateW, h: plateH });
+  if (labelRects) labelRects.push({ x: px, y: py, w: plateW, h: plateH, buy: labelKind === 'buy' });
   // Dark backing plate with a chalk border
   c.fillStyle = 'rgba(8,8,10,0.82)';
   roundRect(c, px, py, plateW, plateH, 3);
@@ -1300,7 +1696,7 @@ function paintWallBuyLabel(c, wb, w, h, side, name, price) {
   c.fillText(name, px + plateW / 2, py + 2 + lineH / 2 + 0.5);
   if (price) {
     c.font = priceFont;
-    c.fillStyle = COLORS.hudPoints;
+    c.fillStyle = soldOut ? '#c8483c' : COLORS.hudPoints; // WO7: perk "SOLD OUT"
     c.fillText(price, px + plateW / 2, py + 2 + lineH * 1.5 + 0.5);
   }
   c.restore();
@@ -1309,7 +1705,12 @@ function paintWallBuyLabel(c, wb, w, h, side, name, price) {
 // FIX-3 (playtest #10): label plates painted into the static layer are recorded while painting;
 // a plate the player stands on is re-blitted from the static layer over the player at 75 % so the
 // wall-buy / mega-door text stays readable. Only plates overlapping the player are touched.
+// FIX-1 (playtest #3): wall-buy and perk plates (buy: true) sit exactly where the player stands to
+// buy, and the HUD prompt already shows name + price there, so they are re-blitted at
+// RENDER.buyPlateOverPlayerAlpha (35 %): the soldier stays clearly visible, the text stays faint.
 let labelRects = null;
+let labelKind = 'door'; // 'buy' while wall buys / perk machines paint their plates
+const BUY_PLATE_ALPHA = RENDER.buyPlateOverPlayerAlpha ?? 0.35;
 function drawLabelsOverPlayer(state) {
   const p = state.player;
   const L = staticLayer && staticLayer.labels;
@@ -1319,7 +1720,8 @@ function drawLabelsOverPlayer(state) {
   for (let i = 0; i < L.length; i++) {
     const b = L[i];
     if (p.x + pr <= b.x || p.x - pr >= b.x + b.w || p.y + pr <= b.y || p.y - pr >= b.y + b.h) continue;
-    if (!drew) { ctx.save(); ctx.globalAlpha = 0.75; drew = true; }
+    if (!drew) { ctx.save(); drew = true; }
+    ctx.globalAlpha = b.buy ? BUY_PLATE_ALPHA : 0.75;
     ctx.drawImage(staticLayer.canvas, b.x, b.y, b.w, b.h, b.x, b.y, b.w, b.h);
   }
   if (drew) ctx.restore();
@@ -1505,6 +1907,7 @@ function drawZombies(state, view) {
   const zs = state.zombies;
   if (!Array.isArray(zs) || !zs.length) return;
   const linger = ZOMBIE.deathLinger > 0 ? ZOMBIE.deathLinger : 0.6;
+  zTrackFrame++;
   // Corpses first so live zombies draw over them
   for (let pass = 0; pass < 2; pass++) {
     for (const z of zs) {
@@ -1514,6 +1917,20 @@ function drawZombies(state, view) {
       const kind = z.kind;
       if (kind === 'boss') { if (inView(view, z.x, z.y, 140)) drawBoss(state, z, dying); continue; }
       if (!inView(view, z.x, z.y, 40)) continue;
+      // WO7 T1: pixel-art sprites once Agent A's art is in (vector fallback while placeholder).
+      if (drawZombieSprite(state, z, dying, linger)) continue;
+      drawZombieLegacy(state, z, dying, linger);
+    }
+  }
+  pruneZombieTrack();
+}
+
+// Pre-WO7 vector zombie (circle, arms, eyes). Used only while the zombie art is missing or still
+// placeholder, or if a sprite draw throws.
+function drawZombieLegacy(state, z, dying, linger) {
+  {
+    {
+      const kind = z.kind;
       const minion = kind === 'minion';
       const r0 = z.radius || (minion ? ZOMBIE.radius * MINION_SCALE : ZOMBIE.radius);
       let alpha = 1, scale = 1;
@@ -1523,7 +1940,7 @@ function drawZombies(state, view) {
       }
       const r = r0 * scale;
       const col = minion ? minionColor(z.tier) : zombieColor(z.tier);
-      if (!dying && z.stun > 0) { drawStunnedZombie(z, r, col, state.time || 0); continue; }
+      if (!dying && z.stun > 0) { drawStunnedZombie(z, r, col, state.time || 0); return; }
       const sr = stunSeen.get(z);
       if (sr) sr.last = 0; // stun over: the next stun (any z.stun > 0) replays the puff
       ctx.globalAlpha = alpha;
@@ -1584,6 +2001,278 @@ function drawZombies(state, view) {
       ctx.globalAlpha = 1;
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// WO7 T1: pixel-art zombies (ZOMBIE_SPRITES from sprites/zombie.js, Agent A).
+// Two layers like the soldier: legs rotated to the movement direction (from per-zombie position
+// deltas tracked here, keyed by id), body rotated to the player while chasing / attacking and to
+// the movement direction otherwise. Walk phase from distance moved (SPRITES.zombieStride /
+// bossStride per full cycle). Every layer goes through drawCrisp (1x nearest-neighbour rotation,
+// cached per sprite x direction), so pixels stay square at all 32 directions.
+// ---------------------------------------------------------------------------
+
+const zTrack = new Map();   // zombie id (or object) -> { x, y, mx, my, legA, bodyA, dist, still, seen }
+let zTrackFrame = 0;
+const Z_TRACK_JUMP = 60;    // a per-frame move larger than this (teleport / respawn) is not walked
+const Z_STILL_FRAMES = 8;   // frames without movement before the legs return to the stance frame
+
+function pruneZombieTrack() {
+  if ((zTrackFrame & 63) !== 0 || zTrack.size < 8) return;
+  for (const [k, r] of zTrack) if (zTrackFrame - r.seen > 120) zTrack.delete(k);
+}
+
+function trackZombie(state, z) {
+  const key = z.id != null ? z.id : z;
+  let r = zTrack.get(key);
+  if (!r) {
+    let dx = z.vx || 0, dy = z.vy || 0;
+    const p = state.player;
+    if (Math.abs(dx) + Math.abs(dy) < 1e-3 && p) { dx = p.x - z.x; dy = p.y - z.y; }
+    const a = Math.abs(dx) + Math.abs(dy) > 1e-6 ? Math.atan2(dy, dx) : 0;
+    r = { x: z.x, y: z.y, mx: Math.cos(a), my: Math.sin(a), legA: a, bodyA: a, dist: 0, still: Z_STILL_FRAMES, seen: zTrackFrame };
+    zTrack.set(key, r);
+    return r;
+  }
+  if (r.seen === zTrackFrame) return r; // drawn twice in one frame
+  const dx = z.x - r.x, dy = z.y - r.y;
+  const d = Math.hypot(dx, dy);
+  if (d > 0.01 && d < Z_TRACK_JUMP) {
+    r.dist += d;
+    // Low-pass the heading so path-following jitter does not flip the legs between directions.
+    r.mx = r.mx * 0.7 + dx; r.my = r.my * 0.7 + dy;
+    if (Math.abs(r.mx) + Math.abs(r.my) > 0.15) r.legA = Math.atan2(r.my, r.mx);
+    r.still = 0;
+  } else if (r.still < 1e6) r.still++;
+  r.x = z.x; r.y = z.y;
+  r.seen = zTrackFrame;
+  return r;
+}
+
+// Is the given sprite real art (not the Phase 0 checker)? Only the explicit flag counts
+// (pixel.isPlaceholder flags any 'x' pixel; the boss tint marker is 'p' / #b44dff, see below).
+// globalThis.__zombieSpritesForce = true draws the placeholders anyway (art debugging).
+function realArt(sp) {
+  return !!(sp && sp.pixels && (sp.placeholder !== true || globalThis.__zombieSpritesForce));
+}
+
+function zombieSpritesFor(z) {
+  const Z = zombieArt.ZOMBIE_SPRITES;
+  if (!Z || typeof zombieArt.zombieSpriteFor !== 'function') return null;
+  let spr;
+  try { spr = zombieArt.zombieSpriteFor(z); } catch (_) { return null; }
+  if (!spr || !realArt(spr.body) || !spr.legs || !Array.isArray(spr.legs.frames) || !spr.legs.frames.length) return null;
+  return spr;
+}
+
+function anchorOf(a, sp) {
+  return a && Number.isFinite(a.x) && Number.isFinite(a.y) ? a : { x: sp.w / 2, y: sp.h / 2 };
+}
+
+// White silhouette (hit flash / boss telegraph), cached per source sprite.
+const whiteCache = new WeakMap();
+function whiteSprite(sp) {
+  let w = whiteCache.get(sp);
+  if (!w) {
+    w = pixel.tint(sp, (r, g, b, a) => (a ? [255, 255, 255, a] : [0, 0, 0, 0]));
+    whiteCache.set(sp, w);
+  }
+  return w;
+}
+
+// Boss tint marker: pixels whose colour is ZOMBIE_SPRITES.boss.tintColor ('p' / #b44dff, used
+// only in the boss crown/helmet) become levelDef.boss.tint. Darker shades of a magenta marker (r === b, g === 0,
+// e.g. from a custom palette) keep their relative brightness. Cached per sprite x tint.
+const tintCache = new WeakMap(); // sprite -> Map(tint -> sprite)
+function bossTinted(sp, tint, marker) {
+  let m = tintCache.get(sp);
+  if (!m) { m = new Map(); tintCache.set(sp, m); }
+  let out = m.get(tint);
+  if (out) return out;
+  const mk = hexRgb(marker) || [255, 0, 255];
+  const tc = hexRgb(tint) || [122, 31, 31];
+  const magenta = mk[0] === 255 && mk[1] === 0 && mk[2] === 255;
+  out = pixel.tint(sp, (r, g, b, a) => {
+    if (!a) return null;
+    if (r === mk[0] && g === mk[1] && b === mk[2]) return [tc[0], tc[1], tc[2], a];
+    if (magenta && g === 0 && r === b && r >= 64) {
+      const f = r / 255;
+      return [Math.round(tc[0] * f), Math.round(tc[1] * f), Math.round(tc[2] * f), a];
+    }
+    return null;
+  });
+  if (m.size > 8) m.clear();
+  m.set(tint, out);
+  return out;
+}
+
+function legFrameOf(legs, r, stride) {
+  const n = legs.frames.length;
+  if (r.still >= Z_STILL_FRAMES) return legs.frames[0];
+  const st = stride > 0 ? stride : 36;
+  const i = Math.floor((r.dist / st) * n) % n;
+  return legs.frames[i] || legs.frames[0];
+}
+
+// Normal zombies and minions. Returns false when the art is not available (caller falls back).
+function drawZombieSprite(state, z, dying, linger) {
+  const spr = zombieSpritesFor(z);
+  if (!spr) return false;
+  const Z = zombieArt.ZOMBIE_SPRITES;
+  const minion = z.kind === 'minion';
+  const scale = spriteScale();
+  const dirs = spriteDirections();
+  const r = trackZombie(state, z);
+  const p = state.player;
+  try {
+    if (!dying && !(z.stun > 0)) {
+      const face = (z.mode === 'chasing' || z.mode === 'attacking') && p;
+      r.bodyA = face ? Math.atan2(p.y - z.y, p.x - z.x) : r.legA;
+    }
+    const zx = Math.round(z.x), zy = Math.round(z.y);
+    const rad = (spr.body.w * scale) / 2;
+    if (dying) {
+      // Corpse: lying sprite at the last facing, fading out over deathLinger.
+      const f = Math.max(0, Math.min(1, (z.dyingT != null ? z.dyingT : 0) / linger));
+      const cs = realArt(spr.corpse) ? spr.corpse : spr.body;
+      const ca = anchorOf(spr.anchor, cs);
+      ctx.globalAlpha = f;
+      drawCrisp(cs, zx, zy, 0, 0, r.bodyA, ca.x, ca.y, scale, dirs);
+      ctx.globalAlpha = 1;
+      return true;
+    }
+    if (z.stun > 0) { drawStunnedSprite(z, spr, zx, zy, rad, scale, dirs, state.time || 0); return true; }
+    const sr = stunSeen.get(z);
+    if (sr) sr.last = 0;
+    // Shadow
+    ctx.globalAlpha = 0.28;
+    ctx.fillStyle = '#000000';
+    ctx.beginPath();
+    ctx.ellipse(zx + 1, zy + 3, rad * 0.72, rad * 0.55, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    // Legs
+    const stride = CFG.SPRITES && CFG.SPRITES.zombieStride;
+    const lf = legFrameOf(spr.legs, r, stride);
+    if (lf && lf.pixels) {
+      const la = anchorOf(spr.legs.anchor, lf);
+      drawCrisp(lf, zx, zy, 0, 0, r.legA, la.x, la.y, scale, dirs);
+    }
+    // Body (arms-forward frame while tearing boards)
+    let body = spr.body;
+    if (!minion && z.mode === 'tearing') {
+      // Per-tier tearing frame (Agent A extra) first, then the 3.3 walker frame.
+      if (realArt(spr.tearing)) body = spr.tearing;
+      else if (Z.normal && realArt(Z.normal.tearing)) body = Z.normal.tearing;
+    }
+    const ba = anchorOf(spr.anchor, body);
+    drawCrisp(body, zx, zy, 0, 0, r.bodyA, ba.x, ba.y, scale, dirs);
+    // Blood overlay under 50 % HP
+    if (!minion && Z.normal && realArt(Z.normal.damaged) && z.maxHp > 0 && z.hp < z.maxHp * 0.5) {
+      drawCrisp(Z.normal.damaged, zx, zy, 0, 0, r.bodyA, ba.x, ba.y, scale, dirs);
+    }
+    if (z.hitFlash > 0) {
+      ctx.globalAlpha = 0.85 * Math.min(1, z.hitFlash / 0.08);
+      drawCrisp(whiteSprite(body), zx, zy, 0, 0, r.bodyA, ba.x, ba.y, scale, dirs);
+      ctx.globalAlpha = 1;
+    }
+  } catch (_) {
+    ctx.globalAlpha = 1;
+    return false;
+  }
+  return true;
+}
+
+// Knocked-back (stunned) zombie with sprites: the corpse (lying) sprite rotated to the knock
+// direction, plus the WO2 dust puff.
+function drawStunnedSprite(z, spr, zx, zy, rad, scale, dirs, t) {
+  const stun = z.stun;
+  let rec = stunSeen.get(z);
+  if (!rec) { rec = { start: t, last: stun }; stunSeen.set(z, rec); }
+  else if (stun > rec.last + 1e-6 || rec.start > t) rec.start = t;
+  rec.last = stun;
+  const ka = Number.isFinite(z.knockAngle) ? z.knockAngle
+    : (Math.abs(z.kvx || 0) + Math.abs(z.kvy || 0) > 1e-3 ? Math.atan2(z.kvy || 0, z.kvx || 0) : 0);
+  const age = t - rec.start;
+  if (age < STUN_PUFF_TIME) {
+    const f = 1 - age / STUN_PUFF_TIME;
+    ctx.fillStyle = '#b3a78f';
+    for (let k = 0; k < 5; k++) {
+      const a = ka + Math.PI + (k - 2) * 0.45;
+      const d = rad * (0.6 + (1 - f) * 1.2);
+      ctx.globalAlpha = 0.6 * f;
+      ctx.beginPath();
+      ctx.arc(z.x + Math.cos(a) * d, z.y + Math.sin(a) * d, 3 + (1 - f) * 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+  const cs = realArt(spr.corpse) ? spr.corpse : spr.body;
+  const ca = anchorOf(spr.anchor, cs);
+  drawCrisp(cs, zx, zy, 0, 0, ka, ca.x, ca.y, scale, dirs);
+  if (z.hitFlash > 0) {
+    ctx.globalAlpha = Math.min(1, z.hitFlash / 0.08);
+    drawCrisp(whiteSprite(cs), zx, zy, 0, 0, ka, ca.x, ca.y, scale, dirs);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// Boss body via sprites (called from drawBoss after the shadow, before the telegraph ring).
+// Returns false when the boss art is missing / placeholder (drawBoss then draws the vector boss).
+function drawBossSprite(state, z, dying, alpha, ang, phase, t) {
+  const B = zombieArt.ZOMBIE_SPRITES && zombieArt.ZOMBIE_SPRITES.boss;
+  const spr = B ? zombieSpritesFor(z) : null;
+  if (!spr) return false;
+  const tint = bossTint(state);
+  const marker = typeof B.tintColor === 'string' ? B.tintColor : '#b44dff';
+  const scale = spriteScale();
+  const dirs = spriteDirections();
+  const r = trackZombie(state, z);
+  const zx = Math.round(z.x), zy = Math.round(z.y);
+  try {
+    if (!dying) r.bodyA = ang;
+    ctx.globalAlpha = alpha;
+    if (dying) {
+      const cs = bossTinted(realArt(spr.corpse) ? spr.corpse : spr.body, tint, marker);
+      const ca = anchorOf(spr.anchor, cs);
+      drawCrisp(cs, zx, zy, 0, 0, r.bodyA, ca.x, ca.y, scale, dirs);
+      ctx.globalAlpha = 1;
+      return true;
+    }
+    const stride = CFG.SPRITES && CFG.SPRITES.bossStride > 0 ? CFG.SPRITES.bossStride : 90;
+    const lf = legFrameOf(spr.legs, r, stride);
+    if (lf && lf.pixels) {
+      const lt = bossTinted(lf, tint, marker);
+      const la = anchorOf(spr.legs.anchor, lt);
+      // Legs follow the dash while charging, else the tracked movement.
+      drawCrisp(lt, zx, zy, 0, 0, phase === 'dash' ? ang : r.legA, la.x, la.y, scale, dirs);
+    }
+    const charging = phase === 'telegraph' || phase === 'dash';
+    const raw = charging && realArt(B.charge) ? B.charge : spr.body;
+    const body = bossTinted(raw, tint, marker);
+    const ba = anchorOf(spr.anchor, body);
+    drawCrisp(body, zx, zy, 0, 0, ang, ba.x, ba.y, scale, dirs);
+    if (phase === 'telegraph') {
+      const pulse = 0.5 + 0.5 * Math.sin(t * 40);
+      ctx.globalAlpha = alpha * (0.3 + 0.35 * pulse);
+      drawCrisp(whiteSprite(body), zx, zy, 0, 0, ang, ba.x, ba.y, scale, dirs);
+      ctx.globalAlpha = alpha * (0.7 + 0.3 * pulse);
+      ctx.strokeStyle = pulse > 0.5 ? '#ff4030' : '#ffd0c8';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(zx, zy, (body.w * scale) / 2 + 2, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    if (z.hitFlash > 0) {
+      ctx.globalAlpha = alpha * 0.7 * Math.min(1, z.hitFlash / 0.08);
+      drawCrisp(whiteSprite(body), zx, zy, 0, 0, ang, ba.x, ba.y, scale, dirs);
+    }
+  } catch (_) {
+    ctx.globalAlpha = 1;
+    return false;
+  }
+  ctx.globalAlpha = 1;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1661,6 +2350,8 @@ function drawBoss(state, z, dying) {
   ctx.ellipse(z.x + 4, z.y + 6, r * 1.05, r * 0.9, 0, 0, Math.PI * 2);
   ctx.fill();
 
+  // WO7 T1: sprite boss (tint marker recoloured, charge frame); vector art while placeholder.
+  if (!drawBossSprite(state, z, dying, alpha, ang, phase, t)) {
   ctx.globalAlpha = alpha;
   ctx.translate(z.x, z.y);
   ctx.rotate(ang);
@@ -1765,6 +2456,7 @@ function drawBoss(state, z, dying) {
     ctx.arc(0, 0, r, 0, Math.PI * 2);
     ctx.fill();
   }
+  } // end vector boss
   ctx.restore();
 
   if (phase === 'telegraph') {
@@ -1788,7 +2480,45 @@ function drawBoss(state, z, dying) {
     }
     ctx.restore();
   }
+  // WO7 T5: acid boss spit telegraph (z.acid.phase === 'telegraph'): swelling green glow, an
+  // outline ring pulsing faster as the spit nears, and a dripping glob at the mouth.
+  if (!dying && z.acid && z.acid.phase === 'telegraph') drawAcidTelegraph(z, r, ex, ey, t);
   ctx.globalAlpha = 1;
+}
+
+function drawAcidTelegraph(z, r, ex, ey, t) {
+  const A = CFG.BOSS && CFG.BOSS.acid;
+  const tel = A && A.telegraph > 0 ? A.telegraph : 0.5;
+  const prog = Math.max(0, Math.min(1, (z.acid.t > 0 ? z.acid.t : 0) / tel));
+  const pulse = 0.5 + 0.5 * Math.sin(t * (18 + prog * 30));
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const R = r * (1.05 + 0.25 * prog);
+  const g = ctx.createRadialGradient(z.x, z.y, r * 0.3, z.x, z.y, R * 1.35);
+  g.addColorStop(0, 'rgba(127,224,64,0)');
+  g.addColorStop(0.6, `rgba(127,224,64,${0.18 + 0.2 * pulse})`);
+  g.addColorStop(1, 'rgba(127,224,64,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(z.x, z.y, R * 1.35, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 0.6 + 0.4 * pulse;
+  ctx.strokeStyle = pulse > 0.5 ? '#b8ff6a' : '#4fb82a';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(z.x, z.y, R, 0, Math.PI * 2);
+  ctx.stroke();
+  // Glob swelling at the mouth
+  const mx = z.x + ex * r * 0.85, my = z.y + ey * r * 0.85;
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#5fcf2a';
+  ctx.beginPath();
+  ctx.arc(mx, my, 3 + prog * 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#d8ffa8';
+  ctx.fillRect(mx - 2, my - 2 - prog * 2, 2, 2);
+  ctx.restore();
 }
 
 // FIX-3 (playtest #7): charge warning lane. During the telegraph a pulsing translucent red lane,
@@ -2043,6 +2773,7 @@ function drawBullets(state) {
   ctx.lineCap = 'round';
   for (const b of bs) {
     if (!b) continue;
+    if (b.kind === 'acid' || (b.def && b.def.kind === 'acid')) { drawAcidGlob(b, b.x, b.y, 0); continue; }
     const vx = b.vx || 0, vy = b.vy || 0;
     ctx.strokeStyle = 'rgba(80,255,110,0.35)';
     ctx.lineWidth = 6;
@@ -2339,11 +3070,12 @@ const poseScratch = { entry: null, x: 0, y: 0, angle: 0, qa: 0, ox: 0, oy: 0, rx
 function resolveTorsoPose(state, out) {
   const p = state && state.player;
   const S = soldierMod.SOLDIER;
-  if (!p || p.down || !S || !S.torso) return null;
+  if (!p || p.down || p.downT > 0 || !S || !S.torso) return null;
   const w = activeWeapon(p);
   const def = activeWeaponDef(w);
   const gun = gunEntryFor(def);
-  const pose = (gun && gun.pose) || (anim && anim.pose) || 'twohand';
+  const animPose = anim && (anim.gunPose || (anim.pose !== 'knife' ? anim.pose : null)); // WO7: 'knife' is not a gun pose
+  const pose = (gun && gun.pose) || animPose || 'twohand';
   const T = S.torso;
   let torso = null;
   let offX = 0, offY = 0;
@@ -2362,8 +3094,12 @@ function resolveTorsoPose(state, out) {
     torso = wf[(((anim.legFrame | 0) % wf.length) + wf.length) % wf.length] || null;
   }
   if (!torso || !torso.pixels) torso = (T.idle && (T.idle[pose] || T.idle.twohand)) || null;
+  // WO7 T3: knife swing (animator pose 'knife' + meleeFrame, else player.meleeT) replaces the
+  // torso + gun with SOLDIER.torso.knife[frame] (arm and blade are in the torso art).
+  const kf = knifeTorso(T, p);
+  if (kf) torso = kf;
   if (!torso || !torso.pixels) return null;
-  const entry = getTorsoGun(torso, gun, pose, offX, offY);
+  const entry = getTorsoGun(torso, kf ? null : gun, kf ? 'knife' : pose, kf ? 0 : offX, kf ? 0 : offY);
   const scale = spriteScale();
   const aim = Number.isFinite(p.angle) ? p.angle : 0;
   let ox = 0, oy = 0;
@@ -2395,6 +3131,22 @@ function resolveTorsoPose(state, out) {
   out.angle = aim;
   out.qa = pixel.quantizeAngle(aim, spriteDirections());
   return out;
+}
+
+function knifeTorso(T, p) {
+  const K = T && T.knife;
+  if (!Array.isArray(K) || !K.length) return null;
+  const animKnife = anim && anim.pose === 'knife';
+  if (!animKnife && !(p.meleeT > 0)) return null;
+  let f;
+  if (anim && Number.isFinite(anim.meleeFrame)) f = anim.meleeFrame | 0;
+  else {
+    const sw = (CFG.MELEE && CFG.MELEE.swingTime) || 0.25;
+    f = p.meleeT > sw * 0.6 ? 0 : 1; // cocked for the first 40 % of the swing, then the thrust
+  }
+  f = Math.max(0, Math.min(K.length - 1, f));
+  const sp = K[f] && K[f].pixels ? K[f] : (K[f] && K[f].sprite && K[f].sprite.pixels ? K[f].sprite : null);
+  return sp;
 }
 
 function muzzleFromPose(ps, out) {
@@ -2433,8 +3185,10 @@ function drawPlayer(state) {
   const dirs = spriteDirections();
   // Wall-clock time: a down is game over, which freezes state.time, and the pool must still grow.
   const t = (typeof performance !== 'undefined' ? performance.now() : Date.now()) / 1000;
-  if (!p.down) downSince = null;
+  const qrDown = !p.down && p.downT > 0; // WO7 T2: Quick Revive "down" pause
+  if (!p.down && !qrDown) downSince = null;
   try {
+    if (qrDown) { drawReviveDown(p, S, scale, dirs, t); return; }
     if (p.down) {
       // Lying sprite, unrotated, on a pixel-art blood pool that grows over ~1 s.
       if (downSince == null || downSince > t) downSince = t;
@@ -2446,6 +3200,8 @@ function drawPlayer(state) {
       } else drawPlayerFallback(p);
       return;
     }
+    // FIX-1 (playtest #9): faint light ground ring so the player pops out of a crowd.
+    drawPlayerRing(p, scale);
     // Shadow
     const sh = S.shadow || { rx: 7, ry: 5 };
     ctx.fillStyle = 'rgba(0,0,0,0.35)';
@@ -2475,6 +3231,22 @@ function drawPlayer(state) {
   } catch (_) {
     drawPlayerFallback(p);
   }
+}
+
+const PLAYER_RING = Object.assign({ alpha: 0.4, color: '#e8f4ff' }, RENDER.playerRing || {});
+function drawPlayerRing(p, scale) {
+  const r = (p.radius || 14) + 3;
+  ctx.save();
+  ctx.globalAlpha = PLAYER_RING.alpha;
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.ellipse(p.x, p.y + 2, r, r * 0.8, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = PLAYER_RING.color;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
 }
 
 // Downed blood pool as pixel art (FIX-2, visual #12): a ragged 'r'/'R' blob on the sprite
@@ -2535,6 +3307,34 @@ function drawBloodPool(x, y, age, scale) {
 }
 
 // v1 circle look, used only if the sprite modules are missing or throw.
+// Quick Revive down: the lying sprite on a small pool, with a cyan ring filling up as the
+// revive approaches (PERKS.list.revive.downSeconds).
+function drawReviveDown(p, S, scale, dirs, now) {
+  if (downSince == null || downSince > now) downSince = now;
+  drawBloodPool(p.x, p.y, Math.min(0.4, now - downSince), scale);
+  const d = S.down;
+  if (d && d.sprite && d.sprite.pixels) {
+    const a = d.anchor || { x: d.sprite.w / 2, y: d.sprite.h / 2 };
+    drawCrisp(d.sprite, p.x, p.y, 0, 0, 0, a.x, a.y, scale, dirs);
+  } else drawPlayerFallback(p);
+  const R = CFG.PERKS && CFG.PERKS.list && CFG.PERKS.list.revive;
+  const total = R && R.downSeconds > 0 ? R.downSeconds : 1.5;
+  const f = Math.max(0, Math.min(1, 1 - p.downT / total));
+  const col = (R && R.color) || '#3ec9ff';
+  ctx.save();
+  ctx.lineWidth = 3;
+  ctx.globalAlpha = 0.3;
+  ctx.strokeStyle = col;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 26, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.globalAlpha = 0.95;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 26, -Math.PI / 2, -Math.PI / 2 + f * Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawPlayerFallback(p) {
   const r = p.radius || 14;
   const a = p.angle || 0;
@@ -2578,6 +3378,7 @@ function drawEffectsOfType(state, type, view) {
       case 'shockwave': drawShockwave(e, view); break;
       case 'doorOpen': drawDoorOpen(e, view); break;
       case 'bossDeath': drawBossDeath(e, view); break;
+      case 'slash': drawSlash(e, view); break;
       case 'text': drawText(e, view); break;
       default: break;
     }
@@ -2916,6 +3717,277 @@ function drawFlash(state, W, H) {
 // ---------------------------------------------------------------------------
 // Debug
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// WO7 T3 / T5: knife slash, acid pools + globs, lab flicker
+// ---------------------------------------------------------------------------
+
+// 'slash' {x, y, angle, ttl, maxTtl}: a white crescent sweeping across the knife cone
+// (MELEE.halfAngle either side of `angle`) at about the reach, fading over its life.
+function drawSlash(e, view) {
+  if (!Number.isFinite(e.x) || !Number.isFinite(e.y)) return;
+  const M = CFG.MELEE || {};
+  const R = e.r > 0 ? e.r : 14 + (M.reach || 44) * 0.75;
+  if (!inView(view, e.x, e.y, R + 10)) return;
+  const half = e.halfAngle > 0 ? e.halfAngle : (M.halfAngle || 0.7);
+  const ang = Number.isFinite(e.angle) ? e.angle : 0;
+  const p = 1 - lifeFrac(e);           // 0 -> 1 over the swing
+  const sweep = Math.min(1, p * 1.8);  // the blade crosses the cone in the first ~55 %
+  const a0 = ang - half, a1 = ang - half + 2 * half * sweep;
+  const tail = Math.max(a0, a1 - 1.1);
+  const fade = p < 0.55 ? 1 : Math.max(0, 1 - (p - 0.55) / 0.45);
+  ctx.save();
+  ctx.lineCap = 'round';
+  // Soft outer smear
+  ctx.globalAlpha = 0.25 * fade;
+  ctx.strokeStyle = '#dfe8ff';
+  ctx.lineWidth = 9;
+  ctx.beginPath();
+  ctx.arc(e.x, e.y, R - 2, tail, a1);
+  ctx.stroke();
+  // Crescent: a few arcs, thicker toward the leading edge
+  for (let k = 0; k < 3; k++) {
+    const s = tail + (a1 - tail) * (k / 3);
+    ctx.globalAlpha = (0.45 + 0.25 * k) * fade;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.5 + k * 1.2;
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, R + k * 0.5, s, a1);
+    ctx.stroke();
+  }
+  // Glint at the blade tip
+  if (fade > 0 && sweep < 1) {
+    ctx.globalAlpha = fade;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(e.x + Math.cos(a1) * R - 2, e.y + Math.sin(a1) * R - 2, 4, 4);
+  }
+  ctx.restore();
+}
+
+// Acid pools (state.hazards kind 'acid' {x, y, r, ttl, maxTtl}): a green lobed puddle that
+// spreads in over 0.3 s and fades out over its last second, with bubbles rising and popping
+// (deterministic from game time and the pool id).
+function drawHazards(state, view, t) {
+  const hs = state.hazards;
+  if (!Array.isArray(hs) || !hs.length) return;
+  ctx.save();
+  for (let i = 0; i < hs.length; i++) {
+    const h = hs[i];
+    if (!h || h.kind !== 'acid' || !Number.isFinite(h.x) || !Number.isFinite(h.y)) continue;
+    const R = h.r > 0 ? h.r : 50;
+    if (!inView(view, h.x, h.y, R * 1.3)) continue;
+    const max = h.maxTtl > 0 ? h.maxTtl : 5;
+    const ttl = Number.isFinite(h.ttl) ? h.ttl : max;
+    const age = Math.max(0, max - ttl);
+    const grow = Math.min(1, age / 0.3);
+    const rr = R * (0.35 + 0.65 * (1 - (1 - grow) * (1 - grow)));
+    const fade = Math.max(0, Math.min(1, ttl / 1.0));
+    const seed = (Number.isFinite(h.id) ? h.id : i) * 17.3 + Math.floor(h.x) * 0.13 + Math.floor(h.y) * 0.29;
+    // Dark scorched rim + body lobes
+    ctx.globalAlpha = 0.55 * fade;
+    ctx.fillStyle = '#1f4a10';
+    ctx.beginPath();
+    ctx.arc(h.x, h.y, rr, 0, Math.PI * 2);
+    for (let k = 0; k < 7; k++) {
+      const a = hash(seed + k * 3.1) * Math.PI * 2;
+      const d = rr * (0.55 + hash(seed + k * 5.7) * 0.3);
+      const lr = rr * (0.28 + hash(seed + k * 7.9) * 0.2);
+      const x = h.x + Math.cos(a) * d, y = h.y + Math.sin(a) * d;
+      ctx.moveTo(x + lr, y);
+      ctx.arc(x, y, lr, 0, Math.PI * 2);
+    }
+    ctx.fill();
+    ctx.globalAlpha = 0.6 * fade;
+    ctx.fillStyle = '#4fb82a';
+    ctx.beginPath();
+    ctx.arc(h.x, h.y, rr * 0.82, 0, Math.PI * 2);
+    ctx.fill();
+    // Glossy core, gently pulsing
+    ctx.globalAlpha = (0.35 + 0.1 * Math.sin(t * 5 + seed)) * fade;
+    ctx.fillStyle = '#9dff5a';
+    ctx.beginPath();
+    ctx.ellipse(h.x - rr * 0.15, h.y - rr * 0.18, rr * 0.4, rr * 0.25, -0.5, 0, Math.PI * 2);
+    ctx.fill();
+    // Bubbles: 6 slots, each grows over its own 0.7-1.1 s cycle then pops
+    for (let k = 0; k < 6; k++) {
+      const per = 0.7 + hash(seed + k * 11.3) * 0.4;
+      const ph = ((t + hash(seed + k * 13.7) * per) % per) / per;
+      const cyc = Math.floor((t + hash(seed + k * 13.7) * per) / per);
+      const a = hash(seed + k * 19.1 + cyc * 3.3) * Math.PI * 2;
+      const d = rr * 0.7 * Math.sqrt(hash(seed + k * 23.9 + cyc * 5.1));
+      const bx = h.x + Math.cos(a) * d, by = h.y + Math.sin(a) * d;
+      if (ph < 0.85) {
+        const br = 1.5 + ph * 4;
+        ctx.globalAlpha = 0.85 * fade;
+        ctx.strokeStyle = '#c8ff9a';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(bx, by, br, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.fillStyle = '#e8ffd0';
+        ctx.fillRect(bx - br * 0.5, by - br * 0.6, 1.5, 1.5);
+      } else {
+        // pop: a few droplets flung out
+        const q = (ph - 0.85) / 0.15;
+        ctx.globalAlpha = 0.7 * (1 - q) * fade;
+        ctx.fillStyle = '#b8ff80';
+        for (let j = 0; j < 4; j++) {
+          const da = j * 1.571 + a;
+          ctx.fillRect(bx + Math.cos(da) * (3 + q * 5) - 1, by + Math.sin(da) * (3 + q * 5) - 1, 2, 2);
+        }
+      }
+    }
+    // Fumes above the pool
+    ctx.globalAlpha = 0.12 * fade;
+    ctx.fillStyle = '#b8ff80';
+    for (let k = 0; k < 3; k++) {
+      const ph = (t * 0.6 + k / 3 + hash(seed + k)) % 1;
+      ctx.beginPath();
+      ctx.arc(h.x + (hash(seed + k * 29) - 0.5) * rr, h.y - ph * rr * 0.8, 5 + ph * 8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+// Acid globs in flight: state.acidGlobs (Agent H) {sx, sy, tx, ty, ttl, maxTtl, r} lobbed on a
+// parabola (purely visual height), drawn as a green blob with a dripping trail over a ground
+// shadow that closes in on the landing point.
+const GLOB_ARC = 70; // peak visual height in world px
+function drawAcidGlobs(state, view) {
+  const gs = state.acidGlobs;
+  if (!Array.isArray(gs) || !gs.length) return;
+  for (let i = 0; i < gs.length; i++) {
+    const g = gs[i];
+    if (!g) continue;
+    const hasPath = Number.isFinite(g.sx) && Number.isFinite(g.sy) && Number.isFinite(g.tx) && Number.isFinite(g.ty);
+    const max = g.maxTtl > 0 ? g.maxTtl : 0.8;
+    const p = Math.max(0, Math.min(1, 1 - (Number.isFinite(g.ttl) ? g.ttl : 0) / max));
+    let gx = g.x, gy = g.y;
+    if (hasPath) { gx = g.sx + (g.tx - g.sx) * p; gy = g.sy + (g.ty - g.sy) * p; }
+    if (!Number.isFinite(gx) || !Number.isFinite(gy) || !inView(view, gx, gy, GLOB_ARC + 30)) continue;
+    // Ground shadow + landing marker
+    if (hasPath) {
+      // FIX-1 (playtest #14): dark outline under a bright yellow-green dash, readable on the
+      // pale lab floor.
+      const rr = (g.r > 0 ? g.r : 50) * (0.4 + 0.6 * p);
+      ctx.save();
+      ctx.globalAlpha = 0.55 + 0.4 * p;
+      ctx.beginPath();
+      ctx.arc(g.tx, g.ty, rr, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(8,20,4,0.85)';
+      ctx.lineWidth = 4;
+      ctx.stroke();
+      ctx.strokeStyle = '#c8ff3a';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+    ctx.save();
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = '#000000';
+    ctx.beginPath();
+    ctx.ellipse(gx, gy + 2, 6, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    const hgt = hasPath ? 4 * GLOB_ARC * p * (1 - p) : 0;
+    // Trail: earlier points on the arc
+    if (hasPath) {
+      ctx.save();
+      for (let k = 4; k >= 1; k--) {
+        const q = Math.max(0, p - k * 0.035);
+        const qx = g.sx + (g.tx - g.sx) * q, qy = g.sy + (g.ty - g.sy) * q - 4 * GLOB_ARC * q * (1 - q);
+        ctx.globalAlpha = 0.5 - k * 0.1;
+        ctx.fillStyle = '#6fd03a';
+        ctx.beginPath();
+        ctx.arc(qx, qy, 5 - k * 0.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+    drawAcidGlob(g, gx, gy - hgt, hasPath ? 0 : 1);
+  }
+}
+
+// One green blob (also used for kind 'acid' entries in state.bullets). `trail` 1 draws a velocity
+// streak behind it (no path information).
+function drawAcidGlob(g, x, y, trail) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  ctx.save();
+  if (trail) {
+    const vx = g.vx || 0, vy = g.vy || 0;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = 'rgba(111,208,58,0.45)';
+    ctx.lineWidth = 7;
+    ctx.beginPath();
+    ctx.moveTo(x - vx * 0.06, y - vy * 0.06);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+  }
+  ctx.shadowColor = '#7fe040';
+  ctx.shadowBlur = 10;
+  ctx.fillStyle = '#4fb82a';
+  ctx.beginPath();
+  ctx.arc(x, y, 7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#9dff5a';
+  ctx.beginPath();
+  ctx.arc(x - 1.5, y - 1.5, 3.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#f0ffe0';
+  ctx.fillRect(x - 3, y - 3, 2, 2);
+  ctx.restore();
+}
+
+// theme.flicker (LABORATORY): a failing fluorescent tube, as a rare, subtle mood dim (FIX-1,
+// playtest #1: the WO7 version strobed). Game time is cut into RENDER.flicker.period windows;
+// every window holds exactly one burst starting at a hashed offset in [0, period - minGap], so
+// consecutive bursts start minGap..(2*period - minGap) s apart (8-20 s by default). A burst is
+// 1..maxDips smooth sin^2 dips of dipTime s whose starts are dipGap s apart (< 3 flashes per
+// second, WCAG 2.3.1), each darkening to alphaMin..alphaMax. Deterministic from state.time
+// (freezes when paused). Skipped entirely under prefers-reduced-motion.
+const FLICKER = Object.assign(
+  { period: 14, minGap: 8, maxDips: 2, dipTime: 0.24, dipGap: 0.42, alphaMin: 0.08, alphaMax: 0.18 },
+  RENDER.flicker || {});
+let reducedMotionMq; // undefined = not looked up yet, null = unsupported
+function prefersReducedMotion() {
+  if (reducedMotionMq === undefined) {
+    try {
+      reducedMotionMq = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
+    } catch (_) { reducedMotionMq = null; }
+  }
+  return !!(reducedMotionMq && reducedMotionMq.matches);
+}
+function flickerAlpha(t) {
+  const P = FLICKER.period > 0 ? FLICKER.period : 14;
+  const w = Math.floor(t / P);
+  const start = hash(w * 3.71 + 1.3) * Math.max(0, P - FLICKER.minGap);
+  const u = t - w * P - start;
+  if (u < 0) return 0;
+  const dips = 1 + Math.floor(hash(w * 9.91 + 4.2) * Math.max(1, FLICKER.maxDips | 0));
+  const gap = Math.max(FLICKER.dipGap, FLICKER.dipTime);
+  let a = 0;
+  for (let d = 0; d < dips; d++) {
+    const v = u - d * gap;
+    if (v < 0 || v >= FLICKER.dipTime) continue;
+    const s = Math.sin(Math.PI * v / FLICKER.dipTime);
+    const amp = FLICKER.alphaMin + hash(w * 11.3 + d * 1.7) * (FLICKER.alphaMax - FLICKER.alphaMin);
+    a = Math.max(a, amp * s * s);
+  }
+  return a;
+}
+function drawFlicker(t, W, H) {
+  if (prefersReducedMotion()) return;
+  const a = flickerAlpha(t);
+  if (a <= 0) return;
+  ctx.globalAlpha = a;
+  ctx.fillStyle = '#02040a';
+  ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = 1;
+}
 
 function drawDebugWorld(state, view) {
   const map = state.map;

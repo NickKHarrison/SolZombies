@@ -280,3 +280,17 @@ than the LMG, Marshal shorter than the shotgun). Checked in tools/sprite-preview
 
 First pass of the 48 Dredge drum had two light
 spots that read as a face; replaced with concentric rings and a dark hub.
+
+## WO7 (Agent F, WORK_ORDER_7 1.5): level-3 guns
+
+Three keys named after the weapon ids, same conventions as WO5 (`k` outline, grip on the barrel
+axis, `muzzle.x === sprite.w`, palette only). Nominals added to `GUN_NOMINAL` in
+`tests/sprites.test.js` (hg40 16x8, m8a7 25x7, peacekeeper 23x9) plus a "guns WO7" test
+(distinct grids, muzzle/grip rules, twohand pose, HG 40 < Peacekeeper < M8A7 in length,
+Peacekeeper taller than M8A7). Checked in tools/sprite-preview.html (pose x gun sheet).
+
+| key | size | grip | muzzle | pose | silhouette |
+|---|---|---|---|---|---|
+| hg40 | 17x10 | (5, 5) | (17, 5) | twohand | compact SMG: tall stick mag sticking UP out of the receiver (light top), skeletal `W` wire butt, short barrel with a front-sight post, small grip |
+| m8a7 | 26x9 | (7, 4) | (26, 4) | twohand | sleek long AR: integrated low scope housing with two cyan `c` lenses, long `W` highlight barrel line, thin stock, short straight mag |
+| peacekeeper | 24x10 | (6, 3) | (24, 3) | twohand | chunky AR: 3-row receiver, top rail, heavy stock, square grip/mag block and an underbarrel tube with a `y` tip |

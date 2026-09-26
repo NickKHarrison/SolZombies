@@ -116,6 +116,19 @@ export const RENDER = {
   megaDoorShake: { ttl: 0.6, magnitude: 5 },
   bossRingTtl: 0.6,   // boss death shock ring; the pool is zombie.js's boss blood effect (FIX-3)
   bossScale: 2.4, minionScale: 0.7,
+  // WO7 FIX-1 (playtest #1): LABORATORY failing-tube flicker. Rare and subtle: one burst per
+  // `period` s window, starts spaced minGap..(2*period - minGap) s apart (8-20 s), 1..maxDips
+  // smooth (sin^2) dips of `dipTime` s whose starts are >= dipGap apart (< 3 flashes/s, WCAG
+  // 2.3.1), darkening alpha alphaMin..alphaMax. Skipped under prefers-reduced-motion.
+  flicker: { period: 14, minGap: 8, maxDips: 2, dipTime: 0.24, dipGap: 0.42, alphaMin: 0.08, alphaMax: 0.18 },
+  // WO7 FIX-1: wall-buy / perk plates re-blitted over the player at this alpha (door plates 0.75).
+  buyPlateOverPlayerAlpha: 0.35,
+  // WO7 FIX-1 (#9): faint light ring under the player.
+  playerRing: { alpha: 0.4, color: '#e8f4ff' },
+  // WO7 FIX-1 (#12): points popups spawned within mergeTime s and mergeDist px merge into one.
+  textMergeTime: 0.3, textMergeDist: 44,
+  // WO7 FIX-1 (#5): LABORATORY decor blocks (interior wall clusters up to this size) are tanks.
+  labTankMaxTiles: 6,
 };
 
 export const AUDIO = {
@@ -150,6 +163,9 @@ export const SPRITES = {
   reloadFrameTime: 0.25,
   faceScale: 4,
   face: { glanceMin: 1.0, glanceMax: 3.0, blinkMin: 3.0, blinkMax: 6.0, blinkTime: 0.12, winceTime: 0.4, grinTime: 1.0 },
+  // WO7 3.1 (Phase 0): world px per full zombie leg cycle (normal/minion 6/4 frames; boss 4-frame stomp).
+  zombieStride: 36,
+  bossStride: 90,
 };
 
 // ---------------------------------------------------------------------------
@@ -180,15 +196,55 @@ export const BOSS = {
     maxSpeedMult: 1.1,   // FIX-2: minion speed capped at ZOMBIE.maxSpeed x this
     damage: 25, attackCooldown: 0.8,
   },
+  // WO7 3.1 (Phase 0): THE SUBJECT (levelDef.boss.ability 'acid'). spread = +-radians (~25 deg).
+  acid: { every: 6, telegraph: 0.5, globs: 3, spread: 0.44, flight: 0.8, poolRadius: 50, poolSeconds: 5, dps: 25 },
+  // WO7 FIX-5 (balance #1): Double Tap's bullet-damage multiplier is capped at this vs kind 'boss'
+  // (the x1.33 rpm still applies; minions and normal zombies still take the full x2).
+  dtapDamageMult: 1,
 };
 
 export const LEVELS_CFG = {
   fadeSeconds: 1.2,
   // Per descent past the last authored level, compounding on the previous level (WO5 FIX-1,
-  // QA balance #1/#2): health x1.2, count x1.1, speed x1.03 (capped at speedMultCap),
-  // sprintShift +2. Every factor strictly increases each descent (speed until the cap).
-  loop: { healthMult: 1.2, countMult: 1.1, speedMult: 1.03, sprintShift: 2, speedMultCap: 1.15 },
+  // QA balance #1/#2): health x1.2, count x1.1, speed x1.03 up to speedMultCap (WO7 FIX-3,
+  // balance #5: 1.15 -> 1.3, so loop speed rises L4 1.236, L5 1.273, L6+ 1.3; sprinters stay
+  // capped by ZOMBIE.maxSpeed), sprintShift +2. Every factor strictly increases each descent
+  // (speed until the cap).
+  loop: { healthMult: 1.2, countMult: 1.1, speedMult: 1.03, sprintShift: 2, speedMultCap: 1.3 },
+  // WO7 FIX-3 (balance #4): from loop 1 (level 4+) every wall gun id found here is swapped for
+  // its value (one step, not chained; wallbuy letters kept) so loop levels sell tier-3 guns and
+  // their ammo. Level-1 layout: tier 1 -> tier 3 / tier 2; level-2 layout: tier 2 -> tier 3
+  // where a tier-3 gun of the same class exists (shotguns, LMGs, Drakon keep their gun).
+  loopWallUpgrade: {
+    // level-1 layout (tier 1)
+    sheiva: 'm8a7', kn44: 'peacekeeper', kuda: 'hg40', lcar9: 'weevil', rk5: 'xr2',
+    krm262: 'marshal16', argus: 'haymaker12', hvk30: 'manowar', icr1: 'gorgon', bootlegger: 'dredge48',
+    // level-2 layout (tier 2)
+    weevil: 'hg40', xr2: 'm8a7', manowar: 'peacekeeper',
+  },
   // First break after a descent (seconds; replaces ROUNDS.firstRoundDelay there). The player is
   // also healed to full on arrival (QA playtest #4).
   arrivalBreak: 10,
 };
+
+// ---------------------------------------------------------------------------
+// WO7 3.1 (Phase 0) — perks, knife, high scores.
+// ---------------------------------------------------------------------------
+
+export const PERKS = {
+  maxPerks: 4,
+  list: {
+    jugg:   { name: 'Juggernog',     letter: 'J', cost: 250, color: '#d62828', maxHealth: 250 },
+    // costs (WO7 FIX-3, balance #6): price by purchase number (1st 50, 2nd 150, 3rd 300); cost = 1st.
+    revive: { name: 'Quick Revive',  letter: 'Q', cost: 50,  costs: [50, 150, 300], color: '#3ec9ff', maxUses: 3, downSeconds: 1.5, invulnSeconds: 2 },
+    speed:  { name: 'Speed Cola',    letter: 'C', cost: 300, color: '#6cf542', reloadMult: 0.5 },
+    dtap:   { name: 'Double Tap II', letter: 'N', cost: 200, color: '#ff9f1c', rpmMult: 1.33, bulletDamageMult: 2 },
+    stamin: { name: 'Stamin-Up',     letter: 'U', cost: 200, color: '#ffd54a', speedMult: 1.07, sprintMult: 1.2 },
+    mule:   { name: 'Mule Kick',     letter: 'K', cost: 400, color: '#b44dff', weaponSlots: 3 },
+  },
+  ammoMultTier3: 0.3,
+};
+
+export const MELEE = { damage: 150, cooldown: 0.5, reach: 44, halfAngle: 0.7, maxTargets: 3, knockback: 90, swingTime: 0.25, bonusPoints: 5, thrustAt: 0.4 }; // thrustAt: swing progress where the knife torso goes cocked -> thrust
+
+export const SCORES = { key: 'solzombies.scores.v1', max: 10 };

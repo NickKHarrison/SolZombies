@@ -341,3 +341,31 @@ The legs assertions in `tests/sprites.test.js` replace the two FIX-1 legs tests 
 - lanes 4.5-6 px from the centre line, with no pixel outside the torso's 16-px width;
 - per boot, exactly two backward moves per cycle, each equal to `strideLength / 8 / scale`, over a ±5 span, with the right boot equal to the left boot shifted by 4 frames;
 - at least 6 boot pixels visible past the shoulders (twohand torso, arms excluded) in every frame, with boots showing both behind and ahead over the cycle.
+
+## WO7 (T3): knife torso (Agent B)
+- **Sprite:** `SOLDIER.torso.knife = [cocked, thrust]`. Both frames are 16x16, face +x and use `torso.anchor` (8,8). There is no hand anchor, because the gun is not drawn.
+- **Frame 0 (cocked):**
+  - The left arm is raised forward as a guard. Rows 0-4 are the `ONEHANDFWD` rows.
+  - The right hand is pulled back onto the right shoulder lobe (rows 13-14, cols 7-9).
+  - The knife points forward: a `K` grip and a `WWw` blade at cols 10-13 of row 13.
+- **Frame 1 (thrust):**
+  - The left arm swings back for balance. Rows 0-4 are the `ONEHANDBACK` rows.
+  - The right forearm drives forward and in toward the aim line: the hand is at col 12, row 10, with a `K` grip and a `Ww` blade at cols 13-15.
+  - Rows 5-8 are the onehand body.
+- **Helmet:** the pixels in rows 4-11, cols 4-11 are identical to `HELMET`. Both the animator test and a node check found 0 mismatches, so the helmet overlay still registers.
+- **Checks:** checked by eye at 12x with the legs and helmet overlay in the preview page, using an injected overlay because the preview page was not edited. Both frames read clearly.
+- **Test note (integrator / Agent F):** `tests/sprites.test.js` has no `torso.knife` coverage. `allSprites()` enumerates only idle, reload and walk per pose, and the helmet-match test checks only `idle`. The knife frames are covered in `tests/animator.test.js`, which checks their size and the helmet match. Optionally, add `SOLDIER.torso.knife[i]` (16x16) to `allSprites()`.
+
+## WO7 FIX-4 (QA #15): longer, brighter knife blade
+- The QA report said the blade was 1-2 px and got lost under the slash arc.
+- **Frame 0 (cocked):**
+  - Row 13 has a `K` grip at col 10 and a 4-px `WWWW` blade at cols 11-14, closed by a `k` tip.
+  - Row 12 has a `www` white edge highlight at cols 12-14.
+  - Row 14 is the outline.
+- **Frame 1 (thrust):**
+  - The fist moves back to cols 10-11 (`sS` on row 11, `ss` on row 12).
+  - Row 11 has a 4-px `WWWW` blade at cols 12-15.
+  - Row 10 has a `wwww` white edge highlight at cols 12-15.
+  - Rows 9 and 12 outline the blade.
+- Only rows 12-14 (frame 0) and rows 10-12 (frame 1) changed, all outside the helmet area. The helmet pixels still match `HELMET`, and the animator test passes. No other soldier art changed.
+- Checked at 12x in an injected preview overlay and in-game at `&touch=1` during a swing.

@@ -53,7 +53,89 @@ export function initBoss(state) {
     b.hp = 0;
     if (Number.isFinite(z.x) && Number.isFinite(z.y)) { b.x = z.x; b.y = z.y; }
   }));
-  unsubs.push(events.on('game:restart', () => { state.boss = createBossState(); }));
+  unsubs.push(events.on('game:restart', () => { state.boss = createBossState(); clearHazards(state); }));
+}
+
+// ---------------------------------------------------------------------------
+// WO7 acid hazards (THE SUBJECT). Globs live in state.acidGlobs (zombie.lobAcid pushes them;
+// kept out of state.bullets because weapons.updateBullets would detonate them on zombies).
+// Glob: { id, kind: 'acid', x, y, sx, sy, tx, ty, vx, vy, ttl, maxTtl, r, poolTtl, dps }.
+// Pool: state.hazards { id, kind: 'acid', x, y, r, ttl, maxTtl, dps }.
+// ---------------------------------------------------------------------------
+
+// Map each state was last updated on: a new state.map object means a level swap -> clear.
+const lastMap = new WeakMap();
+
+export function clearHazards(state) {
+  if (!state) return;
+  if (Array.isArray(state.hazards)) state.hazards.length = 0; else state.hazards = [];
+  if (Array.isArray(state.acidGlobs)) state.acidGlobs.length = 0; else state.acidGlobs = [];
+}
+
+function acidDefaults() {
+  const A = BOSS.acid || {};
+  return {
+    poolRadius: Number.isFinite(A.poolRadius) ? A.poolRadius : 50,
+    poolSeconds: Number.isFinite(A.poolSeconds) ? A.poolSeconds : 5,
+    dps: Number.isFinite(A.dps) ? A.dps : 25,
+  };
+}
+
+// Player is immune to pools while down, in the Quick Revive pause or invulnerable.
+function playerHurtable(p) {
+  return !!p && !p.down && !(p.downT > 0) && !(p.invulnT > 0) && !p.invulnerable;
+}
+
+// Glob flight + landing (-> pool), pool ttl, player damage dps x dt while the player's centre is
+// inside a pool (overlapping pools do not stack: the highest dps applies), prune. Clears
+// everything when state.map changes identity (level swap).
+export function updateHazards(state, dt) {
+  if (!state) return;
+  if (!Array.isArray(state.hazards)) state.hazards = [];
+  if (!Array.isArray(state.acidGlobs)) state.acidGlobs = [];
+  const prev = lastMap.get(state);
+  if (prev !== undefined && prev !== state.map) clearHazards(state);
+  lastMap.set(state, state.map || null);
+  dt = Number(dt);
+  if (!(dt > 0)) return;
+  const D = acidDefaults();
+
+  const globs = state.acidGlobs;
+  let w = 0;
+  for (let i = 0; i < globs.length; i++) {
+    const g = globs[i];
+    g.ttl -= dt;
+    if (g.ttl <= 0) {
+      const ttl = Number.isFinite(g.poolTtl) ? g.poolTtl : D.poolSeconds;
+      state.hazards.push({
+        id: g.id, kind: 'acid',
+        x: Number.isFinite(g.tx) ? g.tx : g.x, y: Number.isFinite(g.ty) ? g.ty : g.y,
+        r: Number.isFinite(g.r) ? g.r : D.poolRadius,
+        ttl, maxTtl: ttl, dps: Number.isFinite(g.dps) ? g.dps : D.dps,
+      });
+      continue;
+    }
+    g.x += g.vx * dt; g.y += g.vy * dt;
+    globs[w++] = g;
+  }
+  globs.length = w;
+
+  const hz = state.hazards;
+  const p = state.player;
+  let dps = 0;
+  w = 0;
+  for (let i = 0; i < hz.length; i++) {
+    const h = hz[i];
+    const live = Math.min(dt, Math.max(0, h.ttl));
+    if (p && live > 0 && h.dps > 0 && Math.hypot(p.x - h.x, p.y - h.y) <= h.r) dps = Math.max(dps, h.dps * (live / dt));
+    h.ttl -= dt;
+    if (h.ttl > 0) hz[w++] = h;
+  }
+  hz.length = w;
+  if (dps > 0 && playerHurtable(p)) {
+    const hurt = fn(player, 'damagePlayer');
+    if (hurt) hurt(state, dps * dt);
+  }
 }
 
 function levelIndex(state) {

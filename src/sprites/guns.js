@@ -183,6 +183,45 @@ export const GUN_SPRITES = Object.freeze({
     '.....kkkkkkkk..............',
   ], { x: 5, y: 3 }, { x: 27, y: 3 }, 'heavy', 1.6),
 
+  // WO7 1.5 (Agent F): level-3 (tier 3) guns. Keys = weapon ids (defs set `sprite` to the same key).
+  hg40: gun([
+    '.....kkkk........',
+    '.....kWMk........',
+    '.....kMmk........',
+    'kkkkkkMmkkkkk....',
+    'kWkkKmMmMMMMMkkkk',
+    'kWKKKMMMMMMMMMMMk',
+    'kWkkKmmmmmmmmkkkk',
+    'kkkkkkKmkkkk.....',
+    '....kKKk.........',
+    '....kkkk.........',
+  ], { x: 5, y: 5 }, { x: 17, y: 5 }, 'twohand', 1),
+
+  m8a7: gun([
+    '.......kkkkkkkkkk.........',
+    '......kKcKKKKKKcKk........',
+    'kkkk..kkkkkkkkkkkkkkkkk...',
+    'kKKkkkKMMMMMMMMMMMMMMMkkkk',
+    'kKKKKKKWWWWWWWWWWWWWWWMMMk',
+    'kKKkkkKmmmmmmmmmmmmmmmkkkk',
+    'kkkk..kkkkKmmkkkkkkkkkk...',
+    '.........kKmmk............',
+    '.........kkkkk............',
+  ], { x: 7, y: 4 }, { x: 26, y: 4 }, 'twohand', 1),
+
+  peacekeeper: gun([
+    '.....kkkkkkk............',
+    'kkkkkkWWWWWkkkkkkkk.....',
+    'kKKKKKMMMMMMMMMMMMMkkkkk',
+    'kKKKKKMMMMMMMMMMMMMMMMMk',
+    'kKKKKKmmmmmmmmmmmmmkkkkk',
+    'kKKKkkkmmmKkkKKKKKKKk...',
+    'kkkk.kKmmmkkkMMMMMMyk...',
+    '.....kKmmmk.kkkkkkkkk...',
+    '.....kKKKKk.............',
+    '.....kkkkkk.............',
+  ], { x: 6, y: 3 }, { x: 24, y: 3 }, 'twohand', 1),
+
   default: gun([
     '..kkkkkkkkk..',
     'kkkWWWWWWWkkk',

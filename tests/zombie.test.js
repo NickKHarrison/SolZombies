@@ -946,3 +946,172 @@ test('FIX-2 speed cap: normal zombies <= ZOMBIE.maxSpeed (214), minions <= 1.1 x
   const b = spawnZombie(s, openSpawn, { kind: 'boss' });
   assert.ok(Math.abs(b.speed - BOSS.speed * 1.15) < 1e-9);
 });
+
+// ---------------------------------------------------------------------------
+// WO7 (Agent H): boss ability switch, acid spit, downed-player rule
+// ---------------------------------------------------------------------------
+
+function acidState(seed = 21) {
+  const s = fakeState(seed);
+  s.map = roomMap(24, 16);
+  s.level = { index: 2, def: { boss: { name: 'THE SUBJECT', tint: '#7fe040', ability: 'acid' } } };
+  return s;
+}
+
+test('WO7 boss ability: level def acid -> acid, charge/missing/unknown -> charge; opts override', () => {
+  const s = fakeState(20);
+  assert.equal(spawnZombie(s, { x: 100, y: 100 }, { kind: 'boss' }).ability, 'charge');
+  s.level = { index: 0, def: { boss: { ability: 'lasers' } } };
+  assert.equal(spawnZombie(s, { x: 100, y: 100 }, { kind: 'boss' }).ability, 'charge');
+  s.level = { index: 2, def: { boss: { ability: 'acid' } } };
+  const a = spawnZombie(s, { x: 100, y: 100 }, { kind: 'boss' });
+  assert.equal(a.ability, 'acid');
+  assert.deepEqual(a.acid, { timer: BOSS.acid.every, phase: 'idle', t: 0 });
+  assert.equal(a.charge.phase, 'idle', 'acid boss keeps an idle charge object (render-safe)');
+  assert.equal(spawnZombie(s, { x: 100, y: 100 }, { kind: 'boss', ability: 'charge' }).ability, 'charge');
+  assert.equal(zombie.bossAbilityOf(null), 'charge');
+});
+
+test('WO7 acid boss never charges; spits every BOSS.acid.every s with a still telegraph', { skip: mapStub }, () => {
+  const s = acidState();
+  s.map = roomMap(48, 16);
+  s.player = fakePlayer(44 * TILE, 8 * TILE);
+  s.player.health = s.player.maxHealth = 1e6; // survives the boss's melee between spits
+  const spits = record('boss:spit');
+  const charges = record('boss:charge');
+  const b = spawnZombie(s, { x: 3 * TILE, y: 8 * TILE }, { kind: 'boss' });
+  const dt = 1 / 60;
+  let t = 0;
+  while (spits.length === 0 && t < 20) { updateZombies(s, dt); t += dt; }
+  assert.ok(Math.abs(t - BOSS.acid.every) < 2 * dt, `first spit at ${t}`);
+  assert.equal(b.acid.phase, 'telegraph');
+  assert.deepEqual(spits[0], { x: b.x, y: b.y });
+  const x0 = b.x, y0 = b.y;
+  t = 0;
+  while (b.acid.phase === 'telegraph' && t < 2) { updateZombies(s, dt); t += dt; }
+  assert.ok(Math.abs(t - BOSS.acid.telegraph) < 2 * dt, `telegraph ${t}`);
+  assert.equal(b.x, x0); assert.equal(b.y, y0);
+  assert.equal(s.acidGlobs.length, BOSS.acid.globs);
+  assert.ok(!s.bullets.some((x) => x.kind === 'acid'), 'globs are kept out of state.bullets');
+  // Moves again (hunting) and spits again one period later.
+  t = 0;
+  while (spits.length === 1 && t < 20) { updateZombies(s, dt); t += dt; }
+  assert.ok(b.x > x0, 'boss hunts between spits');
+  assert.ok(Math.abs(t - BOSS.acid.every) < 3 * dt, `period ${t}`);
+  assert.equal(charges.length, 0);
+  assert.equal(b.charge.phase, 'idle');
+});
+
+test('WO7 lobAcid: glob count, fan spread, flight time and landing points', () => {
+  const s = acidState(22);
+  const b = spawnZombie(s, { x: 5 * TILE, y: 8 * TILE }, { kind: 'boss' });
+  const px = b.x + 300, py = b.y;
+  const globs = zombie.lobAcid(s, b, px, py);
+  assert.equal(globs.length, BOSS.acid.globs);
+  const angles = globs.map((g) => Math.atan2(g.ty - b.y, g.tx - b.x)).sort((x, y) => x - y);
+  assert.ok(Math.abs(angles[0] + BOSS.acid.spread) < 1e-9);
+  assert.ok(Math.abs(angles[angles.length - 1] - BOSS.acid.spread) < 1e-9);
+  assert.ok(globs.some((g) => Math.abs(g.tx - px) < 1e-6 && Math.abs(g.ty - py) < 1e-6), 'centre glob on the player');
+  for (const g of globs) {
+    assert.equal(g.kind, 'acid');
+    assert.equal(g.ttl, BOSS.acid.flight); assert.equal(g.maxTtl, BOSS.acid.flight);
+    assert.ok(Math.abs(g.x + g.vx * g.ttl - g.tx) < 1e-6 && Math.abs(g.y + g.vy * g.ttl - g.ty) < 1e-6);
+    assert.ok(Math.abs(Math.hypot(g.tx - b.x, g.ty - b.y) - 300) < 1e-6);
+  }
+});
+
+// WO7 FIX-5 (playtest #4): arena = x 1..11 (x 12 is the arena wall), pillar block at (8..9, 7..8).
+function acidArenaState(seed) {
+  const s = acidState(seed);
+  const m = s.map;
+  for (let y = 1; y < m.rows - 1; y++) m.tiles[y * m.cols + 12] = 1;
+  for (const [x, y] of [[8, 7], [9, 7], [8, 8], [9, 8]]) m.tiles[y * m.cols + x] = 1;
+  m.arenaTiles = new Set();
+  for (let y = 1; y < m.rows - 1; y++) for (let x = 1; x < 12; x++) if (m.tiles[y * m.cols + x] === 0) m.arenaTiles.add(y * m.cols + x);
+  return s;
+}
+const tileKey = (m, x, y) => Math.floor(y / TILE) * m.cols + Math.floor(x / TILE);
+
+test('WO7 FIX-5 lobAcid: globs never land on a pillar or past the arena wall', () => {
+  const s = acidArenaState(40);
+  const m = s.map;
+  const b = spawnZombie(s, { x: 4.5 * TILE, y: 7.5 * TILE }, { kind: 'boss' });
+  // Aim straight through the pillar, then past the east arena wall, then far outside the map.
+  for (const [px, py] of [[8.5 * TILE, 7.9 * TILE], [14 * TILE, 7.5 * TILE], [11.5 * TILE, 2.5 * TILE], [40 * TILE, 30 * TILE]]) {
+    s.acidGlobs = [];
+    const globs = zombie.lobAcid(s, b, px, py);
+    assert.equal(globs.length, BOSS.acid.globs);
+    for (const g of globs) {
+      assert.ok(m.arenaTiles.has(tileKey(m, g.tx, g.ty)), `(${g.tx.toFixed(1)}, ${g.ty.toFixed(1)}) in arena floor`);
+      assert.ok(map.isWalkable(m, Math.floor(g.tx / TILE), Math.floor(g.ty / TILE)));
+      assert.ok(Math.abs(g.x + g.vx * g.ttl - g.tx) < 1e-6 && Math.abs(g.y + g.vy * g.ttl - g.ty) < 1e-6, 'velocity re-aimed');
+    }
+  }
+  // Snapped globs go to the nearest arena tile: aimed at pillar tile (8, 7) -> an adjacent tile.
+  const p = zombie.acidLandingPoint(m, m.arenaTiles, 8.2 * TILE, 7.5 * TILE, 0, 0);
+  assert.deepEqual(p, { x: 7.5 * TILE, y: 7.5 * TILE });
+  const e = zombie.acidLandingPoint(m, m.arenaTiles, 13.5 * TILE, 5.5 * TILE, 0, 0);
+  assert.deepEqual(e, { x: 11.5 * TILE, y: 5.5 * TILE });
+  // Valid targets are untouched; an empty landing set falls back to the player's position.
+  assert.deepEqual(zombie.acidLandingPoint(m, m.arenaTiles, 3.3 * TILE, 4.1 * TILE, 0, 0), { x: 3.3 * TILE, y: 4.1 * TILE });
+  assert.deepEqual(zombie.acidLandingPoint(m, new Set([5]), 8.5 * TILE, 7.5 * TILE, 99, 77), { x: 99, y: 77 });
+});
+
+test('WO7 FIX-5 lobAcid outside the arena: snaps to the nearest walkable tile', () => {
+  const s = acidArenaState(41);
+  const m = s.map;
+  const b = spawnZombie(s, { x: 18.5 * TILE, y: 7.5 * TILE }, { kind: 'boss' }); // east of the arena wall
+  const globs = zombie.lobAcid(s, b, 12.5 * TILE, 7.5 * TILE); // centre glob on the wall column
+  for (const g of globs) assert.ok(map.isWalkable(m, Math.floor(g.tx / TILE), Math.floor(g.ty / TILE)));
+  const c = globs.find((g) => Math.abs(g.ty - 7.5 * TILE) < 1e-6);
+  assert.ok(c && (c.tx === 11.5 * TILE || c.tx === 13.5 * TILE), `centre glob beside the wall, got ${c && c.tx}`);
+});
+
+test('WO7 downed-player rule: no attack start while downT > 0 or invulnT > 0; they still chase', () => {
+  for (const field of ['downT', 'invulnT']) {
+    const s = fakeState(23);
+    s.player = fakePlayer(400, 100);
+    s.player[field] = 1;
+    const z = spawnZombie(s, openSpawn);
+    const x0 = z.x;
+    updateZombies(s, 0.1);
+    assert.ok(z.x > x0, `${field}: still chases`);
+    z.x = s.player.x - 30;
+    updateZombies(s, 0.016);
+    assert.equal(z.mode, 'chasing', `${field}: no attack started`);
+    // A swing already winding up is cancelled without damage.
+    z.mode = 'attacking'; z.attackTimer = 0.01;
+    updateZombies(s, 0.05);
+    assert.equal(z.mode, 'chasing');
+    assert.equal(s.player.health, 150);
+    // Rule lifts: attacks resume.
+    s.player[field] = 0;
+    updateZombies(s, 0.016);
+    assert.equal(z.mode, 'attacking', `${field}: attacks once cleared`);
+  }
+});
+
+test('WO7 downed-player rule applies to minions and the boss (melee, charge and spit)', { skip: mapStub }, () => {
+  const s = fakeState(24);
+  s.map = roomMap(16, 12);
+  s.player = fakePlayer(8 * TILE, 6 * TILE);
+  s.player.invulnT = 5;
+  const dmg = record('player:damaged');
+  const spits = record('boss:spit');
+  const charges = record('boss:charge');
+  const m = spawnZombie(s, { x: 8 * TILE - 30, y: 6 * TILE }, { kind: 'minion' });
+  const b = spawnZombie(s, { x: 8 * TILE + BOSS.radius + 20, y: 6 * TILE }, { kind: 'boss' });
+  b.charge.timer = 0.001;
+  s.level = { index: 2, def: { boss: { ability: 'acid' } } };
+  const a = spawnZombie(s, { x: 3 * TILE, y: 3 * TILE }, { kind: 'boss' });
+  a.acid.timer = 0.001;
+  const dt = 1 / 60;
+  for (let t = 0; t < 1; t += dt) updateZombies(s, dt);
+  assert.notEqual(m.mode, 'attacking');
+  assert.notEqual(b.mode, 'attacking');
+  assert.equal(b.charge.phase, 'idle');
+  assert.equal(a.acid.phase, 'idle');
+  assert.equal(charges.length, 0); assert.equal(spits.length, 0);
+  assert.equal(dmg.length, 0);
+  assert.equal(s.player.health, 150);
+});

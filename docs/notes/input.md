@@ -54,3 +54,14 @@ None.
 - player.js: after firing, `if (input.autoFire && w.mag > 0) w.triggerHeld = false` so semi-autos
   cycle at their rpm (kept held on an empty mag so `weapon:empty` isn't emitted every frame).
   Covered by `tests/autofire.test.js`.
+
+## WO7 (Agent K) — knife + Mule Kick slot
+- `getInput().melee`: edge, true for the frame `V` (`KeyV`) is first pressed (auto-repeat ignored),
+  cleared by `endFrame()`. With touch active it is OR-ed with `getTouchState().melee` (KNIFE button).
+- `Digit3` / `Numpad3` sets `slot = 3` (third weapon slot from Mule Kick). player.js decides whether
+  slot 3 exists (ignore it when `weaponSlots < 3`).
+- Tests: `tests/input.test.js` (new, node): `getInput().melee` false by default and after
+  `endFrame()`, `getTouchState().melee` false while touch is inactive. `tests/autofire.test.js`
+  untouched and green.
+- Verified in Chrome (`?debug=1&touch=1`): KeyV keydown -> `melee` true, false after `endFrame()`;
+  Digit3 -> `slot === 3`.

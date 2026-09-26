@@ -223,3 +223,79 @@ Haymaker 12 75, 48 Dredge 83, Gorgon 90, Drakon 90. Level-1 prices unchanged.
 
 Also updated the thundergun "lethal chip" test to derive the boss HP from `BOSS.thunderNearFrac`
 (FIX-2 lowered it 0.15 -> 0.08, so the old 500 HP boss survived the 320 chip).
+
+## WO7 (Agent F): perks, knife, tier-3 guns
+
+**Perk multipliers (T2).** New extra export `weaponPerkMods(state, w) -> { reloadMult, rpmMult,
+bulletDamageMult }` reads `player.perkMods(state.player)` through `import * as playerMod` (guarded:
+missing export, no player, a throw or a non-positive value -> 1).
+- Speed Cola: `startReload(w, state)` sets `reloadT = reloadTime x reloadMult`. `state` is a new
+  **optional** second parameter; when omitted (player.js calls `startReload(w)`) the module uses the
+  last state it saw (`tryFire`, `meleeAttack`, `updateBullets` — main.js calls the latter every
+  frame, so the fallback is always current in-game). `resetWeaponDeps()` also clears that fallback.
+  **For player.js (E):** passing `state` explicitly is preferred: `weapons.startReload(w, state)`.
+- Double Tap II: fire interval = `60 / (rpm x rpmMult)` for every gun (Ray Gun and Thundergun
+  included: BO3 Double Tap speeds every weapon), damage x `bulletDamageMult` for hitscan bullets only,
+  shotgun pellets included. Ray Gun projectile / splash and the Thundergun cone are unchanged.
+- **Death Machine decision:** exempt from all perk multipliers (rpm and damage). It is a timed
+  power-up with fixed stats; 1200 rpm x 1.33 x 2 damage would be 3.2x its tuned DPS.
+
+**Knife (T3).** `meleeAttack(state, player) -> hits`. Refused (returns 0, no event) while
+`player.meleeCd > 0` or the player is down (`downT > 0` / `down`). Otherwise: `meleeCd =
+MELEE.cooldown`, `meleeT = MELEE.swingTime`, cancels an active reload of the active weapon
+(`player.getActiveWeapon`, guarded), pushes `{type:'slash', x, y, angle, ttl:0.18, maxTtl:0.18}`,
+emits `melee:swing {x, y, angle}` (also on a whiff). Targets: live zombies with
+`dist - z.radius - player.radius <= reach`, within `halfAngle` of `player.angle`, with wall LOS
+(same `splashVisible` test as the ray gun splash / Thundergun: walls, windows, doors, perk machines
+block); nearest first, max `maxTargets`. Damage `MELEE.damage` via `damageZombie(..., 'weapon', ...)`
+(cause 'weapon' so knife kills pay `POINTS.perKill` and can drop power-ups; Insta-Kill lethality
+and the boss 3 % cap live in damageZombie; Double Tap never applies). Survivors: knockback velocity
+`MELEE.knockback` (90 px/s) away from the player with stun `ln(90/stunMinSpeed)/knockFriction`
+(~0.25 s, the slide time, ~12 px); the boss is `pushZombie`d the same slide distance (no stun),
+falling back to applyKnockback. Emits `melee:hit {zombieId, killed}` per target after the damage
+(player.js pays `MELEE.bonusPoints` on `killed`). Accuracy stats are not touched by the knife.
+
+**updateBullets** now leaves entries without a weapon projectile def (e.g. `kind: 'acid'`) untouched
+instead of crashing on them (H keeps globs in `state.acidGlobs`, so this is only defensive).
+
+**Tier-3 guns (T5).** `tier: 3`, `sprite: <id>`, box weight `boxOnly` (2) — `BOX_WALL_WEIGHT_IDS`
+now keeps only tier-1 wall guns. `ammoCost` for tier 3 = `PERKS.ammoMultTier3` (0.3) x price:
+HG 40 105, M8A7 113, Peacekeeper 120. **Deviation from the 1.5 table:** at the listed damage/rpm the
+HG 40 (mean L3 R6-12 TTK 1.607 s) and M8A7 (1.231) / Peacekeeper (1.266) did not beat the Gorgon
+(1.286) / Drakon (1.329), so damage (and HG 40 rpm) were raised; cost, class, mag, reserve,
+reload, penetration and the M8A7 spread are as specified.
+
+| id | cost | dmg (1.5 -> now) | rpm | mag | reload | pen | spread | R8 L3 TTK | mean L3 R6-12 |
+|----|------|------|-----|-----|--------|-----|--------|------|------|
+| hg40 | 350 | 95 -> 120 | 720 -> 800 | 40 | 1.9 | 1 | 0.05 | 1.050 | 1.157 |
+| m8a7 | 375 | 115 -> 140 | 780 | 32 | 2.2 | 2 | 0.02 | 0.923 | 1.011 |
+| peacekeeper | 400 | 135 -> 185 | 650 | 30 | 2.3 | 3 | 0.035 | 0.831 | 0.923 |
+| (gorgon, best t2) | 300 | 175 | 480 | 48 | 4.0 | 3 | | 1.125 | 1.286 |
+
+Tests (`tests/weapons.test.js` WO7 block): tier-3 defs/ammo/box weight, TTK (every tier-3 gun beats
+every tier-2 gun on L3 mean and R8, price order, identities), penetration, perk mods (Speed Cola
+explicit + fallback + auto-reload, Double Tap rpm/damage/pellets, Death Machine and Ray Gun
+unchanged), acid passthrough, knife reach/arc/cap/order/events/slash/knockback, cooldown/down,
+kill + reload cancel, wall LOS, boss push, real damageZombie (Insta-Kill, boss cap). Existing tests
+updated: 24 wall ids, wall-id list + tier 3, "tier-1 keeps 0.5x" ammo loop.
+
+Constants that could move to config: `SLASH_TTL` 0.18, `TIER3_AMMO_MULT` fallback.
+
+## WO7 FIX-5 (docs/qa/wo7-balance.md #1, #2, #3)
+
+- **Double Tap vs the boss (#1):** `hitscan(..., damage, bossDamage = damage)` takes a 9th
+  parameter dealt instead to zombies of `kind === 'boss'`. `tryFire` passes
+  `d.damage * min(mods.bulletDamageMult, BOSS.dtapDamageMult)` (config `BOSS.dtapDamageMult: 1`;
+  a missing/non-finite value means no cap). The x1.33 rpm still applies to the boss; minions and
+  normal zombies still take x2 (per target, so one penetrating ray can hit a zombie for x2 and the
+  boss for x1). Ray Gun / Thundergun / Death Machine unchanged (they never had the x2).
+- **Measured boss TTK with Double Tap** (balance harness `qa3/wo7/f1.mjs`, god mode, median, 12
+  seeds unless noted): L1 R10 KN-44+Argus 33 s (none 46 s; +Speed Cola 26 s); L2 R14
+  Man-O-War+KN-44 33 s; L3 R18 Peacekeeper+Gorgon 27 s over 24 seeds (none 36 s; +Speed Cola 20 s;
+  mortal with Juggernog 27 s, 16/16 survived). L3 sits slightly under 30 s because its no-perk
+  baseline is only 36 s and the kept x1.33 rpm alone takes ~25 % off.
+- **HG 40 (#2):** damage 120 -> 130, penetration 1 -> 2. **M8A7 (#3):** penetration 2 -> 3.
+  Tier-3 ordering unchanged (mean L3 TTK Peacekeeper < M8A7 < HG 40).
+- Tests: tier-3 defs pin hg40 `damage: 130, penetration: 2`, m8a7 `penetration: 3`; the fire test
+  expects pen 2/3/3; new "FIX-5 Double Tap vs boss" test (boss x1 between x2 zombies on one ray,
+  rpm bonus kept, shotgun pellets, no-perk unchanged, hitscan default).

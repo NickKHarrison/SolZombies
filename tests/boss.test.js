@@ -11,6 +11,7 @@ import * as zombie from '../src/zombie.js';
 import {
   createBossState, initBoss, updateBoss, startFight, spawnMinions, finishFight, bossZombie, bossHpFrac,
 } from '../src/boss.js';
+import * as bossMod from '../src/boss.js';
 
 const COLS = 16, ROWS = 12;
 
@@ -248,4 +249,110 @@ test('FIX-2: extra minions per wave above base capped at minionsLevelCap (+2)', 
     assert.equal(s.zombies.filter((z) => z.kind === 'minion').length, BOSS.minionsPerWave + Math.min(index, 2), `level ${index}`);
     assert.equal(s.zombies.filter((z) => z.kind === 'minion').length, want);
   }
+});
+
+// ---------------------------------------------------------------------------
+// WO7 (Agent H): acid hazards
+// ---------------------------------------------------------------------------
+
+const pool = (s, x, y, extra = {}) => {
+  const h = { id: 900 + s.hazards.length, kind: 'acid', x, y, r: BOSS.acid.poolRadius, ttl: BOSS.acid.poolSeconds,
+    maxTtl: BOSS.acid.poolSeconds, dps: BOSS.acid.dps, ...extra };
+  s.hazards.push(h);
+  return h;
+};
+
+test('WO7 startFight on an acid level spawns an acid boss', () => {
+  const s = fresh(31);
+  s.level.def.boss = { name: 'THE SUBJECT', tint: '#7fe040', ability: 'acid' };
+  startFight(s);
+  const z = bossZombie(s);
+  assert.equal(z.ability, 'acid');
+  assert.equal(z.name, 'THE SUBJECT');
+});
+
+test('WO7 updateHazards: glob flies, lands at its target and becomes a pool', () => {
+  const s = fresh(32);
+  const z = zombie.spawnZombie(s, { x: 4 * TILE, y: 6 * TILE }, { kind: 'boss' });
+  zombie.lobAcid(s, z, 10 * TILE, 6 * TILE);
+  assert.equal(s.acidGlobs.length, BOSS.acid.globs);
+  const dt = 1 / 60;
+  let t = 0;
+  bossMod.updateHazards(s, dt); t += dt;
+  const g = s.acidGlobs[0];
+  assert.ok(g.x !== 4 * TILE || g.y !== 6 * TILE, 'globs move');
+  while (s.acidGlobs.length && t < 3) { bossMod.updateHazards(s, dt); t += dt; }
+  assert.ok(Math.abs(t - BOSS.acid.flight) < 2 * dt, `flight ${t}`);
+  assert.equal(s.hazards.length, BOSS.acid.globs);
+  const centre = s.hazards.find((h) => Math.abs(h.x - 10 * TILE) < 1e-6 && Math.abs(h.y - 6 * TILE) < 1e-6);
+  assert.ok(centre, 'centre pool at the aimed point');
+  for (const h of s.hazards) {
+    assert.equal(h.kind, 'acid');
+    assert.equal(h.r, BOSS.acid.poolRadius);
+    assert.equal(h.maxTtl, BOSS.acid.poolSeconds);
+    assert.equal(h.dps, BOSS.acid.dps);
+  }
+});
+
+test('WO7 pool deals dps per second to a player inside, nothing outside; expires after poolSeconds', () => {
+  const s = fresh(33);
+  s.player.x = 5 * TILE; s.player.y = 5 * TILE;
+  s.player.health = 150;
+  pool(s, 5 * TILE + 20, 5 * TILE);
+  const dt = 1 / 60;
+  for (let i = 0; i < 60; i++) bossMod.updateHazards(s, dt);
+  assert.ok(Math.abs(150 - s.player.health - BOSS.acid.dps) < 1e-6, `lost ${150 - s.player.health}`);
+  s.player.x = 12 * TILE;
+  const h0 = s.player.health;
+  for (let i = 0; i < 60; i++) bossMod.updateHazards(s, dt);
+  assert.equal(s.player.health, h0, 'outside the pool: no damage');
+  for (let t = 2; t < BOSS.acid.poolSeconds + 0.1; t += dt) bossMod.updateHazards(s, dt);
+  assert.equal(s.hazards.length, 0, 'pool pruned');
+});
+
+test('WO7 overlapping pools do not stack; pools never hurt zombies', () => {
+  const s = fresh(34);
+  s.player.x = 5 * TILE; s.player.y = 5 * TILE;
+  pool(s, 5 * TILE, 5 * TILE); pool(s, 5 * TILE + 10, 5 * TILE);
+  const z = zombie.spawnZombie(s, { x: 5 * TILE, y: 5 * TILE + 5 }, { kind: 'minion' });
+  const hp = z.hp;
+  for (let i = 0; i < 60; i++) bossMod.updateHazards(s, 1 / 60);
+  assert.ok(Math.abs(150 - s.player.health - BOSS.acid.dps) < 1e-6);
+  assert.equal(z.hp, hp);
+});
+
+test('WO7 pools respect invulnT, downT and a downed player', () => {
+  for (const setup of [(p) => { p.invulnT = 1; }, (p) => { p.downT = 1; }, (p) => { p.down = true; }]) {
+    const s = fresh(35);
+    s.player.x = 5 * TILE; s.player.y = 5 * TILE;
+    setup(s.player);
+    const dmg = record('player:damaged');
+    pool(s, 5 * TILE, 5 * TILE);
+    for (let i = 0; i < 30; i++) bossMod.updateHazards(s, 1 / 60);
+    assert.equal(s.player.health, 150);
+    assert.equal(dmg.length, 0);
+    assert.equal(s.hazards.length, 1, 'pool still ticks down');
+  }
+});
+
+test('WO7 hazards and globs clear on level change (state.map swap) and on game:restart', () => {
+  const s = fresh(36);
+  s.player.x = 12 * TILE;
+  pool(s, 5 * TILE, 5 * TILE);
+  s.acidGlobs = [{ id: 1, kind: 'acid', x: 0, y: 0, tx: 10, ty: 10, vx: 1, vy: 1, ttl: 0.8, maxTtl: 0.8 }];
+  bossMod.updateHazards(s, 1 / 60);
+  assert.equal(s.hazards.length, 1);
+  s.map = arenaMap();
+  bossMod.updateHazards(s, 1 / 60);
+  assert.equal(s.hazards.length, 0);
+  assert.equal(s.acidGlobs.length, 0);
+  pool(s, 5 * TILE, 5 * TILE);
+  s.acidGlobs.push({ id: 2, kind: 'acid', x: 0, y: 0, tx: 10, ty: 10, vx: 1, vy: 1, ttl: 0.8, maxTtl: 0.8 });
+  events.emit('game:restart', {});
+  assert.equal(s.hazards.length, 0);
+  assert.equal(s.acidGlobs.length, 0);
+  bossMod.updateHazards(s, 0); // tolerates dt 0 and missing arrays
+  delete s.hazards; delete s.acidGlobs;
+  bossMod.updateHazards(s, 1 / 60);
+  assert.deepEqual(s.hazards, []);
 });

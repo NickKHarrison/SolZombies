@@ -1,6 +1,8 @@
 // tests/levels.test.js — WO5 3.5 level data (Agent A).
 // Parses each level's ASCII independently (no map.js) and runs the WO4 layout validity suite
 // (as in tests/map.test.js) plus the WO5 arena rules on every level in the registry.
+// WO7 3.4 (Agent I): perk machines (J Q C N U K, wall tiles) parsed here independently of map.js;
+// perk placement rules checked on every level; level 3 LABORATORY layout checks.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -9,15 +11,19 @@ import { dirname, join } from 'node:path';
 import { LEVELS, levelByIndex } from '../src/levels/levels.js';
 import { LEVEL1 } from '../src/levels/level1.js';
 import { LEVEL2 } from '../src/levels/level2.js';
+import { LEVEL3 } from '../src/levels/level3.js'; // WO7 Phase 0
 
 const COLS = 60, ROWS = 40;
 const DOOR_LETTERS = ['D', 'E', 'F', 'G', 'H'];
-const LEGEND = new Set(['#', '.', 'P', 'W', 'S', 'O', 'B', 'M', 'Z', 'X', 'T', ...DOOR_LETTERS]);
+// WO7 1.2: perk machine letters -> perk ids (config PERKS.list letters).
+const PERK_LETTERS = { J: 'jugg', Q: 'revive', C: 'speed', N: 'dtap', U: 'stamin', K: 'mule' };
+const LEGEND = new Set(['#', '.', 'P', 'W', 'S', 'O', 'B', 'M', 'Z', 'X', 'T', ...DOOR_LETTERS, ...Object.keys(PERK_LETTERS)]);
 const N4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 // Every weapon id a level may put on a wall (WO4 guns + WO5 3.4 new guns).
 const KNOWN_WEAPONS = new Set(['sheiva', 'rk5', 'krm262', 'kuda', 'vmp', 'vesper', 'kn44', 'hvk30',
   'argus', 'lcar9', 'pharo', 'icr1', 'bootlegger', 'manowar', 'xr2', 'weevil', 'marshal16', 'gorgon',
-  'dredge48', 'haymaker12', 'drakon']);
+  'dredge48', 'haymaker12', 'drakon', 'hg40', 'm8a7', 'peacekeeper']);
+const TIER3_GUNS = ['hg40', 'm8a7', 'peacekeeper']; // WO7 1.5
 const NEW_GUNS = ['manowar', 'xr2', 'weevil', 'marshal16', 'gorgon', 'dredge48', 'haymaker12', 'drakon'];
 
 // WO4 level-1 layout (map.js MAP_ASCII before WO5), to prove the edit stays local.
@@ -90,6 +96,7 @@ function parseLevel(def) {
     stairs: find((c) => c === 'T'),
     boss: find((c) => c === 'Z'),
     minions: find((c) => c === 'X'),
+    perks: find((c) => c in PERK_LETTERS).map((t) => ({ ...t, perkId: PERK_LETTERS[t.ch] })),
   };
 }
 
@@ -373,7 +380,8 @@ function validateArena(def) {
   // FIX-1 (QA review L1): no interactable (wall buy, box, window/barricade, door D..H) within
   // 2 tiles (Chebyshev) of any arena tile, so none can be used through the arena wall
   // (PLAYER.interactRange 64 < 2 tiles of wall at TILE 40).
-  const inter = [...L.buys, ...L.boxes, ...L.windows, ...L.doors.flatMap((dr) => dr.tiles)];
+  // WO7 3.4: perk machines are interactables too.
+  const inter = [...L.buys, ...L.boxes, ...L.windows, ...L.perks, ...L.doors.flatMap((dr) => dr.tiles)];
   for (const it of inter) {
     let dmin = Infinity;
     for (const t of tiles) dmin = Math.min(dmin, Math.max(Math.abs(t.x - it.x), Math.abs(t.y - it.y)));
@@ -381,14 +389,66 @@ function validateArena(def) {
   }
 }
 
+// ---- WO7 3.4 perk machines -------------------------------------------------------------------
+
+// Index of the door (in D..H order) whose opening first exposes a tile: 0 = start zone,
+// 1 = behind D, ... 5 = behind H.
+function openingStep(L, t) {
+  for (let k = 0; k <= DOOR_LETTERS.length; k++) if (touches(playerBfs(L, DOOR_LETTERS.slice(0, k)), t)) return k;
+  return -1;
+}
+
+// expected (optional): { perkId: step } per the level's 3.4 placement list.
+function validatePerks(def, expected) {
+  const L = parseLevel(def);
+  const id = def.id;
+  assert.equal(L.perks.length, 6, `${id}: 6 perk machines`);
+  assert.deepEqual(L.perks.map((p) => p.perkId).sort(), Object.values(PERK_LETTERS).sort(), `${id}: one machine per perk`);
+  const Z = zones(L);
+  const dAll = playerBfs(L, DOOR_LETTERS);
+  const dA = bfs([L.boss[0]], walkFn(L, new Set()));
+  const arena = [];
+  for (let k = 0; k < dA.length; k++) if (dA[k] >= 0) arena.push({ x: k % COLS, y: Math.floor(k / COLS) });
+  for (const p of L.perks) {
+    const tag = `${id}: ${p.perkId} (${p.ch}) at ${p.x},${p.y}`;
+    // a wall tile: 4-neighbours are floor of exactly one zone plus walls; never a pocket/window/door
+    const nb = N4.map(([dx, dy]) => ({ x: p.x + dx, y: p.y + dy, c: L.at(p.x + dx, p.y + dy) }));
+    const floor = nb.filter((n) => FLOORISH.has(n.c));
+    assert.ok(floor.length >= 1, `${tag}: faces floor`);
+    assert.equal(new Set(floor.map((n) => Z.comp[key(n.x, n.y)])).size, 1, `${tag}: faces one zone only`);
+    for (const n of nb) assert.ok(FLOORISH.has(n.c) || n.c === '#' || n.c in PERK_LETTERS || L.buyKeys.has(n.c), `${tag}: next to '${n.c}'`);
+    assert.ok(touches(dAll, p), `${tag}: reachable with all doors open`);
+    for (const b of L.buys) {
+      const md = Math.abs(b.x - p.x) + Math.abs(b.y - p.y);
+      assert.ok(md >= 6, `${tag}: only ${md} tiles from wall buy ${b.weaponId}`);
+    }
+    for (const t of arena) {
+      assert.ok(Math.max(Math.abs(t.x - p.x), Math.abs(t.y - p.y)) > 2, `${tag}: within 2 tiles of the arena`);
+    }
+  }
+  const step = Object.fromEntries(L.perks.map((p) => [p.perkId, openingStep(L, p)]));
+  assert.equal(step.revive, 0, `${id}: Quick Revive in the start zone`);
+  assert.equal(step.mule, DOOR_LETTERS.length, `${id}: Mule Kick in the deepest zone (behind H)`);
+  assert.ok(step.jugg >= 1, `${id}: Juggernog behind >= 1 door`);
+  // Mule Kick's zone is the one the mega door leads out of
+  const mule = L.perks.find((p) => p.perkId === 'mule');
+  const [mx, my] = N4.map(([dx, dy]) => [mule.x + dx, mule.y + dy]).find(([x, y]) => FLOORISH.has(L.at(x, y)));
+  const muleZone = Z.comp[key(mx, my)];
+  assert.ok(neighbourZones(Z, L.mega).has(muleZone), `${id}: Mule Kick shares the zone with the mega door`);
+  if (expected) assert.deepEqual(step, expected, `${id}: perk zones per 3.4`);
+  return L;
+}
+
 // ---- tests ----------------------------------------------------------------------------------
 
-test('levels registry: LEVELS = [LEVEL1, LEVEL2], levelByIndex wraps', () => {
-  assert.equal(LEVELS.length, 2);
-  assert.equal(LEVELS[0], LEVEL1); assert.equal(LEVELS[1], LEVEL2);
-  assert.equal(levelByIndex(0), LEVEL1); assert.equal(levelByIndex(1), LEVEL2);
-  assert.equal(levelByIndex(2), LEVEL1); assert.equal(levelByIndex(5), LEVEL2);
-  assert.equal(levelByIndex(-1), LEVEL2);
+test('levels registry: LEVELS = [LEVEL1, LEVEL2, LEVEL3], levelByIndex wraps', () => {
+  // WO7 Phase 0: third level registered (was length 2).
+  assert.equal(LEVELS.length, 3);
+  assert.equal(LEVELS[0], LEVEL1); assert.equal(LEVELS[1], LEVEL2); assert.equal(LEVELS[2], LEVEL3);
+  assert.equal(levelByIndex(0), LEVEL1); assert.equal(levelByIndex(1), LEVEL2); assert.equal(levelByIndex(2), LEVEL3);
+  assert.equal(levelByIndex(3), LEVEL1); assert.equal(levelByIndex(7), LEVEL2);
+  assert.equal(levelByIndex(-1), LEVEL3);
+  assert.equal(LEVEL3.id, 'lab'); assert.equal(LEVEL3.name, 'LABORATORY');
   assert.equal(LEVEL1.id, 'bunker'); assert.equal(LEVEL1.name, 'BUNKER');
   assert.equal(LEVEL2.id, 'catacombs'); assert.equal(LEVEL2.name, 'CATACOMBS');
   assert.equal(LEVEL1.boss.name, 'THE WARDEN'); assert.equal(LEVEL2.boss.name, 'THE BONE PRIEST');
@@ -397,12 +457,18 @@ test('levels registry: LEVELS = [LEVEL1, LEVEL2], levelByIndex wraps', () => {
 test('difficulty objects per WO5 1.3', () => {
   assert.deepEqual(LEVEL1.difficulty, { healthMult: 1, speedMult: 1, countMult: 1, sprintShift: 0 });
   assert.deepEqual(LEVEL2.difficulty, { healthMult: 1.5, speedMult: 1.1, countMult: 1.25, sprintShift: 3 });
+  assert.deepEqual(LEVEL3.difficulty, { healthMult: 2.0, speedMult: 1.2, countMult: 1.5, sprintShift: 5 }); // WO7 1.5
 });
 
 test('themes: level 1 = WO4 greys, no tint/torches; level 2 = catacombs with tint + torches', () => {
   assert.equal(LEVEL1.theme.ambient, null); assert.equal(LEVEL1.theme.torch, false);
   assert.equal(LEVEL2.theme.torch, true);
   assert.match(LEVEL2.theme.ambient, /^rgba\(/);
+  // WO7 1.5 / scaffold note 4: lab keeps torch false, flicker true, a checker floor
+  assert.equal(LEVEL3.theme.torch, false); assert.equal(LEVEL3.theme.flicker, true);
+  assert.notEqual(LEVEL3.theme.floor, LEVEL3.theme.floorAlt);
+  assert.match(LEVEL3.theme.ambient, /^rgba\(/);
+  assert.deepEqual(LEVEL3.boss, { name: 'THE SUBJECT', tint: '#7fe040', ability: 'acid' });
   for (const def of LEVELS) for (const k of ['floor', 'floorAlt', 'wall', 'wallEdge', 'accent', 'doorWood', 'doorIron']) {
     assert.match(def.theme[k], /^#[0-9a-f]{6}$/i, `${def.id}.theme.${k}`);
   }
@@ -426,24 +492,96 @@ for (const def of LEVELS) {
   test(`${def.id}: WO5 arena rules`, () => { validateArena(def); });
 }
 
-test('bunker: WO4 wall buys unchanged; edit confined to the arena/vault block', () => {
+test('bunker: WO4 wall buys unchanged; edit confined to the arena/vault block (+ WO7 perk tiles)', () => {
   assert.deepEqual(LEVEL1.wallbuys, WO4_WALLBUYS);
+  // WO7: perk machines replace WO4 wall tiles; compare with them turned back into wall
+  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+    if (LEVEL1.ascii[y][x] in PERK_LETTERS) assert.equal(WO4_ASCII[y][x], '#', `perk at ${x},${y} replaced a wall`);
+  }
+  const plain = LEVEL1.ascii.map((r) => r.replace(/[JQCNUK]/g, '#'));
   const changed = [];
   for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
-    if (LEVEL1.ascii[y][x] !== WO4_ASCII[y][x]) changed.push([x, y]);
+    if (plain[y][x] !== WO4_ASCII[y][x]) changed.push([x, y]);
   }
   assert.ok(changed.length > 0);
   for (const [x, y] of changed) assert.ok(x >= 38 && x <= 58 && y >= 16 && y <= 37, `unexpected edit at ${x},${y}`);
   // same number of every door / spawn / buy letter (ICR-1 'c' and open spawn 9 moved)
   const count = (rows, ch) => rows.join('').split(ch).length - 1;
   for (const ch of ['D', 'E', 'F', 'G', 'H', 'W', 'S', 'O', 'B', 'P', ...Object.keys(WO4_WALLBUYS)]) {
-    assert.equal(count(LEVEL1.ascii, ch), count(WO4_ASCII, ch), `count of '${ch}'`);
+    assert.equal(count(plain, ch), count(WO4_ASCII, ch), `count of '${ch}'`);
   }
-  const now = parseLevel(LEVEL1), old = parseLevel({ ascii: WO4_ASCII, wallbuys: WO4_WALLBUYS });
+  const now = parseLevel({ ...LEVEL1, ascii: plain }), old = parseLevel({ ascii: WO4_ASCII, wallbuys: WO4_WALLBUYS });
   for (const dr of now.doors) assert.deepEqual(dr.tiles, old.doors.find((o) => o.letter === dr.letter).tiles, `door ${dr.letter} unchanged`);
   assert.deepEqual(now.windows, old.windows, 'windows unchanged');
   assert.deepEqual(now.start, old.start, 'start unchanged');
   assert.deepEqual(now.boxes, old.boxes, 'box unchanged');
+});
+
+// WO7 3.4: perk steps (0 = start zone, 1..5 = behind D..H) per the named zones.
+const PERK_PLAN = {
+  // L1: Q hub, J corridor (D), C courtyard (E), N bunker (F), U armory (G), K vault (H)
+  bunker: { revive: 0, jugg: 1, speed: 2, dtap: 3, stamin: 4, mule: 5 },
+  // L2: Q chapel, C ossuary (D), J west crypts (E), N bone chamber (F), U charnel pit (G), K sanctum (H)
+  catacombs: { revive: 0, speed: 1, jugg: 2, dtap: 3, stamin: 4, mule: 5 },
+  // L3: Q lobby, C sterile corridor (D), J west labs (E), N containment (F), U cryo (G), K reactor (H)
+  lab: { revive: 0, speed: 1, jugg: 2, dtap: 3, stamin: 4, mule: 5 },
+};
+
+for (const def of LEVELS) {
+  test(`${def.id}: WO7 perk machines (6, one per perk, Q start, K deepest, reachable, clear of arena and wall buys)`, () => {
+    validatePerks(def, PERK_PLAN[def.id]);
+  });
+}
+
+test('the perk checks catch broken placements', () => {
+  const swap = (def, fn) => ({ ...def, ascii: def.ascii.map((r, y) => fn(r, y)) });
+  const put = (r, x, ch) => r.slice(0, x) + ch + r.slice(x + 1);
+  // a missing machine
+  assert.throws(() => validatePerks(swap(LEVEL1, (r) => r.replace('U', '#'))), /6 perk machines/);
+  // a duplicate perk instead of another one
+  assert.throws(() => validatePerks(swap(LEVEL1, (r) => r.replace('U', 'N'))), /one machine per perk/);
+  // Quick Revive and Mule Kick swapped
+  assert.throws(() => validatePerks(swap(LEVEL2, (r) => r.replace(/[QK]/g, (c) => (c === 'Q' ? 'K' : 'Q')))), /Quick Revive|Mule Kick/);
+  // too close to a wall buy: L1 Quick Revive moved along the hub's south wall to (21,27), 5 from KRM-262 (17,26)
+  assert.throws(() => validatePerks(swap(LEVEL1, (r, y) => (y === 27 ? put(put(r, 24, '#'), 21, 'Q') : r))), /wall buy/);
+  // next to the arena: L1 Juggernog moved into the arena's west wall (40,19)
+  assert.throws(() => validatePerks(swap(LEVEL1, (r, y) => (y === 10 ? put(r, 41, '#') : y === 19 ? put(r, 40, 'J') : r))), /reachable|arena/);
+  // a machine in a 1-thick wall between two zones (L1 hub / courtyard wall at (20,18) is 4 thick; use L2 chapel octagon (19,20): crypts one side, chapel the other)
+  assert.throws(() => validatePerks(swap(LEVEL2, (r, y) => (y === 11 ? put(r, 22, '#') : y === 20 ? put(r, 19, 'Q') : r))), /one zone only/);
+  // named zones: L1 Stamin-Up and Double Tap swapped
+  assert.throws(() => validatePerks(swap(LEVEL1, (r) => r.replace(/[NU]/g, (c) => (c === 'N' ? 'U' : 'N'))), PERK_PLAN.bunker), /perk zones/);
+});
+
+test('lab: new layout; tier-3 guns on the walls, Gorgon + Drakon deepest, cheap gun in the lobby', () => {
+  for (const other of [LEVEL1, LEVEL2]) {
+    let diff = 0;
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (LEVEL3.ascii[y][x] !== other.ascii[y][x]) diff++;
+    assert.ok(diff > COLS * ROWS * 0.25, `only ${diff} tiles differ from ${other.id}`);
+  }
+  const L = parseLevel(LEVEL3);
+  const placed = new Set(L.buys.map((b) => b.weaponId));
+  for (const g of [...TIER3_GUNS, 'gorgon', 'drakon']) assert.ok(placed.has(g), `${g} on a lab wall`);
+  const dNoH = playerBfs(L, ['D', 'E', 'F', 'G']);
+  assert.deepEqual(L.buys.filter((b) => !touches(dNoH, b)).map((b) => b.weaponId).sort(), ['drakon', 'gorgon']);
+  const startBuy = L.buys.filter((b) => touches(playerBfs(L, []), b));
+  assert.equal(startBuy.length, 1);
+  assert.ok(!TIER3_GUNS.includes(startBuy[0].weaponId) && !['gorgon', 'drakon'].includes(startBuy[0].weaponId));
+  for (const b of L.buys.filter((x) => TIER3_GUNS.includes(x.weaponId))) assert.ok(openingStep(L, b) >= 1, `${b.weaponId} behind a door`);
+  // glass tanks / pods / benches: free-standing wall blocks inside rooms (not joined to the outer rock)
+  const seen = new Uint8Array(COLS * ROWS);
+  let blocks = 0;
+  for (let y = 1; y < ROWS - 1; y++) for (let x = 1; x < COLS - 1; x++) {
+    if (L.at(x, y) !== '#' || seen[key(x, y)]) continue;
+    const d = bfs([{ x, y }], (nx, ny) => L.at(nx, ny) === '#');
+    let border = false;
+    for (let k = 0; k < d.length; k++) if (d[k] >= 0) {
+      seen[k] = 1;
+      const px = k % COLS, py = Math.floor(k / COLS);
+      if (px === 0 || py === 0 || px === COLS - 1 || py === ROWS - 1) border = true;
+    }
+    if (!border) blocks++;
+  }
+  assert.ok(blocks >= 12, `lab has ${blocks} free-standing decor blocks`);
 });
 
 test('catacombs: new layout; all new guns on the walls, best guns deepest', () => {

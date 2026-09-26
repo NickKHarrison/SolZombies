@@ -479,6 +479,39 @@ const HEAVYR1 = [
   '....kkkkk.......',
 ];
 
+// WO7 (T3) knife pose, 2 frames, drawn for MELEE.swingTime with NO gun. Rows 4-11 cols 4-11 keep the
+// helmet pixels so the helmet overlay still registers. Frame 0 = cocked: right hand pulled back onto
+// the right shoulder (rows 13-14), knife pointing forward ('K' grip, 4-px 'WWWW' blade at row 13 with
+// a 'www' edge highlight above it), left arm raised forward as a guard (the ONEHANDFWD rows).
+// Frame 1 = thrust: right arm driven forward and in toward the aim line, fist at cols 10-11 (row 11)
+// with a 4-px 'WWWW' blade at cols 12-15 and a 'wwww' edge above it (row 10), left arm swung back
+// for balance (the ONEHANDBACK rows). Rows 5-9 are the onehand body. (WO7 FIX-4: blade was 1-2 px.)
+const KNIFE_BODY = ONEHAND.slice(5, 10);
+const KNIFE0 = [
+  ...ONEHANDFWD.slice(0, 5),
+  ...KNIFE_BODY,
+  'kooogkgggokk....',
+  '.kkgggkkkkgk....',
+  '...kGggggGgkwwwk',
+  '...kGGGGsSKWWWWk',
+  '...kgggsSkkkkkk.',
+  '....kkkkk.......',
+];
+const KNIFE1 = [
+  ...ONEHANDBACK.slice(0, 5),
+  'kOtggkLLLGkk....',
+  'kOtOkLLLLGgk....',
+  'kOOOkLLLGGgk....',
+  'kOOOkLGGGggk....',
+  'kOOokGGGggokkkkk',
+  'kooogkgggokkwwww',
+  '.kkgggkkkksSWWWW',
+  '...kGggggGsskkkk',
+  '...kGGGGGgkk....',
+  '...kgggggk......',
+  '....kkkkk.......',
+];
+
 const DOWN = [
   '...............kk...',
   '..............kssk..',
@@ -513,6 +546,9 @@ export const SOLDIER = {
       twohand: [P(TWOHANDR0), P(TWOHANDR1)],
       heavy: [P(HEAVYR0), P(HEAVYR1)],
     },
+    // WO7 (T3): knife swing, [cocked, thrust]; drawn instead of the pose torso (and without the gun)
+    // while animator pose === 'knife', frame = anim.meleeFrame. Same 16x16 grid and anchor.
+    knife: [P(KNIFE0), P(KNIFE1)],
     // Walk frames indexed by legs frame (only poses with a free arm): left arm forward while the
     // left boot is back (frames 1-3), back while it is forward (5-7); 0 and 4 are passing frames.
     walk: {

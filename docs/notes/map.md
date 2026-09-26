@@ -217,3 +217,26 @@ in `WALLBUY_MAP` but not placed (box-only in practice).
   the level has no arena. The older WO4 tests keep a few hard-coded level-1 coordinates (bunker
   corner (3,3), west pocket (1,26), wall (5,1)); they still hold as long as the arena is added
   away from the north-west / west edge.
+
+## WO7 (Agent G): perk machines
+
+- `TILE_PERK = 10`. Letters come from config `PERKS.list[*].letter` (`J` jugg, `Q` revive,
+  `C` speed, `N` dtap, `U` stamin, `K` mule), exported as `PERK_LETTERS` (letter -> perk id,
+  read through a `config` namespace import).
+- Letter check: none of `J Q C N U K` is a fixed legend char (`# . P W S O B M Z X T`) or a door
+  (`D-H`). Wall buys use digits and lowercase (level 1 has lowercase `c` = ICR-1, which is not
+  `C`). `charToCode` checks perk letters after the fixed chars and before wall buys; a level
+  whose `wallbuys` reuses a perk letter throws `map: tile char 'X' is both a perk machine and a
+  wall buy` rather than silently picking one.
+- `map.perkMachines = [{ id (1.., row-major), perkId, tx, ty, x, y, w, h, soldOut: false }]`,
+  always present (empty list when the level has none). Duplicate machines of the same perk are
+  allowed (distinct ids).
+- Blocking: `isWalkable` falls to `default: false` for both movers; `blocksRay` includes
+  `TILE_PERK`; not merged into `map.walls` (same as wall buys). `pathfinding.js` walks only
+  0/2/3/6, so zombies route around machines with no change there. Arena / active-spawn BFS
+  treat it as solid.
+- `nearestInteractable` returns `{ kind: 'perk', ref: machine, dist }` with the usual edge
+  distance and `<= range` rule; sold-out machines are still returned (shop shows the sold-out
+  prompt). Tie order (first considered wins on equal distance): wall buy, box, perk, door, mega
+  door, stairs, barricade.
+- `soldOut` is written by `shop.syncPerkMachines` (which bumps `map.version`), not by map.js.

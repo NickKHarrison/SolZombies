@@ -86,6 +86,23 @@
     <div id="liveErr"></div>
   </section>
   <div id="static"></div>
+<!-- WO7 (Agent A): zombie sheet. Self-contained: own imports, own canvases, own rAF loop. -->
+<section id="zombieSheet">
+  <h2>Zombies (WO7) — sprites/zombie.js</h2>
+  <div class="controls">
+    <label><input type="checkbox" id="zDamaged"> damaged overlay</label>
+    <label><input type="checkbox" id="zTearing"> tearing</label>
+    <label><input type="checkbox" id="zCharge"> boss charge</label>
+    <label>Boss tint <select id="zTint"><option value="#7a1f1f">WARDEN #7a1f1f</option><option value="#c9b98a">BONE PRIEST #c9b98a</option><option value="#7fe040">SUBJECT #7fe040</option><option value="">(marker)</option></select></label>
+    <button id="zPause">Pause</button>
+  </div>
+  <div class="live">
+    <figure><canvas id="zLive1" width="560" height="300" style="background:#34343a"></canvas><figcaption><b>game scale (2x sprites)</b> · legs follow movement, body faces the soldier dot</figcaption></figure>
+    <figure><canvas id="zLive3" width="560" height="300" style="background:#34343a;width:1120px;height:600px"></canvas><figcaption><b>2x zoom of the same scene</b></figcaption></figure>
+  </div>
+  <div id="zStatic"></div>
+  <div id="zErr"></div>
+</section>
 </main>
 
 <script type="module">
@@ -591,6 +608,127 @@ if (!faceM) reportLive('face', 'face.js not loaded');
 if (!animM) reportLive('animator', 'animator.js not loaded (legs stay on frame 0, no recoil/reload)');
 requestAnimationFrame(frame);
 window.__spritePreview = { sim, get face() { return fstate; }, loadErrors };
+</script>
+<script type="module">
+const zerr = document.getElementById('zErr');
+let pixel, Z, config;
+try {
+  pixel = await import('../src/sprites/pixel.js');
+  config = await import('../src/config.js');
+  ({ ZOMBIE_SPRITES: Z } = await import('../src/sprites/zombie.js'));
+} catch (e) { zerr.innerHTML = ''; const d = document.createElement('div'); d.className = 'err'; d.textContent = 'zombie sheet: ' + (e.stack || e); zerr.append(d); }
+const SP = (config && config.SPRITES) || { scale: 2, directions: 32 };
+const zStride = SP.zombieStride || 36, bStride = SP.bossStride || 90;
+const $z = (id) => document.getElementById(id);
+function hexRgb(h) { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+const tintCache = new Map();
+function bossTinted(sprite) {
+  const t = $z('zTint').value;
+  if (!t || !Z.boss.tintColor) return sprite;
+  const key = pixel.spriteKey(sprite) + t;
+  let s = tintCache.get(key);
+  if (!s) {
+    const [mr, mg, mb] = hexRgb(Z.boss.tintColor), [tr, tg, tb] = hexRgb(t);
+    s = pixel.tint(sprite, (r, g, b, a) => (a && r === mr && g === mg && b === mb ? [tr, tg, tb, a] : [r, g, b, a]));
+    tintCache.set(key, s);
+  }
+  return s;
+}
+function fig(sprite, scale, label) {
+  const f = document.createElement('figure');
+  const c = document.createElement('canvas'); c.className = 'checker';
+  c.width = sprite.w * scale; c.height = sprite.h * scale;
+  const ctx = c.getContext('2d'); ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(pixel.toCanvas(sprite, scale), 0, 0);
+  const cap = document.createElement('figcaption'); cap.innerHTML = `<b>${label}</b><br>${sprite.w}x${sprite.h}${pixel.isPlaceholder(sprite) ? ' <span class="warn">PLACEHOLDER</span>' : ''}`;
+  f.append(c, cap); return f;
+}
+function rowOf(title, items) {
+  const h = document.createElement('h3'); h.textContent = title;
+  const r = document.createElement('div'); r.className = 'row';
+  for (const [s, l, sc] of items) { try { r.append(fig(s, sc, l)); } catch (e) { const d = document.createElement('div'); d.className = 'err'; d.textContent = l + ': ' + e.message; r.append(d); } }
+  return [h, r];
+}
+function renderZStatic() {
+  if (!Z) return;
+  const S = Number($z('scaleSel') && $z('scaleSel').value) || 6, host = $z('zStatic');
+  host.textContent = '';
+  const n = Z.normal, V = ['walker', 'jogger', 'sprinter'];
+  const withDmg = (b) => pixel.compose([{ sprite: b }, { sprite: n.damaged }]);
+  host.append(...rowOf('normal: body / tearing / body+damaged / corpse per tier, damaged overlay alone', [
+    ...V.map((v) => [n.body[v], `body.${v}`, S]),
+    ...V.map((v) => [(n.tearingVariants || {})[v] || n.tearing, `tearing.${v}`, S]),
+    ...V.map((v) => [withDmg(n.body[v]), `${v}+damaged`, S]),
+    ...V.map((v) => [(n.corpseVariants || {})[v] || n.corpse, `corpse.${v}`, S]),
+    [n.damaged, 'damaged', S],
+  ]));
+  host.append(...rowOf('normal: legs, 6-frame shamble', n.legs.frames.map((f, i) => [f, `legs[${i}]`, S])));
+  host.append(...rowOf('normal: legs + body composed (walker)', n.legs.frames.map((f, i) => [pixel.compose([{ sprite: f }, { sprite: n.body.walker }]), `frame ${i}`, S])));
+  const m = Z.minion;
+  host.append(...rowOf('minion: body / legs[0..3] / corpse', [[m.body, 'body', S], ...m.legs.frames.map((f, i) => [f, `legs[${i}]`, S]), [m.corpse, 'corpse', S]]));
+  const b = Z.boss, BS = Math.max(3, Math.round(S / 2));
+  host.append(...rowOf('boss: body / charge / corpse (tinted per select) / legs[0..3]', [[bossTinted(b.body), 'body', BS], [bossTinted(b.charge), 'charge', BS], [bossTinted(b.corpse), 'corpse', BS], [b.body, 'body (marker)', BS],
+    ...b.legs.frames.map((f, i) => [f, `legs[${i}]`, BS])]));
+  host.append(...rowOf('game scale (2x)', [...V.map((v) => [pixel.compose([{ sprite: n.legs.frames[0] }, { sprite: n.body[v] }]), v, 2]), [m.body, 'minion', 2], [bossTinted(b.body), 'boss', 2], [n.corpse, 'corpse', 2]]));
+}
+// ---- live scene: actors circle a soldier dot
+const actors = [
+  { kind: 'walker', r: 70, speed: 40, a: 0 }, { kind: 'jogger', r: 110, speed: 75, a: 2 }, { kind: 'sprinter', r: 140, speed: 130, a: 4 },
+  { kind: 'minion', r: 90, speed: 110, a: 1 }, { kind: 'boss', r: 0, speed: 60, a: 0, x: 440, y: 150 },
+];
+for (const o of actors) { o.dist = 0; }
+let zPaused = false, zLast = performance.now();
+$z('zPause') && $z('zPause').addEventListener('click', () => { zPaused = !zPaused; $z('zPause').textContent = zPaused ? 'Resume' : 'Pause'; });
+function drawScene(id, t) {
+  const c = $z(id), ctx = c.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, c.width, c.height);
+  const px = 170, py = 150;
+  ctx.fillStyle = '#e5b48f'; ctx.beginPath(); ctx.arc(px, py, 6, 0, Math.PI * 2); ctx.fill();
+  const sc = SP.scale || 2, dirs = SP.directions || 32;
+  for (const o of actors) {
+    let x, y, mvA;
+    if (o.kind === 'boss') { x = 440 + Math.cos(o.a) * 50; y = 150 + Math.sin(o.a) * 70; mvA = o.a + Math.PI / 2; }
+    else { x = px + Math.cos(o.a) * o.r; y = py + Math.sin(o.a) * o.r * 0.9; mvA = o.a + Math.PI / 2; }
+    const faceA = Math.atan2(py - y, px - x);
+    let set, body, frames, anchor, stride;
+    if (o.kind === 'boss') { set = Z.boss; body = bossTinted($z('zCharge').checked ? set.charge : set.body); stride = bStride; }
+    else if (o.kind === 'minion') { set = Z.minion; body = set.body; stride = zStride; }
+    else { set = Z.normal; body = $z('zTearing').checked ? ((set.tearingVariants || {})[o.kind] || set.tearing) : set.body[o.kind]; stride = zStride; }
+    frames = set.legs.frames; anchor = set.anchor;
+    const fi = Math.floor(((o.dist % stride) / stride) * frames.length) % frames.length;
+    const bodyA = o.kind === 'boss' ? faceA : faceA;
+    pixel.drawSprite(ctx, frames[fi], x, y, { scale: sc, ax: set.legs.anchor.x, ay: set.legs.anchor.y, angle: mvA, directions: dirs });
+    pixel.drawSprite(ctx, body, x, y, { scale: sc, ax: anchor.x, ay: anchor.y, angle: bodyA, directions: dirs });
+    if (o.kind !== 'boss' && o.kind !== 'minion' && document.getElementById('zDamaged').checked) pixel.drawSprite(ctx, set.damaged, x, y, { scale: sc, ax: anchor.x, ay: anchor.y, angle: bodyA, directions: dirs });
+  }
+  // corpses row
+  pixel.drawSprite(ctx, Z.normal.corpse, 40, 270, { scale: sc, ax: 8, ay: 8, angle: 0.4 });
+  pixel.drawSprite(ctx, (Z.normal.corpseVariants || {}).sprinter || Z.normal.corpse, 90, 270, { scale: sc, ax: 8, ay: 8, angle: -1.2 });
+  pixel.drawSprite(ctx, Z.minion.corpse, 130, 270, { scale: sc, ax: 6, ay: 6, angle: 2 });
+  pixel.drawSprite(ctx, bossTinted(Z.boss.corpse), 500, 255, { scale: sc, ax: 20, ay: 20, angle: 0 });
+}
+function zStep(dt) {
+    for (const o of actors) {
+      const rr = o.kind === 'boss' ? 60 : o.r;
+      o.a += (o.speed / rr) * dt; o.dist += o.speed * dt;
+    }
+}
+function zFrame(now) {
+  const dt = Math.min(0.1, (now - zLast) / 1000); zLast = now;
+  if (Z && !zPaused) {
+    zStep(dt);
+    try { drawScene('zLive1', now); drawScene('zLive3', now); } catch (e) { zerr.textContent = ''; const d = document.createElement('div'); d.className = 'err'; d.textContent = e.stack || String(e); zerr.append(d); zPaused = true; }
+  }
+  requestAnimationFrame(zFrame);
+}
+if (Z) {
+  try { renderZStatic(); } catch (e) { const d = document.createElement('div'); d.className = 'err'; d.textContent = e.stack || String(e); zerr.append(d); }
+  for (const id of ['scaleSel', 'zTint']) { const n = $z(id); if (n) n.addEventListener('change', () => { try { renderZStatic(); } catch (e) { zerr.textContent = e.message; } }); }
+  requestAnimationFrame(zFrame);
+  // debug hook: advance and redraw while paused (screenshots / hidden tabs)
+  window.__zombieSheet = { actors, step(dt = 1 / 60) { zStep(dt); drawScene('zLive1'); drawScene('zLive3'); }, rerender: renderZStatic };
+}
 </script>
 </body>
 </html>

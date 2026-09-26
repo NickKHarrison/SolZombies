@@ -1,7 +1,7 @@
 // player.js (Agent B) — pure logic, no DOM.
 // Movement, aiming, firing/reload/swap orchestration, health + regen, points, inventory.
 
-import { PLAYER, POINTS } from './config.js';
+import { PLAYER, POINTS, PERKS, MELEE } from './config.js';
 import { emit, on } from './events.js';
 import { nextId, norm, clamp } from './math.js';
 import * as weapons from './weapons.js';
@@ -36,7 +36,87 @@ export function createPlayer(x, y) {
     invulnerable: false,
     repairTimer: 0,
     boardsThisRound: 0,
+    // WO7 T2/T3
+    perks: [],          // perk ids in purchase order (PERKS.list keys)
+    reviveUses: 0,      // Quick Revive purchases this game (incremented by shop.buyPerk)
+    invulnT: 0,         // seconds of post-revive invulnerability left
+    downT: 0,           // seconds of Quick Revive "down" pause left
+    meleeCd: 0,         // knife cooldown left (set by weapons.meleeAttack)
+    meleeT: 0,          // knife swing animation time left (set by weapons.meleeAttack)
   };
+}
+
+// --- WO7 perks -------------------------------------------------------------
+
+const perkDef = (id) => (PERKS && PERKS.list && PERKS.list[id]) || null;
+
+export function hasPerk(player, perkId) {
+  return !!(player && Array.isArray(player.perks) && player.perks.includes(perkId));
+}
+
+// Combined multipliers from the perks the player holds (all 1 / base values with none).
+export function perkMods(player) {
+  const m = {
+    reloadMult: 1, rpmMult: 1, bulletDamageMult: 1, speedMult: 1, sprintMult: 1,
+    weaponSlots: PLAYER.weaponSlots, maxHealth: PLAYER.maxHealth,
+  };
+  const list = (player && Array.isArray(player.perks)) ? player.perks : [];
+  for (const id of list) {
+    const d = perkDef(id);
+    if (!d) continue;
+    if (d.reloadMult) m.reloadMult *= d.reloadMult;
+    if (d.rpmMult) m.rpmMult *= d.rpmMult;
+    if (d.bulletDamageMult) m.bulletDamageMult *= d.bulletDamageMult;
+    if (d.speedMult) m.speedMult *= d.speedMult;
+    if (d.sprintMult) m.sprintMult *= d.sprintMult;
+    if (d.weaponSlots) m.weaponSlots = Math.max(m.weaponSlots, d.weaponSlots);
+    if (d.maxHealth) m.maxHealth = Math.max(m.maxHealth, d.maxHealth);
+  }
+  return m;
+}
+
+// Adds a perk: refuses unknown ids, duplicates and a full bar (PERKS.maxPerks). Applies the
+// immediate effects (Juggernog: new maxHealth + full heal; Mule Kick: third weapon slot) and
+// counts stats.perksBought. Quick Revive's use limit is enforced by shop.buyPerk (reviveUses).
+export function addPerk(state, perkId) {
+  const p = state && state.player;
+  if (!p || !perkDef(perkId)) return false;
+  if (!Array.isArray(p.perks)) p.perks = [];
+  if (p.perks.includes(perkId) || p.perks.length >= PERKS.maxPerks) return false;
+  p.perks.push(perkId);
+  applyPerkStats(p);
+  if (perkId === 'jugg') p.health = p.maxHealth;
+  if (state.stats) state.stats.perksBought = (state.stats.perksBought || 0) + 1;
+  return true;
+}
+
+// Syncs maxHealth / weapon slot count to the held perks. Health is clamped to the new max.
+function applyPerkStats(p) {
+  const m = perkMods(p);
+  p.maxHealth = m.maxHealth;
+  if (p.health > p.maxHealth) p.health = p.maxHealth;
+  while (p.weapons.length < m.weaponSlots) p.weapons.push(null);
+  if (p.weapons.length > m.weaponSlots) p.weapons.length = m.weaponSlots;
+}
+
+// Removes every perk (Quick Revive self-revive, debug). Emits perk:lost per perk. Losing Mule
+// Kick drops the third weapon (switching to slot 0 if it was active); losing Juggernog clamps
+// maxHealth/health back to PLAYER.maxHealth.
+export function removeAllPerks(state, reason = 'debug') {
+  const p = state && state.player;
+  if (!p || !Array.isArray(p.perks) || p.perks.length === 0) return;
+  const lost = p.perks.slice();
+  p.perks = [];
+  const slots = perkMods(p).weaponSlots;
+  if (p.weapons.length > slots && p.activeSlot >= slots) {
+    cancelReload(p.weapons[p.activeSlot]);
+    p.activeSlot = 0;
+    p.weapons.length = slots;
+    const w = p.weapons[0];
+    if (w && !p.tempWeapon) emit('weapon:equipped', { weaponId: w.id, slot: 0 });
+  }
+  applyPerkStats(p);
+  for (const perkId of lost) emit('perk:lost', { perkId, reason });
 }
 
 export function initPlayer(state) {
@@ -49,6 +129,16 @@ export function initPlayer(state) {
     }),
     on('zombie:hit', (p) => {
       if (POINTS.perHit) addPoints(state, POINTS.perHit, p && p.x, p && p.y);
+    }),
+    // WO7 knife: the kill itself is paid by zombie:killed (perKill); a knife kill adds
+    // MELEE.bonusPoints on top and counts stats.meleeKills.
+    on('melee:hit', (p) => {
+      if (!p || !p.killed) return;
+      state.stats.meleeKills = (state.stats.meleeKills || 0) + 1;
+      const pl = state.player;
+      const x = p.x !== undefined ? p.x : pl && pl.x;
+      const y = p.y !== undefined ? p.y : pl && pl.y;
+      addPoints(state, MELEE.bonusPoints, x, y);
     }),
     on('round:start', () => {
       if (state.player) state.player.boardsThisRound = 0;
@@ -75,6 +165,20 @@ export function updatePlayer(state, input, aim, dt) {
   if (!p || p.down) return;
   input = input || {};
 
+  // WO7 Quick Revive: while down nothing moves or fires; when the pause ends, revive.
+  if (p.downT > 0) {
+    p.moving = false;
+    p.sprinting = false;
+    const w0 = getActiveWeapon(p);
+    if (w0) w0.triggerHeld = false;
+    p.downT = Math.max(0, p.downT - dt);
+    if (p.downT <= 0) revive(state);
+    return;
+  }
+  if (p.invulnT > 0) p.invulnT = Math.max(0, p.invulnT - dt);
+  if (p.meleeCd > 0) p.meleeCd = Math.max(0, p.meleeCd - dt);
+  if (p.meleeT > 0) p.meleeT = Math.max(0, p.meleeT - dt);
+
   tickRegen(p, dt);
 
   // --- Aim ---
@@ -88,7 +192,8 @@ export function updatePlayer(state, input, aim, dt) {
   p.moving = mv.x !== 0 || mv.y !== 0;
   p.sprinting = !!input.sprint && p.moving && !input.fire; // firing cancels sprint
   if (p.moving) {
-    const speed = PLAYER.speed * (p.sprinting ? PLAYER.sprintMult : 1);
+    const mods = perkMods(p);
+    const speed = PLAYER.speed * mods.speedMult * (p.sprinting ? PLAYER.sprintMult * mods.sprintMult : 1);
     let nx = p.x + mv.x * speed * dt;
     let ny = p.y + mv.y * speed * dt;
     if (state.map) {
@@ -98,7 +203,10 @@ export function updatePlayer(state, input, aim, dt) {
     p.x = nx; p.y = ny;
   }
 
-  // --- Swap (1/2 digit, Q/wheel). Not allowed while holding a temporary weapon. ---
+  // --- Knife (V / KNIFE). weapons.meleeAttack enforces the cooldown and cancels reloads. ---
+  if (input.melee && typeof weapons.meleeAttack === 'function') weapons.meleeAttack(state, p);
+
+  // --- Swap (1/2/3 digit, Q/wheel; slot 3 only exists with Mule Kick). Not allowed while holding a temporary weapon. ---
   if (!p.tempWeapon) {
     const slot = input.slot | 0;
     if (slot >= 1) selectSlot(state, slot - 1);
@@ -115,13 +223,14 @@ export function updatePlayer(state, input, aim, dt) {
   if (!w) return;
   weapons.updateWeapon(w, dt);
 
-  if (input.reload && !p.tempWeapon) weapons.startReload(w);
+  if (input.reload && !p.tempWeapon) weapons.startReload(w, state);
 
-  if (input.fire) {
+  // No shooting during the knife swing.
+  if (input.fire && !(p.meleeT > 0)) {
     const dx = Math.cos(p.angle), dy = Math.sin(p.angle);
     const off = p.radius + MUZZLE_OFFSET;
     const fired = weapons.tryFire(state, w, p.x + dx * off, p.y + dy * off, dx, dy);
-    if (!fired && w.mag <= 0 && !w.reloading && w.reserve > 0) weapons.startReload(w);
+    if (!fired && w.mag <= 0 && !w.reloading && w.reserve > 0) weapons.startReload(w, state);
   }
   w.triggerHeld = !!input.fire;
   // WO6: touch auto-fire releases the trigger each frame so semi-autos cycle at their rpm.
@@ -131,10 +240,19 @@ export function updatePlayer(state, input, aim, dt) {
 
 export function damagePlayer(state, amount) {
   const p = state.player;
-  if (!p || p.down || p.invulnerable || !(amount > 0)) return;
+  if (!p || p.down || p.invulnerable || p.downT > 0 || p.invulnT > 0 || !(amount > 0)) return;
   p.health = clamp(p.health - amount, 0, p.maxHealth);
   p.regenTimer = PLAYER.regenDelay;
   emit('player:damaged', { amount, health: p.health });
+  if (p.health <= 0 && hasPerk(p, 'revive')) {
+    // WO7 Quick Revive: a short down pause instead of game over (see updatePlayer / revive).
+    const reviveIn = perkDef('revive').downSeconds;
+    p.downT = reviveIn;
+    p.moving = false;
+    p.sprinting = false;
+    emit('player:downed', { reviveIn });
+    return;
+  }
   if (p.health <= 0) {
     p.down = true;
     p.moving = false;
@@ -142,6 +260,19 @@ export function damagePlayer(state, amount) {
     const round = (state.rounds && state.rounds.round) || state.stats.roundReached || 0;
     emit('player:down', { round, kills: state.stats.kills, points: p.points });
   }
+}
+
+// End of the Quick Revive pause: all perks go (incl. revive itself), full health at the base
+// max, invulnT = invulnSeconds. reviveUses is unchanged (counted at purchase).
+function revive(state) {
+  const p = state.player;
+  const invuln = perkDef('revive').invulnSeconds;
+  removeAllPerks(state, 'revive');
+  p.downT = 0;
+  p.health = p.maxHealth;
+  p.regenTimer = 0;
+  p.invulnT = invuln;
+  emit('player:revived', { health: p.health });
 }
 
 // Health regen, ticked from updatePlayer: after regenDelay without damage, +regenPerSec.

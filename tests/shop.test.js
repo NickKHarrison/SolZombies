@@ -513,3 +513,212 @@ test('WO5: no prompts and no purchases while a transition runs', () => {
   assert.equal(s.player.points, 1000);
 });
 
+
+// ---------------- WO7: perk machines ----------------
+
+import * as shopNs from '../src/shop.js';
+import { PERKS, TILE } from '../src/config.js';
+
+const PERK_ASCII = [
+  '#############',
+  '#P..........#',
+  '#.J.Q.C.N.U.#',
+  '#...........#',
+  '#.K.......Q.#',
+  '#############',
+];
+
+function perkState(points = 2000) {
+  events.clearAll();
+  const s = createEmptyState(5);
+  s.phase = 'playing';
+  s.player = player.createPlayer(60, 60);
+  s.player.points = points;
+  if (!Array.isArray(s.player.perks)) s.player.perks = [];
+  if (!Number.isFinite(s.player.reviveUses)) s.player.reviveUses = 0;
+  s.map = map.loadMap(PERK_ASCII);
+  initShop(s);
+  return s;
+}
+const machine = (s, perkId) => s.map.perkMachines.find((m) => m.perkId === perkId);
+function record(names) {
+  const log = [];
+  for (const n of names) events.on(n, (p) => log.push([n, p]));
+  return log;
+}
+// Stand just below a machine (inside interact range, closest to it).
+function standAt(s, m) { s.player.x = m.x + TILE / 2; s.player.y = m.y + TILE + 15; }
+
+test('WO7 buyPerk / perkPrompt / syncPerkMachines exported', () => {
+  for (const f of ['buyPerk', 'perkPrompt', 'syncPerkMachines', 'perkBlockReason', 'perkDef']) {
+    assert.equal(typeof shopNs[f], 'function', f);
+  }
+});
+
+test('WO7 perk prompts: buy text, canAfford, already have, limit, sold out', () => {
+  const s = perkState(100);
+  const jugg = machine(s, 'jugg');
+  let p = buildPrompt(s, { kind: 'perk', ref: jugg });
+  assert.equal(p.kind, 'perk'); assert.equal(p.perkId, 'jugg');
+  assert.equal(p.text, 'Press F for Juggernog [250]');
+  assert.equal(p.cost, 250); assert.equal(p.canAfford, false); assert.equal(p.blocked, false);
+  s.player.points = 250;
+  assert.equal(buildPrompt(s, { kind: 'perk', ref: jugg }).canAfford, true);
+  s.player.perks = ['jugg'];
+  p = buildPrompt(s, { kind: 'perk', ref: jugg });
+  assert.equal(p.text, 'Already have Juggernog'); assert.equal(p.blocked, true);
+  s.player.perks = ['jugg', 'speed', 'dtap', 'stamin'];
+  p = buildPrompt(s, { kind: 'perk', ref: machine(s, 'mule') });
+  assert.equal(p.text, 'Perk limit reached'); assert.equal(p.blocked, true);
+  s.player.perks = [];
+  s.player.reviveUses = PERKS.list.revive.maxUses;
+  p = buildPrompt(s, { kind: 'perk', ref: machine(s, 'revive') });
+  assert.equal(p.text, 'Quick Revive sold out'); assert.equal(p.blocked, true);
+  assert.equal(buildPrompt(s, { kind: 'perk', ref: machine(s, 'speed') }).text, 'Press F for Speed Cola [300]');
+});
+
+test('WO7 buyPerk: charges, adds the perk, emits purchase:made and perk:bought', () => {
+  const s = perkState(1000);
+  const log = record(['purchase:made', 'purchase:denied', 'perk:bought']);
+  assert.equal(shopNs.buyPerk(s, machine(s, 'dtap')), true);
+  assert.equal(s.player.points, 800);
+  assert.ok(s.player.perks.includes('dtap'));
+  assert.equal(s.stats.perksBought, 1);
+  assert.deepEqual(log, [
+    ['purchase:made', { kind: 'perk', id: 'dtap', cost: 200 }],
+    ['perk:bought', { perkId: 'dtap', cost: 200 }],
+  ]);
+  // already held: refused, no charge, no event
+  assert.equal(shopNs.buyPerk(s, machine(s, 'dtap')), false);
+  assert.equal(s.player.points, 800); assert.equal(log.length, 2);
+});
+
+test('WO7 buyPerk: cannot afford -> purchase:denied, nothing changes', () => {
+  const s = perkState(399);
+  const log = record(['purchase:made', 'purchase:denied', 'perk:bought']);
+  assert.equal(shopNs.buyPerk(s, machine(s, 'mule')), false);
+  assert.equal(s.player.points, 399); assert.equal(s.player.perks.length, 0);
+  assert.deepEqual(log, [['purchase:denied', { kind: 'perk', cost: 400, have: 399 }]]);
+});
+
+test('WO7 buyPerk: four-perk cap blocks a fifth without charge or event', () => {
+  const s = perkState(5000);
+  for (const id of ['jugg', 'speed', 'dtap', 'stamin']) assert.equal(shopNs.buyPerk(s, machine(s, id)), true, id);
+  const pts = s.player.points;
+  const log = record(['purchase:made', 'purchase:denied', 'perk:bought']);
+  assert.equal(shopNs.buyPerk(s, machine(s, 'mule')), false);
+  assert.equal(s.player.points, pts); assert.equal(log.length, 0);
+  assert.equal(s.player.perks.length, PERKS.maxPerks);
+});
+
+test('WO7 Quick Revive: counts uses, sells out every revive machine at maxUses, bumps version', () => {
+  const s = perkState(1000);
+  const revives = s.map.perkMachines.filter((m) => m.perkId === 'revive');
+  assert.equal(revives.length, 2);
+  const max = PERKS.list.revive.maxUses;
+  const costs = PERKS.list.revive.costs;
+  const log = record(['purchase:made', 'perk:bought']);
+  for (let i = 1; i <= max; i++) {
+    const v = s.map.version;
+    // FIX-3 (balance #6): escalating price 50 / 150 / 300 by purchase number
+    const price = costs[Math.min(i - 1, costs.length - 1)];
+    const pr = buildPrompt(s, { kind: 'perk', ref: revives[i % 2] });
+    assert.equal(pr.cost, price); assert.equal(pr.text, `Press F for Quick Revive [${price}]`);
+    assert.equal(shopNs.perkCost(s.player, 'revive'), price);
+    assert.equal(shopNs.buyPerk(s, revives[i % 2]), true, `purchase ${i}`);
+    assert.deepEqual(log.slice(-2), [
+      ['purchase:made', { kind: 'perk', id: 'revive', cost: price }],
+      ['perk:bought', { perkId: 'revive', cost: price }],
+    ]);
+    assert.equal(s.player.reviveUses, i);
+    // holding revive: another purchase is refused until it is consumed
+    assert.equal(shopNs.buyPerk(s, revives[0]), false);
+    const sold = i === max;
+    for (const m of revives) assert.equal(m.soldOut, sold);
+    assert.ok(s.map.version > v, 'version bumps (next price or sold-out)');
+    if (!sold) for (const m of revives) assert.equal(m.price, costs[Math.min(i, costs.length - 1)], 'plate price');
+    s.player.perks = []; // simulate the self-revive consuming every perk
+  }
+  const pts = s.player.points;
+  assert.equal(pts, 1000 - costs.slice(0, max).reduce((a, c) => a + c, 0));
+  assert.equal(shopNs.buyPerk(s, revives[0]), false);
+  assert.equal(s.player.points, pts);
+  // other machines are never sold out
+  assert.ok(s.map.perkMachines.filter((m) => m.perkId !== 'revive').every((m) => !m.soldOut));
+});
+
+test('WO7 syncPerkMachines: a freshly loaded level shows revive sold out after updateShop', () => {
+  const s = perkState(1000);
+  s.player.reviveUses = PERKS.list.revive.maxUses;
+  s.map = map.loadMap(PERK_ASCII); // new level: machines start fresh
+  const v = s.map.version;
+  updateShop(s, {}, 1 / 60);
+  assert.ok(s.map.perkMachines.filter((m) => m.perkId === 'revive').every((m) => m.soldOut));
+  assert.equal(s.map.version, v + 1);
+  updateShop(s, {}, 1 / 60);
+  assert.equal(s.map.version, v + 1, 'no repaint when nothing changed');
+  assert.equal(shopNs.syncPerkMachines(null), false);
+});
+
+test('FIX-3 Quick Revive price: costs [50,150,300]; cannot afford the 2nd -> denied at 150', () => {
+  assert.deepEqual(PERKS.list.revive.costs, [50, 150, 300]);
+  assert.equal(PERKS.list.revive.cost, 50);
+  const s = perkState(199);
+  const q = machine(s, 'revive');
+  const log = record(['purchase:made', 'purchase:denied']);
+  assert.equal(shopNs.buyPerk(s, q), true);
+  assert.equal(s.player.points, 149);
+  s.player.perks = [];
+  assert.equal(buildPrompt(s, { kind: 'perk', ref: q }).canAfford, false);
+  assert.equal(shopNs.buyPerk(s, q), false);
+  assert.deepEqual(log, [
+    ['purchase:made', { kind: 'perk', id: 'revive', cost: 50 }],
+    ['purchase:denied', { kind: 'perk', cost: 150, have: 149 }],
+  ]);
+  // perks without costs use def.cost; unknown -> null; clamped past the table
+  assert.equal(shopNs.perkCost(s.player, 'jugg'), 250);
+  assert.equal(shopNs.perkCost(s.player, 'nope'), null);
+  assert.equal(shopNs.perkCost({ reviveUses: 9 }, 'revive'), 300);
+  assert.equal(shopNs.perkCost(null, 'revive'), 50);
+});
+
+test('FIX-3 (L2) updateShop syncs perk machines during a level transition', () => {
+  const s = perkState(1000);
+  s.player.reviveUses = PERKS.list.revive.maxUses;
+  s.map = map.loadMap(PERK_ASCII); // level loaded at the fade midpoint
+  s.transition = { t: 0.6, dur: 1.2, nextIndex: 1, swapped: true };
+  updateShop(s, { interact: true }, 1 / 60);
+  assert.equal(s.shop.prompt, null, 'still nothing interactable mid-fade');
+  assert.ok(s.map.perkMachines.filter((m) => m.perkId === 'revive').every((m) => m.soldOut));
+});
+
+test('WO7 updateShop: prompt and F-press buy at a perk machine; none while down', () => {
+  const s = perkState(1000);
+  const log = record(['perk:bought']);
+  const jugg = machine(s, 'jugg');
+  standAt(s, jugg);
+  updateShop(s, {}, 1 / 60);
+  assert.equal(s.shop.prompt.kind, 'perk');
+  assert.equal(s.shop.prompt.text, 'Press F for Juggernog [250]');
+  updateShop(s, { interact: true }, 1 / 60);
+  assert.deepEqual(log, [['perk:bought', { perkId: 'jugg', cost: 250 }]]);
+  assert.equal(s.shop.prompt.text, 'Already have Juggernog');
+  assert.equal(s.player.points, 750);
+  // downed (Quick Revive pause): no prompt, no purchase
+  s.player.downT = 1;
+  const speed = machine(s, 'speed');
+  standAt(s, speed);
+  updateShop(s, { interact: true }, 1 / 60);
+  assert.equal(s.shop.prompt, null);
+  assert.equal(shopNs.buyPerk(s, speed), false);
+  assert.equal(s.player.points, 750);
+});
+
+test('WO7 buyPerk guards: null machine, unknown perk, no player', () => {
+  const s = perkState(1000);
+  assert.equal(shopNs.buyPerk(s, null), false);
+  assert.equal(shopNs.buyPerk(s, { id: 99, perkId: 'nope' }), false);
+  assert.equal(buildPrompt(s, { kind: 'perk', ref: { id: 99, perkId: 'nope' } }), null);
+  assert.equal(shopNs.buyPerk({ player: null }, machine(s, 'jugg')), false);
+  assert.equal(s.player.points, 1000);
+});

@@ -310,6 +310,142 @@ function drum(dest, t, level) {
   noise(dest, { t, dur: 0.18, peak: 0.25 * level, attack: 0.002, filter: 'lowpass', freq: 900, freq1: 200 });
 }
 
+// ---- WO7 helpers ----
+// Six distinct 4-6 note chiptune motifs keyed by perkId (Hz).
+const PERK_MOTIFS = {
+  jugg:   { type: 'square',   step: 0.11,  notes: [196, 247, 294, 392, 294] },       // heavy, low, marching
+  revive: { type: 'triangle', step: 0.09,  notes: [659, 784, 988, 1319] },           // bright, bell-like
+  speed:  { type: 'square',   step: 0.065, notes: [523, 659, 523, 784, 1047] },      // fast
+  dtap:   { type: 'square',   step: 0.08,  notes: [440, 440, 554, 659, 880] },       // double-hit start
+  stamin: { type: 'triangle', step: 0.1,   notes: [392, 494, 587, 494, 784] },       // bouncy
+  mule:   { type: 'square',   step: 0.09,  notes: [330, 294, 392, 494, 440, 587] },  // quirky 6-note
+  _default: { type: 'square', step: 0.09,  notes: [523, 659, 784, 1047] },
+};
+// Drink: two quick low "glug" bubbles (rising sine blips + dull noise), then a soft exhale.
+function gulp(b, t) {
+  for (let i = 0; i < 2; i++) {
+    const tt = t + i * 0.16;
+    tone(b, { type: 'sine', f0: 170 * rrange(0.95, 1.05), f1: 340, t: tt, dur: 0.07, peak: 0.2, attack: 0.004 });
+    noise(b, { t: tt, dur: 0.06, peak: 0.08, filter: 'lowpass', freq: 600, freq1: 250, q: 4 });
+  }
+  noise(b, { t: t + 0.42, dur: 0.22, peak: 0.04, attack: 0.04, filter: 'bandpass', freq: 1200, freq1: 800, q: 1.2 });
+}
+const ACID_SIZZLE_DELAY = 0.8; // seconds after boss:spit (no hazard-spawn event exists)
+// Looped noise through a high-Q bandpass whose centre an LFO wobbles: a bubbling gurgle.
+function gurgle(dest, t, dur) {
+  const start = ctx.currentTime + t;
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuf;
+  src.loop = true;
+  const f = ctx.createBiquadFilter();
+  f.type = 'bandpass';
+  f.frequency.setValueAtTime(420, start);
+  f.Q.value = 12;
+  const lfo = ctx.createOscillator();
+  lfo.type = 'sine';
+  lfo.frequency.setValueAtTime(9, start);
+  lfo.frequency.linearRampToValueAtTime(16, start + dur);
+  const depth = ctx.createGain();
+  depth.gain.value = 260;
+  lfo.connect(depth);
+  depth.connect(f.frequency);
+  const g = envGain(dest, start, 0.5, 0.05, dur);
+  src.connect(f);
+  f.connect(g);
+  src.start(start, rand() * 0.5);
+  lfo.start(start);
+  src.stop(start + dur + 0.1);
+  lfo.stop(start + dur + 0.1);
+}
+// Acid pools landing: a fading hiss (high-passed noise) with a few crackle pops.
+function acidSizzle(dest, t) {
+  noise(dest, { t, dur: 0.9, peak: 0.12, attack: 0.02, filter: 'highpass', freq: 3500, freq1: 2200, q: 0.8 });
+  noise(dest, { t, dur: 0.5, peak: 0.06, attack: 0.01, filter: 'bandpass', freq: 6000, q: 3 });
+  for (let i = 0; i < 5; i++) {
+    tone(dest, { type: 'square', f0: rrange(1800, 3200), t: t + 0.05 + i * rrange(0.08, 0.16), dur: 0.015, peak: 0.03, attack: 0.001 });
+  }
+}
+
+// Lab ambience: a quiet looping electrical hum (60 Hz saw + harmonics through a lowpass, a
+// slow level flutter, a faint band-passed crackle) on its own small gain into the world bus.
+// At most one instance; stopped on level change, game over, restart and re-init.
+const LAB_HUM_GAIN = 0.035;
+let labHum = null; // { gain, sources }
+function isLabLevel(p) {
+  if (!p) return false;
+  if (typeof p.name === 'string' && p.name) return /LABORATORY/i.test(p.name);
+  return p.index === 2;
+}
+function startLabHum() {
+  if (!ready() || labHum) return;
+  try {
+    const now = ctx.currentTime;
+    const out = ctx.createGain();
+    out.gain.setValueAtTime(0.0001, now);
+    out.gain.linearRampToValueAtTime(LAB_HUM_GAIN, now + 1.5);
+    out.connect(buses.world || master);
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 700;
+    lp.Q.value = 0.7;
+    lp.connect(out);
+    const sources = [];
+    for (const [type, f, lvl] of [['sawtooth', 60, 0.5], ['sine', 120, 0.8], ['square', 180, 0.12], ['sine', 240.4, 0.25]]) {
+      const o = ctx.createOscillator();
+      o.type = type;
+      o.frequency.value = f;
+      const g = ctx.createGain();
+      g.gain.value = lvl;
+      o.connect(g);
+      g.connect(lp);
+      o.start(now);
+      sources.push(o);
+    }
+    // Slow flutter (+-30 % of the hum level), like a tired ballast.
+    const lfo = ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 0.23;
+    const lfoDepth = ctx.createGain();
+    lfoDepth.gain.value = LAB_HUM_GAIN * 0.3;
+    lfo.connect(lfoDepth);
+    lfoDepth.connect(out.gain);
+    lfo.start(now);
+    sources.push(lfo);
+    const crackle = ctx.createBufferSource();
+    crackle.buffer = noiseBuf;
+    crackle.loop = true;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 4200;
+    bp.Q.value = 2;
+    const cg = ctx.createGain();
+    cg.gain.value = 0.08;
+    crackle.connect(bp);
+    bp.connect(cg);
+    cg.connect(out);
+    crackle.start(now);
+    sources.push(crackle);
+    labHum = { gain: out, sources };
+  } catch (_) { labHum = null; }
+}
+function stopLabHum() {
+  const h = labHum;
+  labHum = null;
+  if (!h || !ctx) return;
+  try {
+    const now = ctx.currentTime;
+    h.gain.gain.cancelScheduledValues(now);
+    h.gain.gain.setValueAtTime(h.gain.gain.value, now);
+    h.gain.gain.linearRampToValueAtTime(0, now + 0.3);
+    for (const s of h.sources) { try { s.stop(now + 0.35); } catch (_) { /* already stopped */ } }
+  } catch (_) { /* ignore */ }
+}
+function onLevelStart(p) {
+  stopLabHum();
+  if (p && p.index > 0) playSfx('levelStart', p);
+  if (isLabLevel(p)) startLabHum();
+}
+
 const SFX = {
   gunshot(p) {
     if (p && p.weaponId === 'thundergun') { thundergun(); return; }
@@ -343,6 +479,8 @@ const SFX = {
     noise(b, { dur: dur * 0.8, peak: 0.08, filter: 'bandpass', freq: 600, q: 3, attack: 0.05 });
   },
   playerDamaged() {
+    // WO7 INT: acid pools call damagePlayer every frame; one "ugh" per 0.35 s at most.
+    if (rateLimited('phurt', 0.35)) return;
     const b = buses.player;
     // WO2: short pained "ugh" (~0.25 s) to match the face wince. Low impact thump, then a
     // voiced "uh" (formants ~650/1150 Hz) whose pitch drops, plus a breathy onset.
@@ -487,6 +625,74 @@ const SFX = {
     tone(b, { type: 'square', f0: 1310 * k, t: tc, dur: 0.3, peak: 0.03, attack: 0.002 });
     noise(b, { t: tc, dur: 0.12, peak: 0.2, attack: 0.001, filter: 'lowpass', freq: 1800 });
   },
+  // ---- WO7 (Agent L): perks, Quick Revive, knife, acid boss ----
+  // perk:bought: a short bright per-perk chiptune jingle, then a "drink" gulp.
+  perkJingle(p) {
+    const b = buses.ui;
+    const m = PERK_MOTIFS[p && p.perkId] || PERK_MOTIFS._default;
+    const n = m.notes.length;
+    // Lead, a quiet octave-down triangle shadow for body, and a sparkle on the last note.
+    notes(b, m.notes, { type: m.type, step: m.step, dur: m.step * 1.4, peak: 0.09 });
+    notes(b, m.notes.map(f => f / 2), { type: 'triangle', step: m.step, dur: m.step * 1.2, peak: 0.05 });
+    const tEnd = n * m.step;
+    tone(b, { type: 'sine', f0: m.notes[n - 1] * 2, t: tEnd - m.step, dur: 0.35, peak: 0.03 });
+    gulp(b, tEnd + 0.12);
+  },
+  // player:downed (Quick Revive path): falling low tone + a slow heartbeat under it.
+  playerDowned(p) {
+    const b = buses.player;
+    const span = Math.max(0.6, Math.min(3, (p && Number(p.reviveIn)) || 1.5));
+    tone(b, { type: 'sawtooth', f0: 180, f1: 45, dur: span, peak: 0.12, attack: 0.03 });
+    tone(b, { type: 'sine', f0: 90, f1: 32, dur: span + 0.2, peak: 0.3, attack: 0.03 });
+    for (let t = 0.15; t < span; t += 0.55) {
+      tone(b, { type: 'sine', f0: 62, f1: 40, t, dur: 0.12, peak: 0.42, attack: 0.004 });          // lub
+      tone(b, { type: 'sine', f0: 55, f1: 36, t: t + 0.17, dur: 0.1, peak: 0.3, attack: 0.004 });   // dub
+    }
+  },
+  // player:revived: rising revive sting (upward sweep, major arpeggio, shimmer).
+  playerRevived() {
+    const b = buses.player;
+    tone(b, { type: 'sawtooth', f0: 110, f1: 440, dur: 0.45, peak: 0.08, attack: 0.02 });
+    notes(buses.ui, [392, 494, 587, 784], { type: 'square', step: 0.07, dur: 0.14, peak: 0.08, t0: 0.12 });
+    tone(buses.ui, { type: 'triangle', f0: 784, t: 0.4, dur: 0.6, peak: 0.08 });
+    tone(buses.ui, { type: 'sine', f0: 1568 * 1.005, t: 0.4, dur: 0.5, peak: 0.03 });
+    noise(b, { dur: 0.45, peak: 0.05, attack: 0.1, filter: 'highpass', freq: 2500, freq1: 7000 });
+  },
+  // perk:lost: short descending blip (rate limited: removeAllPerks emits one per perk).
+  perkLost() {
+    if (rateLimited('perklost', 0.09)) return;
+    tone(buses.ui, { type: 'square', f0: 880, f1: 330, dur: 0.12, peak: 0.07 });
+    tone(buses.ui, { type: 'triangle', f0: 440, f1: 165, dur: 0.14, peak: 0.06 });
+  },
+  // melee:swing: quick whoosh, band-passed noise sweeping upward.
+  meleeSwing() {
+    if (rateLimited('mswing', 0.08)) return;
+    const k = rrange(0.9, 1.1);
+    noise(buses.player, { dur: 0.16, peak: 0.22, attack: 0.03, filter: 'bandpass', freq: 500 * k, freq1: 3200 * k, q: 2.5 });
+    noise(buses.player, { t: 0.02, dur: 0.1, peak: 0.06, attack: 0.02, filter: 'highpass', freq: 3000, freq1: 6000 });
+  },
+  // melee:hit: wet thud; heavier (lower, longer, extra body) when the hit killed.
+  meleeHit(p) {
+    if (rateLimited('mhit', 0.03)) return;
+    const b = buses.zombies;
+    const heavy = !!(p && p.killed);
+    const k = rrange(0.9, 1.1);
+    tone(b, { type: 'sine', f0: (heavy ? 120 : 160) * k, f1: heavy ? 38 : 60, dur: heavy ? 0.18 : 0.1, peak: heavy ? 0.45 : 0.3 });
+    noise(b, { dur: heavy ? 0.16 : 0.09, peak: heavy ? 0.3 : 0.22, filter: 'lowpass', freq: 900, freq1: 180, q: 3 });
+    // Wet squelch: resonant band sweeping down.
+    noise(b, { t: 0.01, dur: heavy ? 0.14 : 0.08, peak: heavy ? 0.14 : 0.08, filter: 'bandpass', freq: 1400, freq1: 450, q: 6 });
+    if (heavy) tone(b, { type: 'triangle', f0: 90, f1: 45, t: 0.04, dur: 0.15, peak: 0.15 });
+  },
+  // boss:spit: gurgling telegraph plus a throat voice; the acid sizzle is scheduled
+  // ACID_SIZZLE_DELAY later on the audio clock (there is no hazard-spawn event).
+  bossSpit() {
+    if (rateLimited('bspit', 0.3)) return;
+    const b = bossBus();
+    gurgle(b, 0, 0.6);
+    voice(b, { f0: 95, f1: 140, dur: 0.5, peak: 0.18, attack: 0.05, formants: [[380, 4, 1.0], [900, 6, 0.4]] });
+    acidSizzle(buses.world, ACID_SIZZLE_DELAY);
+  },
+  acidSizzle() { acidSizzle(buses.world, 0); },
   board(p) {
     const byZombie = p && p.by === 'zombie';
     const f = byZombie ? rrange(120, 160) : rrange(200, 260);
@@ -534,10 +740,11 @@ function onZombieKilledSfx(p) {
 export function initAudio() {
   for (const u of unsubs) { try { u(); } catch (_) { /* ignore */ } }
   unsubs = [];
+  stopLabHum(); // WO7: a re-init (restart path) never leaves the lab hum running
   const sub = (event, fn) => { unsubs.push(on(event, fn)); };
 
   sub('game:start', () => createContext());
-  sub('game:restart', () => { tryResume(); gunVoices = []; thunderVoices = []; });
+  sub('game:restart', () => { tryResume(); gunVoices = []; thunderVoices = []; stopLabHum(); });
 
   sub('weapon:fired', p => playSfx('gunshot', p));
   sub('weapon:reload', () => playSfx('reload'));
@@ -551,14 +758,27 @@ export function initAudio() {
   sub('powerup:spawned', () => playSfx('powerupSpawned'));
   sub('powerup:collected', p => playSfx('powerupCollected', p));
   sub('powerup:expired', () => playSfx('powerupExpired'));
-  sub('purchase:made', p => playSfx(p && p.kind === 'door' ? 'door' : p && p.kind === 'megadoor' ? 'megaDoor' : 'purchase', p));
+  sub('purchase:made', p => {
+    if (p && p.kind === 'perk') return; // WO7: the perk:bought jingle replaces the cash tick
+    playSfx(p && p.kind === 'door' ? 'door' : p && p.kind === 'megadoor' ? 'megaDoor' : 'purchase', p);
+  });
   // WO5 3.6
   sub('boss:start', () => playSfx('bossRoar'));
   sub('boss:charge', () => playSfx('bossCharge'));
   sub('boss:defeated', () => playSfx('bossDefeated'));
   sub('level:descend', () => playSfx('levelDescend'));
-  sub('level:start', p => { if (p && p.index > 0) playSfx('levelStart', p); });
+  sub('level:start', onLevelStart);
   sub('purchase:denied', () => playSfx('denied'));
   sub('box:opened', () => playSfx('boxOpened'));
   sub('barricade:board', p => playSfx('board', p));
+  // WO7
+  sub('perk:bought', p => playSfx('perkJingle', p));
+  sub('perk:lost', () => playSfx('perkLost'));
+  sub('player:downed', p => playSfx('playerDowned', p));
+  sub('player:revived', () => playSfx('playerRevived'));
+  sub('melee:swing', () => playSfx('meleeSwing'));
+  sub('melee:hit', p => playSfx('meleeHit', p));
+  sub('boss:spit', () => playSfx('bossSpit'));
+  sub('game:over', () => stopLabHum());
+  sub('level:descend', () => stopLabHum());
 }

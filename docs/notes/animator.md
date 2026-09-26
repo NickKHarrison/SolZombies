@@ -91,3 +91,32 @@ The pose and weight tests rely on the 3.4 contract that pistol is `onehand` and 
     - the flip passes through the aim side.
   - The sprint test tolerates `sprintCycleMult = 1`.
 - `npm test`: 286/286.
+
+## WO7 (T3): knife swing pose (Agent B)
+- **Input:** `player.meleeT` is the number of seconds left in the swing. `weapons.meleeAttack` sets it to `MELEE.swingTime` (0.25). The animator only reads it and never decrements it. The sim owner (player.js or weapons.js) must count it down to 0 each update.
+- **New export:** `meleePose(player)` returns `{ active, melee, meleeFrame }` and is pure.
+  - `melee = clamp(1 - meleeT / MELEE.swingTime, 0, 1)`.
+  - `meleeFrame = melee < 0.4 ? 0 : 1`. `MELEE_THRUST_AT = 0.4` is a module constant and could move to `MELEE.thrustAt` in config.
+  - A missing, NaN or <= 0 `meleeT`, or a null player, gives `{ false, 0, 0 }`.
+  - A missing or invalid `swingTime` falls back to 0.25. `MELEE` is read through `import * as CONFIG` and guarded.
+- **New anim fields (read-only for render, Agent C):**
+  - `anim.pose`: `'knife'` while `meleeT > 0`, otherwise the gun pose as before (`onehand` | `twohand` | `heavy`).
+  - `anim.melee`: swing progress from 0 to 1, or 0 at rest.
+  - `anim.meleeFrame`: index into `SOLDIER.torso.knife`. 0 means cocked and 1 means thrust.
+  - `anim.gunPose`: the held gun's pose, always set, including while `pose === 'knife'`.
+- **For render (C):**
+  - When `anim.pose === 'knife'`, draw `SOLDIER.torso.knife[anim.meleeFrame]` in place of the idle, walk or reload torso.
+  - Use the same `torso.anchor` (8,8) and transform, which rotate to the aim.
+  - Do not draw the gun and ignore `reloadGunOffset`.
+  - Still draw `torso.helmet` afterwards. It matches, because the knife frames contain the same helmet pixels.
+  - Legs are unaffected.
+  - Any code that indexes `torso.idle[anim.pose]` must switch to `gunPose`, or it will get `undefined` during a swing.
+- **Precedence:** the knife pose wins over reload. The swing cancels the reload in weapons, and `reloadFrame` still follows `weapon.reloading`. It also shows with `dt = 0` and while `player.down`.
+- **Tests:** 7 new tests in `tests/animator.test.js`, for a total of 29, all passing:
+  - the fields at rest;
+  - the knife pose and `gunPose`;
+  - the 40 % boundary table;
+  - a full 60 fps swing, which gives 6 cocked updates and then 9 thrust updates;
+  - odd `meleeT` values;
+  - `dt = 0`, down and reload;
+  - the knife frames match the helmet.

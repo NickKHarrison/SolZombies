@@ -15,6 +15,7 @@
 //   .tj-base + .tj-knob inside each zone (always visible at a FIXED position set by CSS; only the
 //   knob moves while dragged, left/top in % of the zone; released knob recentres on the base)
 //   .tbtn.tbtn-reload "RELOAD", .tbtn.tbtn-swap "SWAP", .tbtn.tbtn-pause "‖", .tbtn.tbtn-action (> .tbtn-label)
+//   WO7: .tbtn.tbtn-knife "KNIFE" (button name 'knife' -> getTouchState().melee edge)
 //   pressed state: class .pressed
 
 const STICK_RADIUS_H = 0.13;  // stick travel radius as a fraction of the layer height
@@ -43,7 +44,7 @@ let promptText = null;
 let aimX = 0, aimY = 0;       // last non-zero aim direction (unit) or 0,0 before the first aim
 let firing = false;
 
-const edge = { firePressed: false, reload: false, swap: false, interact: false, pause: false, start: false };
+const edge = { firePressed: false, reload: false, swap: false, interact: false, pause: false, start: false, melee: false };
 
 function clearEdges() {
   edge.firePressed = false;
@@ -52,6 +53,7 @@ function clearEdges() {
   edge.interact = false;
   edge.pause = false;
   edge.start = false;
+  edge.melee = false;
 }
 
 function accepts(e) {
@@ -135,6 +137,7 @@ function pressButton(name, e) {
   else if (name === 'swap') edge.swap = true;
   else if (name === 'pause') edge.pause = true;
   else if (name === 'action') edge.interact = true;
+  else if (name === 'knife') edge.melee = true;
 }
 
 function releaseButton(name) {
@@ -174,7 +177,7 @@ function buildDom(root) {
     root.appendChild(s.zone);
     stickVisible(s, false);
   }
-  const defs = [['reload', 'RELOAD'], ['swap', 'SWAP'], ['pause', '‖']];
+  const defs = [['reload', 'RELOAD'], ['swap', 'SWAP'], ['knife', 'KNIFE'], ['pause', '‖']];
   for (const [name, label] of defs) {
     const b = el('div', `tbtn tbtn-${name}`, label);
     b.dataset.btn = name;
@@ -337,6 +340,7 @@ export function getTouchState() {
     interactHeld: held('action'),
     pause: edge.pause,
     start: edge.start,
+    melee: edge.melee,
   };
 }
 

@@ -2,6 +2,7 @@
 // Pure logic: no DOM. See WORK_ORDER.md 5.9 and docs/notes/shop.md.
 import { PLAYER, POINTS, PRICES, MYSTERY_BOX, SHOP, DOORS } from './config.js';
 import * as events from './events.js';
+import * as config from './config.js';
 import { WEAPONS, WALL_WEAPON_IDS, BOX_WEAPON_IDS, WONDER_WEAPON_IDS, refillAll, ammoCost } from './weapons.js';
 import * as weaponsMod from './weapons.js';
 
@@ -9,6 +10,8 @@ import * as weaponsMod from './weapons.js';
 // weapons.BOX_WALL_WEIGHT_IDS when present (namespace read so an older weapons.js still links).
 const BOX_WALL_IDS = Array.isArray(weaponsMod.BOX_WALL_WEIGHT_IDS) ? weaponsMod.BOX_WALL_WEIGHT_IDS : WALL_WEAPON_IDS;
 import { spendPoints, giveWeapon, addPoints } from './player.js';
+// WO7 perks: player.addPerk / hasPerk (Agent E) read through the namespace, guarded.
+import * as playerMod from './player.js';
 import { nearestInteractable, repairBoard } from './map.js';
 // WO4 doors: namespace import so shop.js links even before map.js exports openDoor.
 import * as mapMod from './map.js';
@@ -194,6 +197,9 @@ export function buildPrompt(state, hit) {
       kind: 'stairs', weaponId: null, cost: 0, canAfford: true, blocked: false,
       text: STAIRS_TEXT,
     };
+  }
+  if (hit.kind === 'perk') {
+    return perkPrompt(state, hit.ref);
   }
   if (hit.kind === 'barricade') {
     const b = hit.ref;
@@ -402,6 +408,9 @@ export function useStairs(state) {
 export function updateShop(state, input, dt) {
   const shop = state.shop;
   if (!shop.box) shop.box = { state: 'idle', timer: 0, weaponId: null, cycleT: 0 };
+  // WO7 FIX-3 (QA review L2): machines on a level loaded mid-fade show the sold-out state from
+  // the first rendered frame, so sync before the transition early-return.
+  syncPerkMachines(state);
   // WO5: nothing is interactable while the level fade runs.
   if (state.transition) {
     shop.prompt = null;
@@ -412,7 +421,8 @@ export function updateShop(state, input, dt) {
 
   const player = state.player;
   const map = state.map;
-  if (!player || !map || player.down) {
+  syncPerkMachines(state);
+  if (!player || !map || player.down || player.downT > 0) {
     shop.prompt = null;
     if (player) player.repairTimer = 0;
     return;
@@ -450,9 +460,165 @@ export function updateShop(state, input, dt) {
   } else if (hit.kind === 'stairs') {
     useStairs(state);
     if (state.transition) { shop.prompt = null; return; }
+  } else if (hit.kind === 'perk') {
+    buyPerk(state, hit.ref);
   } else if (hit.kind === 'box') {
     if (shop.box.state === 'idle') spinBox(state);
     else if (shop.box.state === 'offering') takeBoxWeapon(state);
   }
   shop.prompt = buildPrompt(state, hit);
+}
+
+// ---------------------------------------------------------------------------
+// WO7 1.2 / 3.3: perk machines
+// ---------------------------------------------------------------------------
+
+function perkList() {
+  return (config.PERKS && config.PERKS.list) || {};
+}
+
+function maxPerks() {
+  const n = config.PERKS && config.PERKS.maxPerks;
+  return Number.isFinite(n) ? n : 4;
+}
+
+/** Perk definition from config PERKS.list, or null. */
+export function perkDef(perkId) {
+  const list = perkList();
+  return Object.prototype.hasOwnProperty.call(list, perkId) ? list[perkId] : null;
+}
+
+function reviveMaxUses() {
+  const d = perkDef('revive');
+  return d && Number.isFinite(d.maxUses) ? d.maxUses : 3;
+}
+
+function playerPerks(player) {
+  return player && Array.isArray(player.perks) ? player.perks : [];
+}
+
+function holdsPerk(player, perkId) {
+  if (typeof playerMod.hasPerk === 'function') return !!playerMod.hasPerk(player, perkId);
+  return playerPerks(player).includes(perkId);
+}
+
+/**
+ * Price of the next purchase of `perkId` for `player` (WO7 FIX-3, balance #6). A perk with a
+ * `costs` array (Quick Revive: [50, 150, 300]) charges costs[purchases so far] (clamped to the
+ * last entry; Quick Revive purchases = player.reviveUses); otherwise def.cost. null if unknown.
+ */
+export function perkCost(player, perkId) {
+  const def = perkDef(perkId);
+  if (!def) return null;
+  const steps = Array.isArray(def.costs) ? def.costs.filter((c) => Number.isFinite(c) && c >= 0) : [];
+  if (steps.length) {
+    const n = perkId === 'revive' ? Math.max(0, Math.floor(Number(player && player.reviveUses) || 0)) : 0;
+    return steps[Math.min(n, steps.length - 1)];
+  }
+  return Number.isFinite(def.cost) ? def.cost : 0;
+}
+
+/** True when Quick Revive can no longer be bought this game (reviveUses >= maxUses). */
+export function reviveSoldOut(player) {
+  return !!player && (player.reviveUses || 0) >= reviveMaxUses();
+}
+
+/**
+ * Marks every Quick Revive machine on state.map sold out (or not) from player.reviveUses, and sets
+ * machine.price to the next purchase price (perkCost; FIX-3).
+ * Bumps map.version when a flag changes so render repaints. Called every updateShop and after a
+ * purchase, so machines on a newly loaded level pick up the sold-out state too. Returns a bool
+ * (whether anything changed).
+ */
+export function syncPerkMachines(state) {
+  const map = state && state.map;
+  if (!map || !Array.isArray(map.perkMachines) || !state.player) return false;
+  const out = reviveSoldOut(state.player);
+  let changed = false;
+  for (const m of map.perkMachines) {
+    if (!m) continue;
+    const want = m.perkId === 'revive' ? out : false;
+    if (!!m.soldOut !== want) { m.soldOut = want; changed = true; }
+    // FIX-3: current price (escalating Quick Revive) for the machine plate; bumps version too.
+    const price = perkCost(state.player, m.perkId);
+    if (price !== null && m.price !== price) { m.price = price; changed = true; }
+  }
+  if (changed) map.version = (map.version || 0) + 1;
+  return changed;
+}
+
+/**
+ * Why a perk cannot be bought right now: 'soldout' | 'owned' | 'limit' | 'unknown' | null.
+ * Order: sold out, already held, cap reached.
+ */
+export function perkBlockReason(player, machine) {
+  const id = machine && machine.perkId;
+  if (!perkDef(id)) return 'unknown';
+  if (id === 'revive' && (machine.soldOut || reviveSoldOut(player))) return 'soldout';
+  if (holdsPerk(player, id)) return 'owned';
+  if (playerPerks(player).length >= maxPerks()) return 'limit';
+  return null;
+}
+
+/** Prompt for a perk machine: "Press F for Juggernog [250]" or a blocked text (1.2). */
+export function perkPrompt(state, machine) {
+  const player = state && state.player;
+  if (!player || !machine) return null;
+  const def = perkDef(machine.perkId);
+  if (!def) return null;
+  const cost = perkCost(player, machine.perkId);
+  const pts = player.points || 0;
+  const reason = perkBlockReason(player, machine);
+  let text = `Press F for ${def.name} [${cost}]`;
+  if (reason === 'soldout') text = `${def.name} sold out`;
+  else if (reason === 'owned') text = `Already have ${def.name}`;
+  else if (reason === 'limit') text = 'Perk limit reached';
+  return {
+    kind: 'perk', weaponId: null, perkId: machine.perkId, machineId: machine.id, cost,
+    canAfford: pts >= cost, blocked: !!reason, text,
+  };
+}
+
+// Fallback when player.addPerk is missing (sibling not landed): list only, no effects.
+function addPerkFallback(state, perkId) {
+  const p = state.player;
+  if (!Array.isArray(p.perks)) p.perks = [];
+  if (p.perks.includes(perkId) || p.perks.length >= maxPerks()) return false;
+  p.perks.push(perkId);
+  if (state.stats) state.stats.perksBought = (state.stats.perksBought || 0) + 1;
+  return true;
+}
+
+/**
+ * Buys the perk sold by `machine` (3.3). Blocked (sold out / already held / cap) -> false with no
+ * charge and no event. Cannot afford -> purchase:denied {kind:'perk', cost, have}. Otherwise
+ * spendPoints, player.addPerk (refund if it refuses), Quick Revive increments player.reviveUses
+ * and sells out every revive machine at maxUses, then purchase:made {kind:'perk', id, cost} and
+ * perk:bought {perkId, cost}.
+ */
+export function buyPerk(state, machine) {
+  const player = state && state.player;
+  if (!player || !machine || state.transition || player.down || player.downT > 0) return false;
+  const def = perkDef(machine.perkId);
+  if (!def) return false;
+  if (perkBlockReason(player, machine)) return false;
+  const perkId = machine.perkId;
+  const cost = perkCost(player, perkId); // FIX-3: escalating Quick Revive price
+  const have = player.points;
+  if (have < cost || !spendPoints(state, cost)) {
+    events.emit('purchase:denied', { kind: 'perk', cost, have });
+    return false;
+  }
+  const add = typeof playerMod.addPerk === 'function' ? playerMod.addPerk : addPerkFallback;
+  if (add(state, perkId) === false) {
+    player.points += cost; // player refused (cap / duplicate): refund, no event
+    return false;
+  }
+  if (perkId === 'revive') {
+    player.reviveUses = (player.reviveUses || 0) + 1;
+    syncPerkMachines(state);
+  }
+  events.emit('purchase:made', { kind: 'perk', id: perkId, cost });
+  events.emit('perk:bought', { perkId, cost });
+  return true;
 }

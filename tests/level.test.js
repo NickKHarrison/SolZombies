@@ -6,8 +6,10 @@ import { createEmptyState } from '../src/state.js';
 import { LEVELS, levelByIndex } from '../src/levels/levels.js';
 import {
   createLevelState, levelDifficulty, startLevel, beginDescent, updateLevel, nextLevelIndex,
-  setLoadMapFunction, loopTheme, romanNumeral,
+  setLoadMapFunction, loopTheme, romanNumeral, loopWallbuys,
 } from '../src/level.js';
+import { WEAPONS } from '../src/weapons.js';
+import * as mapMod from '../src/map.js';
 
 const N = LEVELS.length;
 const close = (a, b) => Math.abs(a - b) < 1e-9;
@@ -49,24 +51,26 @@ test('levelDifficulty: base table and loop scaling', () => {
   const d1 = levelDifficulty(1);
   assert.ok(close(d1.healthMult, 1.5) && close(d1.speedMult, 1.1) && close(d1.countMult, 1.25));
   assert.equal(d1.sprintShift, 3);
+  // WO7 Phase 0: authored levels use their def.difficulty; generic in LEVELS.length (was 2).
+  for (let i = 0; i < N; i++) assert.deepEqual(levelDifficulty(i), { ...LEVELS[i].difficulty }, `authored level ${i}`);
   // Past the last authored level: compound on the previous level (FIX-1, QA balance #1/#2).
+  // The cap never pulls speed below the last authored level's own value (level.js max()).
   const L = LEVELS_CFG.loop;
+  const last = LEVELS[N - 1].difficulty;
+  const capped = (k) => Math.max(last.speedMult, Math.min(L.speedMultCap, last.speedMult * L.speedMult ** k));
   const dl = levelDifficulty(N);
-  assert.ok(close(dl.healthMult, 1.5 * L.healthMult));
-  assert.ok(close(dl.countMult, 1.25 * L.countMult));
-  assert.ok(close(dl.speedMult, Math.min(L.speedMultCap, 1.1 * L.speedMult)));
-  assert.equal(dl.sprintShift, 3 + L.sprintShift);
+  assert.ok(close(dl.healthMult, last.healthMult * L.healthMult));
+  assert.ok(close(dl.countMult, last.countMult * L.countMult));
+  assert.ok(close(dl.speedMult, capped(1)));
+  assert.equal(dl.sprintShift, last.sprintShift + L.sprintShift);
   const dl2 = levelDifficulty(2 * N + 1);
-  assert.ok(close(dl2.healthMult, 1.5 * L.healthMult ** 4));
-  assert.ok(close(dl2.countMult, 1.25 * L.countMult ** 4));
-  assert.equal(dl2.sprintShift, 3 + 4 * L.sprintShift);
-  assert.ok(close(dl2.speedMult, L.speedMultCap));
-  // Balance report table: L3 1.8 / 1.375 / 1.133 / 5, L4 2.16 / 1.5125 / 1.15 / 7.
-  const l3 = levelDifficulty(2), l4 = levelDifficulty(3);
-  assert.ok(close(l3.healthMult, 1.8) && close(l3.countMult, 1.375) && close(l3.speedMult, 1.133) && l3.sprintShift === 5);
-  assert.ok(close(l4.healthMult, 2.16) && close(l4.countMult, 1.5125) && close(l4.speedMult, 1.15) && l4.sprintShift === 7);
+  const k2 = 2 * N + 1 - (N - 1);
+  assert.ok(close(dl2.healthMult, last.healthMult * L.healthMult ** k2));
+  assert.ok(close(dl2.countMult, last.countMult * L.countMult ** k2));
+  assert.equal(dl2.sprintShift, last.sprintShift + k2 * L.sprintShift);
+  assert.ok(close(dl2.speedMult, capped(k2)));
   // `loop` argument is ignored beyond compatibility: the index decides.
-  assert.deepEqual(levelDifficulty(3, 0), levelDifficulty(3));
+  assert.deepEqual(levelDifficulty(N + 1, 0), levelDifficulty(N + 1));
 });
 
 test('levelDifficulty: monotonic every descent (health/count/sprint strictly, speed capped)', () => {
@@ -78,7 +82,7 @@ test('levelDifficulty: monotonic every descent (health/count/sprint strictly, sp
     assert.ok(d.countMult > prev.countMult, `count ${i}`);
     assert.ok(d.sprintShift > prev.sprintShift, `sprintShift ${i}`);
     assert.ok(d.speedMult >= prev.speedMult - 1e-12, `speed ${i}`);
-    if (i >= N) assert.ok(d.speedMult <= L.speedMultCap + 1e-12, `speed cap ${i}`);
+    if (i >= N) assert.ok(d.speedMult <= Math.max(L.speedMultCap, LEVELS[N - 1].difficulty.speedMult) + 1e-12, `speed cap ${i}`);
     prev = d;
   }
 });
@@ -281,6 +285,72 @@ test('loop variants: numbered names, numbered boss, a distinct theme object per 
   }
   // deterministic
   assert.deepEqual(loopTheme(LEVELS[1].theme, 2), loopTheme(LEVELS[1].theme, 2));
+});
+
+test('FIX-3 (L1): startLevel clears acid pools and globs from the old level', () => {
+  const s = setup();
+  s.hazards = [{ id: 1, kind: 'acid', x: 5, y: 5, r: 50, ttl: 3 }];
+  s.acidGlobs = [{ id: 2 }, { id: 3 }];
+  startLevel(s, 1);
+  assert.deepEqual(s.hazards, []);
+  assert.deepEqual(s.acidGlobs, []);
+  // also through a descent: empty right after the midpoint swap (fade still running)
+  s.hazards.push({ id: 4 }); s.acidGlobs.push({ id: 5 });
+  beginDescent(s);
+  updateLevel(s, LEVELS_CFG.fadeSeconds / 2 + 0.01);
+  assert.ok(s.transition, 'still fading');
+  assert.equal(s.hazards.length + s.acidGlobs.length, 0);
+});
+
+test('FIX-3 (balance #4): loop levels sell upgraded wall guns, letters kept, base untouched', () => {
+  const up = LEVELS_CFG.loopWallUpgrade;
+  assert.ok(up && typeof up === 'object');
+  for (const [from, to] of Object.entries(up)) {
+    assert.ok(WEAPONS[from] && WEAPONS[to], `${from} -> ${to} known`);
+    assert.ok((WEAPONS[to].tier || 1) > (WEAPONS[from].tier || 1), `${from} -> ${to} is an upgrade`);
+  }
+  const baseL1 = { ...LEVELS[0].wallbuys };
+  for (let pos = 0; pos < N; pos++) {
+    const base = LEVELS[pos];
+    const l0 = createLevelState(pos), lv = createLevelState(N + pos);
+    assert.equal(l0.def.wallbuys, base.wallbuys, 'loop 0 keeps the authored def');
+    assert.notEqual(lv.def, base); assert.notEqual(lv.def.wallbuys, base.wallbuys);
+    assert.deepEqual(Object.keys(lv.def.wallbuys).sort(), Object.keys(base.wallbuys).sort(), 'letters kept');
+    for (const [k, id] of Object.entries(base.wallbuys)) assert.equal(lv.def.wallbuys[k], up[id] || id, `${base.id} ${k}`);
+    assert.equal(createLevelState(N + pos).def, lv.def, 'memoized');
+    assert.deepEqual(createLevelState(2 * N + pos).def.wallbuys, lv.def.wallbuys, 'same upgrade every loop');
+  }
+  assert.deepEqual(LEVELS[0].wallbuys, baseL1, 'base def not mutated');
+  // level 4 (BUNKER II) sells tier-3 guns: the requested level-1 swaps
+  const l4 = createLevelState(N).def.wallbuys;
+  const ids = new Set(Object.values(l4));
+  for (const id of ['m8a7', 'peacekeeper', 'hg40']) assert.ok(ids.has(id), `level 4 sells ${id}`);
+  for (const id of ['sheiva', 'kn44', 'kuda', 'lcar9', 'rk5', 'krm262', 'argus', 'hvk30', 'icr1', 'bootlegger']) {
+    assert.ok(!ids.has(id), `level 4 no longer sells ${id}`);
+  }
+  // level 5 (CATACOMBS II) upgrades tier 2 -> tier 3 where it makes sense
+  const l5 = new Set(Object.values(createLevelState(N + 1).def.wallbuys));
+  for (const id of ['hg40', 'm8a7', 'peacekeeper']) assert.ok(l5.has(id), `level 5 sells ${id}`);
+  assert.deepEqual(loopWallbuys(null), {});
+  assert.deepEqual(loopWallbuys({ x: 'nope' }), { x: 'nope' });
+});
+
+test('FIX-3: the real map loader builds level 4 wall buys (tier-3 gun + ammo) from the loop def', () => {
+  setLoadMapFunction(null);
+  const def = createLevelState(N).def;
+  const m = mapMod.loadMap(def);
+  const wb = (m.wallBuys || m.wallbuys || []).map((w) => w.weaponId);
+  assert.ok(wb.length > 0, 'wall buys parsed');
+  assert.ok(wb.includes('peacekeeper') && wb.includes('m8a7') && wb.includes('hg40'));
+  assert.ok(!wb.includes('kn44'));
+  setLoadMapFunction(fakeLoad);
+});
+
+test('FIX-3 (balance #5): loop speed cap 1.3 lets speed rise past level 3', () => {
+  assert.equal(LEVELS_CFG.loop.speedMultCap, 1.3);
+  const s3 = levelDifficulty(N - 1).speedMult, s4 = levelDifficulty(N).speedMult, s5 = levelDifficulty(N + 1).speedMult;
+  assert.ok(s4 > s3 && s5 > s4, `${s3} < ${s4} < ${s5}`);
+  assert.equal(levelDifficulty(N + 20).speedMult, 1.3);
 });
 
 test('cleanup: restore default loader', () => {

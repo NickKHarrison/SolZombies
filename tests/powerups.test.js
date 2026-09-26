@@ -118,6 +118,28 @@ test('downed player cannot pick up', () => {
   assert.equal(s.powerups.items.length, 1);
 });
 
+test('FIX-3 (L6): no pickup during the Quick Revive down pause; active timers keep running', () => {
+  const s = fresh();
+  s.player = fakePlayer(0, 0);
+  s.player.downT = 1.2;
+  const got = [];
+  events.on('powerup:collected', (p) => got.push(p.type));
+  events.on('powerup:expired', (p) => got.push('expired:' + p.type));
+  applyPowerup(s, 'instaKill'); // active before going down
+  spawnPowerup(s, 'deathMachine', 0, 0);
+  spawnPowerup(s, 'maxAmmo', 10, 0);
+  s.time = POWERUPS.duration.instaKill + 1;
+  updatePowerups(s, 0.016);
+  assert.equal(s.powerups.items.length, 2, 'items stay on the floor');
+  assert.ok(!isActive(s, 'deathMachine'));
+  assert.deepEqual(got, ['expired:instaKill'], 'the timed power-up still ran out while down');
+  // pause over: picked up on the next frame
+  s.player.downT = 0;
+  updatePowerups(s, 0.016);
+  assert.equal(s.powerups.items.length, 0);
+  assert.ok(got.includes('deathMachine') && got.includes('maxAmmo'));
+});
+
 test('timed power-up: isActive/timeLeft and re-pickup resets timer', () => {
   const s = fresh();
   assert.equal(timeLeft(s, 'instaKill'), 0);

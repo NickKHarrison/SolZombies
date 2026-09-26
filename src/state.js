@@ -19,11 +19,18 @@ export function createEmptyState(seed = Date.now()) {
                               // updateRounds does no spawning and no round-end check (boss fight).
     powerups: { items: [], active: {}, dropsThisRound: 0, nuke: null },
     shop: { prompt: null, box: { state: 'idle', timer: 0, weaponId: null } },
-    stats: { kills: 0, shotsFired: 0, shotsHit: 0, pointsEarned: 0, roundReached: 0 },
+    stats: {
+      kills: 0, shotsFired: 0, shotsHit: 0, pointsEarned: 0, roundReached: 0,
+      // WO7 (main.js increments these from events; see docs/notes/wo7-scaffold.md)
+      timeSurvived: 0, levelReached: 1, bossesKilled: 0, powerupsCollected: 0, doorsOpened: 0,
+      meleeKills: 0, perksBought: 0, bestWeaponId: null,
+    },
     debug: false,
     // WO5
     level: null,              // level.createLevelState(): { index, loop, def, difficulty, name }
     boss: null,               // boss.createBossState(): { phase, bossId, name, hp, maxHp, ... }
     transition: null,         // level.beginDescent(): { t, dur, nextIndex, swapped } while fading
+    // WO7
+    hazards: [],              // boss.js acid pools { id, kind: 'acid', x, y, r, ttl, maxTtl, dps }
   };
 }

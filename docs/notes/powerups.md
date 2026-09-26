@@ -101,3 +101,8 @@ map was a stub.
   `zombie.bossHitDamage`. New test in `tests/powerups.test.js` pins exactly 10 % with Insta-Kill active.
 - Insta-Kill vs the boss is now x2 damage (capped at 3 % max HP per hit), not a 5 % floor; see
   docs/notes/zombie.md. Minions still die instantly.
+
+## WO7 FIX-3
+
+- **L6:** there is no pickup while `player.downT > 0` (the Quick Revive down pause), matching BO3. Items stay on the floor with their ttl running, and active timed power-ups keep counting down.
+- **Tests:** `tests/powerups.test.js`.

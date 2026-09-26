@@ -117,3 +117,44 @@
 - `zombie:killed` goes through `onZombieKilledSfx`: kills with `cause === 'debug'` (the leftover
   minions `finishFight` clears) play nothing, and at most one death groan plays per 12 ms (one
   per frame), so a nuke or a mass kill no longer stacks 10+ groans.
+
+## WO7 (Agent L, T2/T3/T5): perks, Quick Revive, knife, acid boss, lab ambience
+- New SFX (all subscribed in `initAudio`, so re-init safe; silent no-op without a context; each
+  builder runs inside `playSfx`'s try/catch). New `playSfx` names: `perkJingle, playerDowned,
+  playerRevived, perkLost, meleeSwing, meleeHit, bossSpit, acidSizzle`.
+  - `perk:bought` -> `perkJingle` (ui bus): a per-perk 4-6 note chiptune motif (`PERK_MOTIFS`,
+    keyed by `perkId`; jugg low marching square, revive bright triangle bells, speed fast square
+    run, dtap repeated-note start, stamin bouncy triangle, mule quirky 6-note; unknown id -> a
+    default arpeggio) with a quiet octave-down triangle shadow and a sparkle, then a "drink" gulp
+    (two rising low sine glugs + dull noise, a soft exhale). ~1.1-1.3 s total.
+  - `purchase:made` with `kind === 'perk'` now plays nothing (the jingle replaces the cash tick).
+  - `player:downed` -> falling saw/sine (180->45 Hz, 90->32 Hz) over `reviveIn` (clamped 0.6-3 s,
+    default 1.5) with a lub-dub heartbeat every 0.55 s (player bus).
+  - `player:revived` -> rising sting: saw sweep 110->440 Hz, G-major square arpeggio, held
+    triangle + shimmer, a rising air noise.
+  - `perk:lost` -> short descending square/triangle blip, rate limited 0.09 s (removeAllPerks
+    emits one per perk, so a 4-perk loss is one blip rather than a pile).
+  - `melee:swing` -> whoosh: band-passed noise sweeping 500->3200 Hz plus a thin high sweep
+    (player bus), rate limited 0.08 s.
+  - `melee:hit` -> wet thud (sine drop + lowpassed noise + a resonant bandpass squelch sweeping
+    down); `killed: true` is lower, longer and louder with an extra triangle body. Zombies bus,
+    rate limited 30 ms (maxTargets 3 hits in one swing -> one thud).
+  - `boss:spit` -> gurgle (looped noise through a Q 12 bandpass at 420 Hz whose centre an LFO
+    wobbles +-260 Hz at 9->16 Hz) plus a rising throat voice, on the compressed boss bus; rate
+    limited 0.3 s. **No hazard-spawn event exists**, so the acid sizzle (fading high-passed hiss +
+    crackle pops, world bus) is scheduled on the audio clock `ACID_SIZZLE_DELAY` = 0.8 s after the
+    spit (per the task brief; note BOSS.acid telegraph + flight is 1.3 s, so if an integrator adds a
+    `hazard:spawned`-style event, subscribe `acidSizzle` to it and drop the delayed call).
+  - `level:start` for the LABORATORY (payload `name` matches /LABORATORY/i; if no name, `index === 2`)
+    starts a looping electrical hum: 60 Hz saw + 120/180/240 Hz harmonics through a 700 Hz lowpass,
+    a 0.23 Hz level flutter and a faint 4.2 kHz crackle bed, on its own gain (0.035, 1.5 s fade-in)
+    into the world bus -- well under every other sound. At most one instance. It stops (0.3 s fade)
+    on any other `level:start`, `level:descend`, `game:over`, `game:restart`, and on every
+    `initAudio()` re-init. The existing `levelStart` swell still plays for index > 0.
+- Verification: `node --check src/audio.js` ok; Node import without `window` + `initAudio/playSfx/
+  setMuted` is silent. Fake-AudioContext smoke test: perk-kind purchase builds 0 nodes; every new
+  event builds nodes without throwing; lab hum starts once and is stopped by game over, descend,
+  level change, re-init and restart; one context across restarts. Chrome (`?debug=1`, port 8213):
+  emitted every new event plus lab start/change/restart via `__game.modules.events`, no console
+  errors. `npm test`: 438/441; the 3 failures (WO7 exports for zombie sprites / meleeAttack / hud,
+  weapon tables, WO5 wall prices) belong to agents still working on those files, not audio.

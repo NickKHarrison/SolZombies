@@ -5,7 +5,7 @@
 import { ZOMBIE, TILE, BOSS } from './config.js';
 import { emit } from './events.js';
 import { nextId, dist, norm, clamp } from './math.js';
-import { tearBoard, barricadeOpen, resolveCircle } from './map.js';
+import { tearBoard, barricadeOpen, resolveCircle, isWalkable, inArena } from './map.js';
 import { getFlowDir } from './pathfinding.js';
 import { damagePlayer } from './player.js';
 
@@ -153,6 +153,21 @@ function tileTypeAt(map, x, y) {
 }
 
 function isAlive(z) { return z.mode !== 'dying' && !z._killed; }
+
+// WO7 downed-player rule: zombies (every kind) never start an attack on, or deal damage to, a
+// player who is down, in the Quick Revive pause (downT > 0) or invulnerable after a revive
+// (invulnT > 0). They keep chasing.
+export function playerTargetable(p) {
+  return !!p && !p.down && !(p.downT > 0) && !(p.invulnT > 0);
+}
+
+// WO7: boss ability from the level def ('charge' default | 'acid'); unknown values -> 'charge'.
+export function bossAbilityOf(state, opts) {
+  const o = opts && opts.ability;
+  const def = state && state.level && state.level.def && state.level.def.boss;
+  const a = o || (def && def.ability);
+  return a === 'acid' ? 'acid' : 'charge';
+}
 
 // WO5: reach grows/shrinks with the body (boss radius 34, minion 10); a normal zombie keeps
 // exactly ZOMBIE.attackRange.
@@ -321,6 +336,9 @@ export function spawnZombie(state, spawnPoint, opts = {}) {
     z.tint = (opts && opts.tint) || (def && def.tint) || '#7a1f1f';
     z.charge = { timer: BOSS.chargeEvery, phase: 'idle', dx: 0, dy: 0, t: 0 };
     z.summonTimer = BOSS.summonEvery;
+    // WO7: per-level ability. An acid boss keeps an idle z.charge (render-safe) but never charges.
+    z.ability = bossAbilityOf(state, opts);
+    if (z.ability === 'acid') z.acid = { timer: acidCfg().every, phase: 'idle', t: 0 };
   }
   state.zombies.push(z);
   emit('zombie:spawned', { zombie: z, kind });
@@ -368,6 +386,7 @@ export function killZombie(state, z, cause = 'weapon') {
   z.tearOwner = false;
   z.kvx = 0; z.kvy = 0; z.stun = 0;
   if (z.charge) { z.charge.phase = 'idle'; z.charge.t = 0; }
+  if (z.acid) { z.acid.phase = 'idle'; z.acid.t = 0; }
   pushBlood(state, z.x, z.y, true);
   if (z.kind === 'boss' && state && Array.isArray(state.effects)) {
     // WO5: bigger pool + flash for the 2 s boss death.
@@ -494,7 +513,7 @@ function updateTearing(state, z, dt, owners) {
 
 function updateChasing(state, z, dt) {
   const p = state.player;
-  if (p && !p.down && inAttackRange(z, p)) {
+  if (playerTargetable(p) && inAttackRange(z, p)) {
     z.mode = 'attacking';
     z.attackTimer = z.attackCd <= 0 ? windupOf(z) : 0;
     z.vx = 0; z.vy = 0;
@@ -535,7 +554,9 @@ function blockByContacts(state, z, vx, vy) {
 function updateAttacking(state, z, dt) {
   const p = state.player;
   z.vx = 0; z.vy = 0;
-  if (!p || p.down) { z.mode = 'chasing'; z.attackTimer = 0; return; }
+  // WO7: a downed / reviving / invulnerable player cancels any swing (no damage) and the zombie
+  // goes back to chasing.
+  if (!playerTargetable(p)) { z.mode = 'chasing'; z.attackTimer = 0; return; }
   // Attackers keep their spacing too (playtest.md #1), so a crowd forms a ring, not a blob.
   const sep = separation(state, z);
   if (sep.x || sep.y) { moveAndCollide(state, z, sep.x, sep.y, dt); z.vx = 0; z.vy = 0; }
@@ -567,7 +588,7 @@ function updateBossCharge(state, z, dt) {
     if (c.timer > 0) c.timer -= dt;
     // Never interrupt a swing that is already winding up.
     const busy = z.mode === 'attacking' && z.attackTimer > 0;
-    if (c.timer <= 0 && p && !p.down && !busy) {
+    if (c.timer <= 0 && playerTargetable(p) && !busy) {
       c.phase = 'telegraph'; c.t = 0; c.dx = 0; c.dy = 0;
       z.mode = 'chasing'; z.attackTimer = 0; z.vx = 0; z.vy = 0;
       emit('boss:charge', { x: z.x, y: z.y });
@@ -600,12 +621,12 @@ function updateBossCharge(state, z, dt) {
       // Progress along the dash direction this sub-step; a wall eats most of it.
       const prog = (z.x - bx) * c.dx + (z.y - by) * c.dy;
       if (prog < (step / n) * 0.5) { blocked = true; break; }
-      if (p && !p.down && dist(z.x, z.y, p.x, p.y) <= z.radius + p.radius + 2) {
+      if (playerTargetable(p) && dist(z.x, z.y, p.x, p.y) <= z.radius + p.radius + 2) {
         chargeHitPlayer(state, z, c);
         return true;
       }
     }
-    if (p && !p.down && !c.hit && dist(z.x, z.y, p.x, p.y) <= z.radius + p.radius + 2) {
+    if (playerTargetable(p) && !c.hit && dist(z.x, z.y, p.x, p.y) <= z.radius + p.radius + 2) {
       chargeHitPlayer(state, z, c);
       return true;
     }
@@ -652,6 +673,113 @@ function chargeHitPlayer(state, z, c) {
   c.phase = 'recover'; c.t = 0; c.wall = false;
   z.vx = 0; z.vy = 0;
   z.attackCd = Math.max(z.attackCd || 0, z.attackCooldown || BOSS.attackCooldown);
+}
+
+// ---------------------------------------------------------------------------
+// WO7 acid boss (THE SUBJECT): idle (hunt + melee) -> telegraph (still, boss:spit) -> lob globs.
+// ---------------------------------------------------------------------------
+
+const ACID_DEFAULTS = { every: 6, telegraph: 0.5, globs: 3, spread: 0.44, flight: 0.8, poolRadius: 50, poolSeconds: 5, dps: 25 };
+export function acidCfg() { return { ...ACID_DEFAULTS, ...(BOSS.acid || {}) }; }
+
+// Returns true while the telegraph owns the frame (normal AI skipped).
+function updateBossAcid(state, z, dt) {
+  const A = acidCfg();
+  const a = z.acid || (z.acid = { timer: A.every, phase: 'idle', t: 0 });
+  const p = state.player;
+  if (a.phase === 'idle') {
+    if (a.timer > 0) a.timer -= dt;
+    const busy = z.mode === 'attacking' && z.attackTimer > 0;
+    if (a.timer <= 0 && playerTargetable(p) && !busy) {
+      a.phase = 'telegraph'; a.t = 0;
+      z.mode = 'chasing'; z.attackTimer = 0; z.vx = 0; z.vy = 0;
+      emit('boss:spit', { x: z.x, y: z.y });
+      return true;
+    }
+    return false;
+  }
+  if (a.phase === 'telegraph') {
+    a.t += dt;
+    z.vx = 0; z.vy = 0;
+    if (a.t >= A.telegraph) {
+      if (p) lobAcid(state, z, p.x, p.y, A);
+      a.phase = 'idle'; a.t = 0; a.timer = A.every;
+    }
+    return true;
+  }
+  a.phase = 'idle';
+  return false;
+}
+
+// Pushes A.globs acid globs into state.acidGlobs (NOT state.bullets: weapons.updateBullets would
+// treat them as ray-gun projectiles and detonate them on zombies). Glob i flies toward the
+// player's position rotated by an even fan over [-spread, +spread] around the boss, at the
+// player's distance, and lands exactly at (tx, ty) after A.flight seconds (arc is visual only).
+// WO7 FIX-5 (playtest #4): an acid target on a walkable floor tile (inside `arena` when it is a
+// Set of tile keys) is kept as is; otherwise it snaps to the centre of the nearest such tile
+// (Euclidean from the intended point). Falls back to the player's position (px, py) if none.
+export function acidLandingPoint(m, arena, x, y, px, py) {
+  const ok = (tx, ty) => isWalkable(m, tx, ty, false) && (!arena || arena.has(ty * m.cols + tx));
+  const cx = Math.floor(x / TILE), cy = Math.floor(y / TILE);
+  if (ok(cx, cy)) return { x, y };
+  let best = null, bestD = Infinity;
+  const consider = (tx, ty) => {
+    const wx = (tx + 0.5) * TILE, wy = (ty + 0.5) * TILE;
+    const d = (wx - x) * (wx - x) + (wy - y) * (wy - y);
+    if (d < bestD) { bestD = d; best = { x: wx, y: wy }; }
+  };
+  if (arena) {
+    for (const k of arena) {
+      const tx = k % m.cols, ty = (k - tx) / m.cols;
+      if (ok(tx, ty)) consider(tx, ty);
+    }
+  } else {
+    // Ring search; a ring at Chebyshev radius r is >= (r - 1) tiles away, so stop once past best.
+    const maxR = Math.max(m.cols, m.rows);
+    for (let r = 1; r <= maxR; r++) {
+      if (best && (r - 1) * TILE > Math.sqrt(bestD)) break;
+      for (let ty = cy - r; ty <= cy + r; ty++) {
+        for (let tx = cx - r; tx <= cx + r; tx++) {
+          if (Math.max(Math.abs(tx - cx), Math.abs(ty - cy)) !== r) continue;
+          if (ok(tx, ty)) consider(tx, ty);
+        }
+      }
+    }
+  }
+  if (best) return best;
+  return (Number.isFinite(px) && Number.isFinite(py)) ? { x: px, y: py } : { x, y };
+}
+
+export function lobAcid(state, z, px, py, A = acidCfg()) {
+  if (!state || !z) return [];
+  if (!Array.isArray(state.acidGlobs)) state.acidGlobs = [];
+  const n = Math.max(1, Math.floor(A.globs) || 1);
+  let d = Math.hypot(px - z.x, py - z.y);
+  const base = d > 1e-6 ? Math.atan2(py - z.y, px - z.x) : (z.knockAngle || 0);
+  if (!(d > 1e-6)) d = 0;
+  const flight = A.flight > 0 ? A.flight : 0.8;
+  const m = state.map;
+  // Landing set: the arena floor while the boss stands in the arena, else any walkable tile
+  // (null). undefined = no usable tile grid (bare test maps), targets are left as computed.
+  const arena = (m && m.tiles && m.cols > 0 && m.rows > 0)
+    ? ((m.arenaTiles && m.arenaTiles.size && inArena(m, z.x, z.y)) ? m.arenaTiles : null)
+    : undefined;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const off = n === 1 ? 0 : -A.spread + (2 * A.spread * i) / (n - 1);
+    let tx = z.x + Math.cos(base + off) * d, ty = z.y + Math.sin(base + off) * d;
+    if (m && m.width > 0 && m.height > 0) { tx = clamp(tx, 0, m.width); ty = clamp(ty, 0, m.height); }
+    // WO7 FIX-5 (playtest #4): land on reachable floor, never on a pillar or past the arena wall.
+    if (arena !== undefined) ({ x: tx, y: ty } = acidLandingPoint(m, arena, tx, ty, px, py));
+    const g = {
+      id: nextId(), kind: 'acid', x: z.x, y: z.y, sx: z.x, sy: z.y, tx, ty,
+      vx: (tx - z.x) / flight, vy: (ty - z.y) / flight, ttl: flight, maxTtl: flight,
+      r: A.poolRadius, poolTtl: A.poolSeconds, dps: A.dps,
+    };
+    state.acidGlobs.push(g);
+    out.push(g);
+  }
+  return out;
 }
 
 function updateWandering(state, z, dt) {
@@ -767,7 +895,7 @@ export function updateZombies(state, dt) {
       z.inside = true;
       if (z.mode === 'tearing') { z.mode = 'chasing'; z.tearTimer = 0; }
       if (z.kind === 'boss') {
-        if (updateBossCharge(state, z, dt)) continue;
+        if (z.ability === 'acid' ? updateBossAcid(state, z, dt) : updateBossCharge(state, z, dt)) continue;
         // Zombie Blood does not fool the boss.
         if (z.mode === 'wandering') z.mode = 'chasing';
         switch (z.mode) {

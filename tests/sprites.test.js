@@ -99,6 +99,8 @@ const GUN_NOMINAL = {
   raygun: [14, 8], thundergun: [20, 8], deathmachine: [18, 9], default: [12, 5],
   // WO5 3.4 (Agent D): level-2 guns (keys = weapon ids)
   manowar: [20, 9], xr2: [22, 6], weevil: [14, 7], marshal16: [14, 6], gorgon: [26, 9], dredge48: [24, 10],
+  // WO7 1.5 (Agent F): level-3 (tier 3) guns
+  hg40: [16, 8], m8a7: [25, 7], peacekeeper: [23, 9],
 };
 
 /** Every grid-derived sprite in soldier.js, guns.js and face.js, with its expected size. */
@@ -112,6 +114,8 @@ function allSprites() {
     ((SOLDIER.torso.walk && SOLDIER.torso.walk[p]) || []).forEach((s, i) =>
       out.push({ path: `SOLDIER.torso.walk.${p}[${i}]`, s, w: 16, h: 16 }));
   }
+  // WO7: knife swing torso frames (cocked, thrust).
+  (SOLDIER.torso.knife || []).forEach((s, i) => out.push({ path: `SOLDIER.torso.knife[${i}]`, s, w: 16, h: 16 }));
   if (SOLDIER.torso.helmet) out.push({ path: 'SOLDIER.torso.helmet.sprite', s: SOLDIER.torso.helmet.sprite, w: 16, h: 16 });
   out.push({ path: 'SOLDIER.down.sprite', s: SOLDIER.down.sprite, w: 20, h: 20 });
   for (const [k, g] of Object.entries(GUN_SPRITES)) out.push({ path: `GUN_SPRITES.${k}.sprite`, s: g.sprite, w: null, h: null });
@@ -388,6 +392,29 @@ test('guns WO5: level-2 gun sprites are distinct, muzzle on the right edge, grip
   }
   assert.ok(GUN_SPRITES.gorgon.sprite.w > GUN_SPRITES.lmg.sprite.w, 'Gorgon is the long LMG');
   assert.ok(GUN_SPRITES.marshal16.sprite.w < GUN_SPRITES.shotgun.sprite.w, 'Marshal 16 is short');
+});
+
+test('guns WO7: tier-3 gun sprites are distinct, muzzle on the right edge, grip on the barrel line', async () => {
+  const { WEAPONS } = await import('../src/weapons.js');
+  const ids = ['hg40', 'm8a7', 'peacekeeper'];
+  const others = Object.keys(GUN_SPRITES).filter((k) => !ids.includes(k)).map((k) => GUN_SPRITES[k].sprite.rows.join('/'));
+  const seen = new Set();
+  for (const id of ids) {
+    const g = GUN_SPRITES[id];
+    assert.ok(g, `GUN_SPRITES.${id} missing`);
+    assert.equal(WEAPONS[id].sprite, id);
+    assert.equal(gunSpriteFor(WEAPONS[id]), g);
+    assert.equal(g.muzzle.x, g.sprite.w, `${id} muzzle.x === w`);
+    assert.equal(g.grip.y, g.muzzle.y, `${id} grip on the barrel axis`);
+    assert.equal(g.pose, 'twohand');
+    assert.equal(g.weight, 1);
+    const key = g.sprite.rows.join('/');
+    assert.ok(!seen.has(key) && !others.includes(key), `${id} duplicates another sprite`);
+    seen.add(key);
+  }
+  // HG 40 is the compact one; M8A7 the long one; the Peacekeeper is the chunkiest AR.
+  assert.ok(GUN_SPRITES.hg40.sprite.w < GUN_SPRITES.peacekeeper.sprite.w && GUN_SPRITES.peacekeeper.sprite.w < GUN_SPRITES.m8a7.sprite.w);
+  assert.ok(GUN_SPRITES.peacekeeper.sprite.h > GUN_SPRITES.m8a7.sprite.h);
 });
 
 // ---------------------------------------------------------------------------------------------

@@ -21,6 +21,10 @@
   --status-h: 9cqh;              /* label 2cqh + value 5cqh (line-height 1.1) + 1.2cqh padding */
   --status-w: 34cqh;             /* HEALTH 13.5 + gap 3 + KILLS (4 digits) + padding */
   --status-font: "Courier New", Courier, "Lucida Console", monospace;
+  /* WO7: perk bottle row between HEALTH/KILLS and the points block. --perk-h is 0 until the
+     player owns a perk (#hud.has-perks), then the points block moves up by the row height. */
+  --perk-h: 0cqh;
+  --perk-row-h: 6.4cqh;          /* bottle 5.8cqh + 0.6cqh gap above the vitals */
   --hud-shadow: 0 0 0.4em rgba(0, 0, 0, 0.9), 0 0.08em 0.1em rgba(0, 0, 0, 0.9);
 }
 
@@ -93,7 +97,11 @@ html, body {
 #hud[data-phase="gameover"] .hud-weapon,
 #hud[data-phase="gameover"] .hud-powerups,
 #hud[data-phase="gameover"] .hud-bottom-center,
-#hud[data-phase="gameover"] .hud-points {
+#hud[data-phase="gameover"] .hud-points,
+#hud[data-phase="menu"] .hud-perks,
+#hud[data-phase="gameover"] .hud-perks,
+#hud[data-phase="menu"] .hud-down,
+#hud[data-phase="gameover"] .hud-down {
   display: none;
 }
 
@@ -102,8 +110,10 @@ html, body {
 .hud-points {
   position: absolute;
   left: var(--status-left);
-  bottom: calc(var(--status-bottom) + var(--status-h) + 1.2cqh);
+  bottom: calc(var(--status-bottom) + var(--status-h) + var(--perk-h) + 1.2cqh);
 }
+
+#hud.has-perks { --perk-h: var(--perk-row-h); }
 
 .hud-points-value {
   color: var(--hud-points);
@@ -234,6 +244,19 @@ html, body {
   min-height: 1.1em;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+/* FIX-2 (playtest #2): one dimmed line per holstered weapon, in slot order, with its slot digit. */
+.hud-weapon-sec { white-space: nowrap; }
+.hud-weapon-sec-slot {
+  display: inline-block;
+  min-width: 1.1em;
+  margin-right: 0.5em;
+  padding: 0 0.2em;
+  border: 0.15cqh solid rgba(255, 255, 255, 0.25);
+  border-radius: 0.3cqh;
+  font-size: 0.85em;
+  text-align: center;
+  opacity: 0.8;
 }
 
 .hud-weapon-name {
@@ -378,6 +401,12 @@ html, body {
   gap: 2.5cqh;
   text-align: center;
   background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.55) 0%, rgba(0, 0, 0, 0.85) 100%);
+}
+/* FIX-2 (playtest #8): menu / game over dim the world enough that plates and zombies stay out
+   of the way; the summary and the tables also sit on dark panels (.screen-panel below). */
+.hud-screen[data-phase="menu"],
+.hud-screen[data-phase="gameover"] {
+  background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.78) 0%, rgba(0, 0, 0, 0.93) 100%);
 }
 
 .hud-screen[data-phase="paused"] { background: rgba(0, 0, 0, 0.5); }
@@ -678,7 +707,7 @@ html, body {
 /* Fixed positions: inward of the bottom-left health/points and bottom-right ammo/buttons.
    --tj-x/--tj-y place both base and resting knob; touch.js moves only the knob while dragged. */
 .tj-zone.tj-left  { --tj-x: 40cqh; --tj-y: calc(100% - 20cqh); }
-.tj-zone.tj-right { --tj-x: calc(100% - 36cqh); --tj-y: calc(100% - 20cqh); }
+.tj-zone.tj-right { --tj-x: calc(100% - 45cqh); --tj-y: calc(100% - 20cqh); } /* WO7: 36 -> 45cqh, clear of KNIFE */
 .tj-zone .tj-base, .tj-zone .tj-knob { display: block; }
 /* Idle sticks stay visible but quieter; they brighten while held. */
 .tj-zone:not(.active) .tj-base { opacity: 0.55; }
@@ -723,6 +752,17 @@ html, body {
 }
 
 .tbtn-reload { right: 3cqh; bottom: 19cqh; }
+/* WO7 T3: KNIFE left of RELOAD (same row, 1.5cqh gap). The right stick moved 9cqh inward
+   (--tj-x below) so its 26cqh base clears the knife: base spans 32..58cqh from the right edge,
+   the knife 17.5..30.5cqh. Steel-blue tint so it reads apart from RELOAD / SWAP. */
+.tbtn-knife {
+  right: 17.5cqh;
+  bottom: 19cqh;
+  border-color: rgba(190, 215, 235, 0.7);
+  background: rgba(20, 28, 38, 0.5);
+  color: #e6f1fa;
+}
+.tbtn-knife.pressed { background: rgba(200, 225, 245, 0.35); border-color: #ffffff; }
 .tbtn-swap   { right: 3cqh; bottom: 31.5cqh; }
 
 .tbtn-pause {
@@ -743,7 +783,8 @@ html, body {
   width: auto;
   min-width: 34cqh;
   max-width: calc(100% - 2 * (var(--status-left) + var(--status-w) + 2cqh));
-  max-width: min(calc(100% - 2 * (var(--status-left) + var(--status-w) + 2cqh)), calc(100% - 112cqh));
+  /* WO7: right stick base now reaches 58cqh from the right edge -> 2 * (58 + 1)cqh. */
+  max-width: min(calc(100% - 2 * (var(--status-left) + var(--status-w) + 2cqh)), calc(100% - 118cqh));
   height: 11cqh;
   padding: 0 4cqh;
   border-radius: 5.5cqh;
@@ -766,11 +807,33 @@ html, body {
 #hud[data-phase="menu"] ~ #touch .tbtn,
 #hud[data-phase="gameover"] ~ #touch .tbtn,
 #hud[data-phase="paused"] ~ #touch .tbtn:not(.tbtn-pause) { display: none; }
+/* FIX-2 (playtest #8): the fixed sticks are hidden too. A tap still starts / restarts: main.js
+   listens for pointerdown on #stage (capture), which the tap reaches through the empty layer. */
+#hud[data-phase="menu"] ~ #touch .tj-zone,
+#hud[data-phase="gameover"] ~ #touch .tj-zone { display: none; }
 
 /* Mobile HUD (hud.setMobileHud(true)): the ACTION button carries the shop prompt, and the banner
    column moves up so banners clear the ACTION pill. */
 #hud.mobile .hud-prompt { display: none !important; }
 #hud.mobile .hud-bottom-center { bottom: 36cqh; } /* above the fixed sticks */
+/* WO7: keep the weapon readout inside the corner left free by the right stick (base edge ~32cqh
+   from the right at the readout's top) and below RELOAD / KNIFE (bottom 19cqh): long names wrap
+   in a smaller font instead of growing sideways. */
+#hud.mobile .hud-weapon { max-width: 26cqh; }
+#hud.mobile .hud-weapon-name { font-size: 2.6cqh; white-space: normal; text-wrap: balance; }
+/* FIX-2 (playtest #2): holstered weapons on ONE compact line ("1 SHEIVA · 3 KN-44"), ellipsised
+   at the readout width. Hidden while reloading so a 2-line name + RELOADING stays under 16cqh. */
+#hud.mobile .hud-weapon-secondary {
+  font-size: max(10px, 2.4cqh);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#hud.mobile .hud-weapon-sec { display: inline; }
+#hud.mobile .hud-weapon-sec + .hud-weapon-sec::before { content: " \00b7  "; }
+#hud.mobile .hud-weapon-sec-slot { display: none; }
+#hud.mobile .hud-weapon.reloading .hud-weapon-secondary { display: none; }
 
 /* ---------- WO6: "Rotate your phone" plate (hud.setRotateOverlay) ---------- */
 /* Appended to <body> (not #hud): the stage is only a 16:9 strip in portrait, and #hud's size
@@ -846,3 +909,277 @@ html, body {
   font-size: 3.4vmin;
   color: #9a9a9a;
 }
+
+/* ---------- WO7 T2: perk bottles (bottom-left, above HEALTH / KILLS) ---------- */
+/* Stack, bottom-up: vitals (3..12cqh) -> perk row (12.6..18.4cqh) -> points (+1.2cqh gap).
+   Each bottle: dark-outlined body in the perk colour with a glass highlight, a neck + cap, and
+   the perk letter on a dark round label. Quick Revive carries a small badge with the uses left. */
+.hud-perks {
+  position: absolute;
+  left: calc(var(--status-left) + 1cqh);   /* lines up with the vitals' inner padding */
+  bottom: calc(var(--status-bottom) + var(--status-h) + 0.6cqh);
+  z-index: 2;
+  display: flex;
+  align-items: flex-end;
+  gap: 1.1cqh;
+  height: 5.8cqh;
+}
+
+.hud-perk {
+  --perk-color: #cccccc;
+  position: relative;
+  width: 3.8cqh;
+  height: 5.8cqh;
+  filter: drop-shadow(0 0.3cqh 0.5cqh rgba(0, 0, 0, 0.8));
+  animation: hud-perk-in 0.45s ease-out;
+}
+
+/* Neck + cap. */
+.hud-perk::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 1.5cqh;
+  height: 1.9cqh;
+  translate: -50% 0;
+  border: 0.25cqh solid #0b0b0d;
+  border-top-width: 0.55cqh;
+  border-top-color: #d8d8d8;       /* metal cap */
+  border-radius: 0.3cqh 0.3cqh 0 0;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.35), transparent 60%), var(--perk-color);
+}
+
+/* Body with rounded shoulders and a glass highlight. */
+.hud-perk::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 1.6cqh;
+  bottom: 0;
+  border: 0.25cqh solid #0b0b0d;
+  border-radius: 1.3cqh 1.3cqh 0.5cqh 0.5cqh;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.45) 0 14%, transparent 30%, transparent 78%, rgba(0, 0, 0, 0.35) 100%),
+    var(--perk-color);
+  box-shadow: 0 0 0.9cqh color-mix(in srgb, var(--perk-color) 60%, transparent);
+}
+
+.hud-perk-letter {
+  position: absolute;
+  z-index: 1;
+  left: 50%;
+  top: 3.7cqh;
+  width: 2.5cqh;
+  height: 2.5cqh;
+  translate: -50% -50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.62);
+  color: #ffffff;
+  font-size: 1.7cqh;
+  font-weight: 900;
+  line-height: 1;
+  text-shadow: none;
+}
+
+.hud-perk-uses {
+  position: absolute;
+  z-index: 1;
+  right: -1cqh;
+  top: 0.2cqh;
+  min-width: 1.9cqh;
+  height: 1.9cqh;
+  padding: 0 0.3cqh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 1cqh;
+  border: 0.2cqh solid var(--perk-color);
+  background: #0b0b0d;
+  color: #ffffff;
+  font-size: 1.3cqh;
+  font-weight: 800;
+  line-height: 1;
+  text-shadow: none;
+}
+
+@keyframes hud-perk-in {
+  0% { transform: translateY(1cqh) scale(1.35); opacity: 0; }
+  60% { transform: scale(0.95); opacity: 1; }
+  100% { transform: none; }
+}
+
+/* ---------- WO7 T2: Quick Revive "down" overlay (player.downT > 0) ---------- */
+/* Full-stage cold vignette, "REVIVING…" and a Quick-Revive-blue bar filling over
+   PERKS.list.revive.downSeconds, below the player (camera centre). Under the centre screens. */
+.hud-down {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding-top: 60cqh;
+  gap: 1.2cqh;
+  background: radial-gradient(ellipse at center, transparent 35%, rgba(0, 25, 45, 0.55) 100%);
+}
+
+.hud-down-text {
+  font-size: 4.2cqh;
+  font-weight: 900;
+  letter-spacing: 0.18em;
+  color: #3ec9ff;
+  text-shadow: 0 0 1.4cqh rgba(62, 201, 255, 0.8), 0 0.1em 0.1em #000;
+  animation: hud-blink 0.9s ease-in-out infinite;
+}
+
+.hud-down-track {
+  width: 32cqh;
+  height: 1.8cqh;
+  border: 0.3cqh solid #0b0b0d;
+  outline: 0.2cqh solid rgba(62, 201, 255, 0.55);
+  background: rgba(0, 20, 35, 0.75);
+  overflow: hidden;
+}
+
+.hud-down-fill {
+  width: 0;
+  height: 100%;
+  background: linear-gradient(180deg, #9fe6ff 0%, #3ec9ff 50%, #1478a8 100%);
+}
+
+#hud[data-phase="paused"] .hud-down-text { animation: none; }
+
+/* ---------- WO7 T4: menu best line, run summary, rank line, top-5 table ---------- */
+
+.screen-best {
+  margin-top: -1.5cqh;             /* tuck under the title */
+  font-size: 3.2cqh;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: var(--hud-points);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Two columns (controls | top runs on the menu, run summary | top runs on game over). */
+.screen-cols {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 7cqh;
+  max-width: calc(100% - 44cqh);   /* clear of the face box / vitals on both sides */
+}
+
+.hud-screen[data-phase="gameover"] { gap: 2cqh; }
+.hud-screen[data-phase="gameover"] .screen-title { font-size: 9.5cqh; }
+.hud-screen[data-phase="gameover"] .screen-headline { font-size: 4cqh; }
+
+.hud-screen[data-phase="gameover"] .screen-stats {
+  font-size: 2.6cqh;
+  row-gap: 0.7cqh;
+  column-gap: 3cqh;
+}
+.screen-stats .stat-v { max-width: 44cqh; text-wrap: balance; } /* long perk lists wrap to 2 lines */
+
+/* FIX-2 (playtest #8): dark rounded panels behind the controls list and the run summary, matching
+   the TOP RUNS box. */
+.hud-screen[data-phase="menu"] .screen-controls,
+.hud-screen[data-phase="gameover"] .screen-stats {
+  padding: 1.4cqh 2.4cqh;
+  border: 0.2cqh solid rgba(255, 255, 255, 0.14);
+  border-radius: 1cqh;
+  background: rgba(0, 0, 0, 0.6);
+}
+.hud-screen[data-phase="menu"] .screen-controls { margin-top: 0; }
+
+.screen-rank {
+  display: flex;
+  gap: 2.5cqh;
+  align-items: baseline;
+  font-family: Georgia, "Times New Roman", serif;
+  font-style: italic;
+  font-weight: 700;
+}
+
+.screen-rank .rank-best {
+  font-size: 4.4cqh;
+  color: #ffb13b;
+  text-shadow: 0 0 1.5cqh rgba(255, 90, 0, 0.9), 0 0.1em 0.1em #000;
+  animation: hud-rank-pop 0.9s ease-out, hud-rank-glow 1.6s ease-in-out 0.9s infinite;
+}
+
+.screen-rank .rank-pos {
+  font-size: 3.4cqh;
+  color: #f2f2f2;
+  letter-spacing: 0.08em;
+}
+
+@keyframes hud-rank-pop {
+  0% { transform: scale(1.6); opacity: 0; }
+  40% { transform: scale(0.95); opacity: 1; }
+  100% { transform: scale(1); }
+}
+
+@keyframes hud-rank-glow {
+  0%, 100% { text-shadow: 0 0 1.5cqh rgba(255, 90, 0, 0.9), 0 0.1em 0.1em #000; }
+  50% { text-shadow: 0 0 3cqh rgba(255, 150, 40, 1), 0 0.1em 0.1em #000; }
+}
+
+.screen-top {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.8cqh;
+  padding: 1cqh 1.8cqh 1.2cqh;
+  border: 0.2cqh solid rgba(255, 255, 255, 0.14);
+  border-radius: 1cqh;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.screen-top-title {
+  font-size: 2cqh;
+  font-weight: 800;
+  letter-spacing: 0.25em;
+  color: var(--hud-round-bright);
+}
+
+.screen-top-grid {
+  display: grid;
+  grid-template-columns: repeat(6, auto);
+  column-gap: 2.2cqh;
+  row-gap: 0.5cqh;
+  font-size: 2.2cqh;
+  font-variant-numeric: tabular-nums;
+}
+
+.screen-top-grid .th {
+  font-size: 1.5cqh;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--hud-dim);
+  text-align: right;
+}
+.screen-top-grid .td { text-align: right; color: #dddddd; }
+.screen-top-grid .td.rank { color: var(--hud-dim); }
+.screen-top-grid .td.pts { color: var(--hud-points); font-weight: 700; }
+.screen-top-grid .td.me { color: #ffffff; font-weight: 800; text-shadow: 0 0 1cqh rgba(255, 177, 59, 0.9); }
+.screen-top-grid .td.me.rank { color: #ffb13b; }
+.screen-top { background: rgba(0, 0, 0, 0.6); } /* FIX-2: same panel as the summary */
+
+/* ---------- FIX-2 (playtest #7): phone legibility floors on the touch layout ---------- */
+/* At 844x390 1cqh = 3.9px, so the desktop cqh sizes fall to 6-9px. Floors: tables >= 11px,
+   labels >= 10px. The top-5 table drops KILLS / LVL (.c-opt) so it still fits beside the summary. */
+#hud.mobile .screen-top-grid { grid-template-columns: repeat(4, auto); font-size: max(11.5px, 2.2cqh); column-gap: max(10px, 2.2cqh); }
+#hud.mobile .screen-top-grid .c-opt { display: none; }
+#hud.mobile .screen-top-grid .th { font-size: max(11px, 1.5cqh); letter-spacing: 0.06em; }
+#hud.mobile .screen-top-title { font-size: max(11px, 2cqh); }
+#hud.mobile .screen-controls { font-size: max(11px, 2.3cqh); }
+#hud.mobile .hud-screen[data-phase="gameover"] .screen-stats { font-size: max(11.5px, 2.6cqh); }
+#hud.mobile .hud-screen[data-phase="gameover"] .screen-cols { gap: 4cqh; }
+#hud.mobile .hud-vital-label,
+#hud.mobile .hud-level { font-size: max(10px, 2cqh); }
+#hud.mobile .hud-perk-uses { font-size: max(9px, 1.3cqh); min-width: max(12px, 1.9cqh); height: max(12px, 1.9cqh); }

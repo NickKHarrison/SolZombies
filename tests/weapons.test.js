@@ -33,7 +33,7 @@ test('weapon tables', () => {
   assert.ok(!WALL_WEAPON_IDS.includes('mr6'));
   assert.ok(WALL_WEAPON_IDS.includes('sheiva') && WALL_WEAPON_IDS.includes('argus'));
   assert.ok(!WALL_WEAPON_IDS.includes('raygun'));
-  assert.equal(WALL_WEAPON_IDS.length, 21); // WO5: 13 WO4 wall guns + 6 new + haymaker12 + drakon
+  assert.equal(WALL_WEAPON_IDS.length, 24); // WO5: 13 WO4 + 6 new + haymaker12 + drakon; WO7: + 3 tier-3
   assert.ok(!BOX_WEAPON_IDS.includes('mr6') && !BOX_WEAPON_IDS.includes('deathmachine'));
   assert.equal(BOX_WEAPON_IDS.length, Object.keys(WEAPONS).length - 2);
   assert.equal(BOX_WEIGHTS.raygun, 1);
@@ -526,7 +526,7 @@ test('WO5 wall prices: haymaker12 250, drakon 300; all level-2 guns are wall ids
   // Level-1 (WO4) wall guns unchanged: same ids, weight 3.
   assert.deepEqual([...BOX_WALL_WEIGHT_IDS].sort(), [...WO4_WALL].sort());
   for (const id of WO4_WALL) assert.equal(BOX_WEIGHTS[id], SHOP.boxWeights.wall);
-  assert.deepEqual([...WALL_WEAPON_IDS].sort(), [...WO4_WALL, ...lvl2].sort());
+  assert.deepEqual([...WALL_WEAPON_IDS].sort(), [...WO4_WALL, ...lvl2, 'hg40', 'm8a7', 'peacekeeper'].sort()); // WO7: + tier 3
   // Existing box-only guns / wonder weapons keep their weights.
   assert.equal(BOX_WEIGHTS.locus, 2);
   assert.equal(BOX_WEIGHTS.dingo, 2);
@@ -698,6 +698,312 @@ test('WO5 balance #10: tier-2 wall ammo costs 0.3x the price, tier-1 keeps 0.5x'
   const want = { weevil: 60, xr2: 68, marshal16: 68, manowar: 75, haymaker12: 75, dredge48: 83, gorgon: 90, drakon: 90 };
   for (const [id, c] of Object.entries(want)) assert.equal(ammoCost(id), c, id);
   for (const id of WALL_WEAPON_IDS) {
-    if (WEAPONS[id].tier !== 2) assert.equal(ammoCost(id), Math.round(WEAPONS[id].cost * 0.5), id);
+    if (WEAPONS[id].tier === 1) assert.equal(ammoCost(id), Math.round(WEAPONS[id].cost * 0.5), id);
   }
+});
+
+// ---------------------------------------------------------------------------
+// WO7 (Agent F): perks (T2), knife (T3), tier-3 guns (T5)
+// ---------------------------------------------------------------------------
+
+import { meleeAttack, weaponPerkMods } from '../src/weapons.js';
+import { PERKS, MELEE, ZOMBIE as ZCFG, BOSS as BOSS_CFG } from '../src/config.js';
+import * as playerModule from '../src/player.js';
+import { damageZombie as realDamageZombie } from '../src/zombie.js';
+
+const havePerkMods = typeof playerModule.perkMods === 'function';
+const L3 = { healthMult: 2.0 };
+const TIER3_IDS = ['hg40', 'm8a7', 'peacekeeper'];
+function meanTtkL3(d) {
+  let sum = 0;
+  for (let r = 6; r <= 12; r++) sum += ttkSeconds(d, healthForRound(r, L3));
+  return sum / 7;
+}
+
+test('WO7 tier-3 defs: ids/names/classes/costs/mags/reloads per 1.5, tier 3, own sprites, box weight 2, ammo 0.3x', () => {
+  const want = {
+    hg40:        { name: 'HG 40', cls: 'smg', cost: 350, damage: 130, mag: 40, reserve: 280, reloadTime: 1.9, penetration: 2 }, // WO7 FIX-5 (balance #2)
+    m8a7:        { name: 'M8A7', cls: 'ar', cost: 375, mag: 32, reserve: 256, reloadTime: 2.2, penetration: 3, spread: 0.02 }, // WO7 FIX-5 (balance #3)
+    peacekeeper: { name: 'Peacekeeper MK2', cls: 'ar', cost: 400, mag: 30, reserve: 270, reloadTime: 2.3, penetration: 3 },
+  };
+  for (const [id, w] of Object.entries(want)) {
+    const d = WEAPONS[id];
+    assert.ok(d, id);
+    for (const [k, v] of Object.entries(w)) assert.equal(d[k], v, `${id}.${k}`);
+    assert.equal(d.tier, 3);
+    assert.equal(d.auto, true);
+    assert.equal(d.sprite, id);
+    assert.ok(WALL_WEAPON_IDS.includes(id) && BOX_WEAPON_IDS.includes(id));
+    assert.ok(!BOX_WALL_WEIGHT_IDS.includes(id));
+    assert.equal(BOX_WEIGHTS[id], SHOP.boxWeights.boxOnly);
+    assert.equal(ammoCost(id), Math.round(d.cost * PERKS.ammoMultTier3), `${id} ammo = ammoMultTier3 x price`);
+  }
+  assert.deepEqual(TIER3_IDS.map(ammoCost), [105, 113, 120]);
+});
+
+test('WO7 tier-3 TTK: every tier-3 gun out-kills every tier-2 gun on level-3 health; price tracks power', () => {
+  const hp8 = healthForRound(8, L3);
+  for (const id of TIER3_IDS) {
+    const m3 = meanTtkL3(WEAPONS[id]);
+    const r8 = ttkSeconds(WEAPONS[id], hp8);
+    for (const o of TIER2_IDS) {
+      assert.ok(m3 < meanTtkL3(WEAPONS[o]), `${id} mean L3 TTK ${m3.toFixed(3)} >= ${o} ${meanTtkL3(WEAPONS[o]).toFixed(3)}`);
+      assert.ok(r8 <= ttkSeconds(WEAPONS[o], hp8), `${id} L3 R8 TTK vs ${o}`);
+    }
+  }
+  const [h, m, p] = TIER3_IDS.map((id) => meanTtkL3(WEAPONS[id]));
+  assert.ok(p < m && m < h, 'Peacekeeper (400) < M8A7 (375) < HG 40 (350)');
+  // Identities: HG 40 fastest-firing with the biggest mag; M8A7 tightest spread; Peacekeeper hits hardest.
+  const W3 = TIER3_IDS.map((id) => WEAPONS[id]);
+  for (const d of W3) if (d.id !== 'hg40') assert.ok(WEAPONS.hg40.rpm > d.rpm && WEAPONS.hg40.mag > d.mag);
+  for (const d of W3) if (d.id !== 'm8a7') assert.ok(WEAPONS.m8a7.spread < d.spread);
+  for (const d of W3) if (d.id !== 'peacekeeper') assert.ok(WEAPONS.peacekeeper.damage > d.damage);
+});
+
+test('WO7 tier-3 guns fire (hg40 pen 2, m8a7 pen 3, peacekeeper pen 3)', () => {
+  for (const [id, pen] of [['hg40', 2], ['m8a7', 3], ['peacekeeper', 3]]) {
+    const { state, calls } = setup();
+    state.zombies.push(zombie(1, 100, 0), zombie(2, 150, 0), zombie(3, 200, 0), zombie(4, 250, 0));
+    assert.equal(tryFire(state, createWeapon(id), 0, 0, 1, 0), true);
+    assert.equal(calls.zombie.length, pen, id);
+    assert.ok(calls.zombie.every((c) => c.amount === WEAPONS[id].damage));
+    resetWeaponDeps();
+  }
+});
+
+// --- T2 perks ---
+
+function withPerks(state, perks) {
+  state.player = { x: 0, y: 0, radius: 14, angle: 0, perks: perks.slice(), weapons: [], activeSlot: 0, meleeCd: 0, meleeT: 0 };
+  return state.player;
+}
+const ONES = { reloadMult: 1, rpmMult: 1, bulletDamageMult: 1 };
+
+test('WO7 weaponPerkMods: no player / no perks -> all 1; Death Machine ignores perks', () => {
+  const { state } = setup();
+  assert.deepEqual(weaponPerkMods(state, createWeapon('kn44')), ONES);
+  withPerks(state, []);
+  assert.deepEqual(weaponPerkMods(state, createWeapon('kn44')), ONES);
+  withPerks(state, ['speed', 'dtap']);
+  assert.deepEqual(weaponPerkMods(state, createDeathMachine()), ONES);
+  if (havePerkMods) {
+    assert.deepEqual(weaponPerkMods(state, createWeapon('kn44')), {
+      reloadMult: PERKS.list.speed.reloadMult, rpmMult: PERKS.list.dtap.rpmMult, bulletDamageMult: PERKS.list.dtap.bulletDamageMult,
+    });
+  }
+});
+
+test('WO7 Speed Cola halves reload time (explicit state, lastState fallback, auto-reload)', { skip: !havePerkMods }, () => {
+  const { state } = setup();
+  withPerks(state, ['speed']);
+  const half = WEAPONS.kn44.reloadTime * PERKS.list.speed.reloadMult;
+  const w = createWeapon('kn44');
+  w.mag = 0;
+  assert.equal(startReload(w, state), true);
+  assert.ok(Math.abs(w.reloadT - half) < 1e-9);
+  // player.js calls startReload(w) without state: the last state seen (updateBullets runs every frame).
+  updateBullets(state, 0.016);
+  const w2 = createWeapon('kn44');
+  w2.mag = 0;
+  assert.equal(startReload(w2), true);
+  assert.ok(Math.abs(w2.reloadT - half) < 1e-9);
+  const w3 = createWeapon('kn44');
+  w3.mag = 1;
+  tryFire(state, w3, 0, 0, 1, 0);
+  assert.ok(w3.reloading && Math.abs(w3.reloadT - half) < 1e-9);
+});
+
+test('WO7 no perks: reload time unchanged', () => {
+  const { state } = setup();
+  withPerks(state, []);
+  const w = createWeapon('kn44');
+  w.mag = 0;
+  startReload(w, state);
+  assert.equal(w.reloadT, WEAPONS.kn44.reloadTime);
+});
+
+test('WO7 Double Tap II: rpm x1.33, hitscan damage x2 (pellets too); Ray Gun and Death Machine unchanged', { skip: !havePerkMods }, () => {
+  const { state, calls } = setup();
+  withPerks(state, ['dtap']);
+  const w = createWeapon('kn44');
+  tryFire(state, w, 0, 0, 1, 0);
+  assert.ok(Math.abs(w.cooldown - 60 / (700 * PERKS.list.dtap.rpmMult)) < 1e-9, 'interval / 1.33');
+  state.zombies.push(zombie(1, 100, 0, 1e6));
+  w.cooldown = 0; w.triggerHeld = false;
+  tryFire(state, w, 0, 0, 1, 0);
+  assert.equal(calls.zombie.at(-1).amount, WEAPONS.kn44.damage * 2);
+  calls.zombie.length = 0;
+  tryFire(state, createWeapon('krm262'), 0, 0, 1, 0);
+  assert.ok(calls.zombie.length > 0 && calls.zombie.every((c) => c.amount === WEAPONS.krm262.damage * 2), 'shotgun pellets doubled');
+  calls.zombie.length = 0;
+  const dm = createDeathMachine();
+  tryFire(state, dm, 0, 0, 1, 0);
+  assert.ok(Math.abs(dm.cooldown - 60 / WEAPONS.deathmachine.rpm) < 1e-9, 'Death Machine rpm unchanged');
+  assert.ok(calls.zombie.length > 0 && calls.zombie.every((c) => c.amount === WEAPONS.deathmachine.damage));
+  calls.zombie.length = 0;
+  state.bullets.length = 0;
+  tryFire(state, createWeapon('raygun'), 0, 0, 1, 0);
+  updateBullets(state, 1);
+  assert.equal(calls.zombie[0].amount, WEAPONS.raygun.damage, 'Ray Gun projectile unchanged');
+});
+
+test('WO7 FIX-5 Double Tap vs boss: rpm x1.33 kept, bullet damage x BOSS.dtapDamageMult on the boss only', { skip: !havePerkMods }, () => {
+  assert.equal(BOSS_CFG.dtapDamageMult, 1);
+  const { state, calls } = setup();
+  withPerks(state, ['dtap']);
+  // Boss between two normal zombies on the same ray: penetration 3 hits all three.
+  const a = zombie(1, 100, 0, 1e6), b = { ...zombie(2, 150, 0, 1e6), kind: 'boss', radius: 34 }, c = { ...zombie(3, 220, 0, 1e6), kind: 'minion' };
+  state.zombies.push(a, b, c);
+  const w = createWeapon('peacekeeper');
+  tryFire(state, w, 0, 0, 1, 0);
+  assert.ok(Math.abs(w.cooldown - 60 / (WEAPONS.peacekeeper.rpm * PERKS.list.dtap.rpmMult)) < 1e-9, 'rpm bonus still applies');
+  const by = new Map(calls.zombie.map((x) => [x.z.id, x.amount]));
+  assert.equal(by.get(1), WEAPONS.peacekeeper.damage * PERKS.list.dtap.bulletDamageMult);
+  assert.equal(by.get(2), WEAPONS.peacekeeper.damage * BOSS_CFG.dtapDamageMult, 'boss not doubled');
+  assert.equal(by.get(3), WEAPONS.peacekeeper.damage * PERKS.list.dtap.bulletDamageMult, 'minions doubled');
+  // Shotgun pellets too.
+  calls.zombie.length = 0;
+  state.zombies.length = 0; state.zombies.push({ ...zombie(4, 60, 0, 1e6), kind: 'boss', radius: 34 });
+  tryFire(state, createWeapon('krm262'), 0, 0, 1, 0);
+  assert.ok(calls.zombie.length > 0 && calls.zombie.every((x) => x.amount === WEAPONS.krm262.damage), 'boss pellets not doubled');
+  // Without Double Tap the boss takes plain damage (the cap never raises damage).
+  calls.zombie.length = 0;
+  withPerks(state, []);
+  tryFire(state, createWeapon('kn44'), 0, 0, 1, 0);
+  assert.equal(calls.zombie.at(-1).amount, WEAPONS.kn44.damage);
+  // hitscan's bossDamage parameter defaults to damage.
+  calls.zombie.length = 0;
+  hitscan(state, 0, 0, 1, 0, 1000, 1, 77);
+  assert.equal(calls.zombie[0].amount, 77);
+});
+
+test('WO7 updateBullets leaves foreign (acid) entries in state.bullets untouched', () => {
+  const { state } = setup();
+  const glob = { kind: 'acid', x: 5, y: 5, vx: 10, vy: 0, ttl: 1 };
+  state.bullets.push(glob);
+  updateBullets(state, 0.1);
+  assert.deepEqual(state.bullets, [glob]);
+  assert.equal(glob.x, 5);
+});
+
+// --- T3 knife ---
+
+function knifeSetup(opts) {
+  const s = setup(opts);
+  const knocks = [], pushes = [];
+  setWeaponDeps({
+    applyKnockback: (st, z, vx, vy, stun) => { knocks.push({ z, vx, vy, stun }); return true; },
+    pushZombie: (st, z, dx, dy) => { pushes.push({ z, dx, dy }); return true; },
+  });
+  const p = withPerks(s.state, []);
+  return { ...s, p, knocks, pushes };
+}
+
+test('WO7 meleeAttack: reach/arc, nearest first, max 3, damage 150, timers, events, slash, knockback', () => {
+  const { state, calls, p, knocks } = knifeSetup();
+  const swings = [], hits = [];
+  events.on('melee:swing', (e) => swings.push(e));
+  events.on('melee:hit', (e) => hits.push(e));
+  // edge gap = d - 14 - 14 <= 44  ->  d <= 72
+  state.zombies.push(
+    zombie(1, 40, 0), zombie(2, 60, 10), zombie(3, 70, -5), zombie(4, 50, 20), // 4 in the arc: 3 hit
+    zombie(5, 80, 0),   // out of reach
+    zombie(6, 0, 50),   // in reach, 90 deg off the aim
+    zombie(7, -40, 0),  // behind
+  );
+  assert.equal(meleeAttack(state, p), 3);
+  assert.deepEqual(calls.zombie.map((c) => c.z.id), [1, 4, 2]);
+  assert.ok(calls.zombie.every((c) => c.amount === MELEE.damage && c.cause === 'weapon'));
+  assert.equal(p.meleeCd, MELEE.cooldown);
+  assert.equal(p.meleeT, MELEE.swingTime);
+  assert.deepEqual(swings, [{ x: 0, y: 0, angle: 0 }]);
+  assert.deepEqual(hits, [{ zombieId: 1, killed: false }, { zombieId: 4, killed: false }, { zombieId: 2, killed: false }]);
+  const slash = state.effects.find((e) => e.type === 'slash');
+  assert.deepEqual(slash, { type: 'slash', x: 0, y: 0, angle: 0, ttl: 0.18, maxTtl: 0.18 });
+  assert.equal(knocks.length, 3);
+  const stun = Math.log(MELEE.knockback / ZCFG.stunMinSpeed) / ZCFG.knockFriction;
+  for (const k of knocks) {
+    assert.ok(Math.abs(Math.hypot(k.vx, k.vy) - MELEE.knockback) < 1e-9);
+    assert.ok(k.vx > 0, 'pushed away from the player');
+    assert.ok(Math.abs(k.stun - stun) < 1e-9);
+  }
+});
+
+test('WO7 meleeAttack: cooldown blocks; whiff still swings; no knife while down', () => {
+  const { state, p, calls } = knifeSetup();
+  let swings = 0;
+  events.on('melee:swing', () => swings++);
+  assert.equal(meleeAttack(state, p), 0, 'whiff');
+  assert.equal(swings, 1);
+  assert.equal(meleeAttack(state, p), 0);
+  assert.equal(swings, 1, 'on cooldown: no second swing');
+  p.meleeCd = 0;
+  state.zombies.push(zombie(1, 30, 0));
+  assert.equal(meleeAttack(state, p), 1);
+  assert.equal(calls.zombie.length, 1);
+  p.meleeCd = 0; p.downT = 1;
+  assert.equal(meleeAttack(state, p), 0);
+  assert.equal(swings, 2);
+});
+
+test('WO7 meleeAttack: a kill reports killed and skips knockback; the swing cancels an active reload', () => {
+  const { state, p, knocks } = knifeSetup();
+  const hits = [];
+  events.on('melee:hit', (e) => hits.push(e));
+  const w = createWeapon('kn44');
+  w.mag = 0;
+  startReload(w, state);
+  p.weapons = [w];
+  state.zombies.push(zombie(1, 30, 0, 100));
+  assert.equal(meleeAttack(state, p), 1);
+  assert.deepEqual(hits, [{ zombieId: 1, killed: true }]);
+  assert.equal(knocks.length, 0);
+  assert.equal(w.reloading, false);
+  assert.equal(w.reloadT, 0);
+  assert.equal(w.mag, 0, 'cancelled, not completed');
+});
+
+test('WO7 meleeAttack: walls block; boss is pushed (no stun); follows player.angle', () => {
+  const blocked = knifeSetup({ wallT: 5 });
+  blocked.state.zombies.push(zombie(1, 40, 0));
+  assert.equal(meleeAttack(blocked.state, blocked.p), 0);
+  assert.equal(blocked.calls.zombie.length, 0);
+  resetWeaponDeps();
+
+  const { state, p, pushes, knocks } = knifeSetup();
+  p.angle = Math.PI / 2; // aiming +y
+  const boss = { ...zombie(9, 0, 60, 50000), kind: 'boss', radius: 34 };
+  state.zombies.push(boss, zombie(1, 40, 0));
+  assert.equal(meleeAttack(state, p), 1);
+  assert.equal(knocks.length, 0);
+  assert.equal(pushes.length, 1);
+  assert.ok(Math.abs(pushes[0].dx) < 1e-9 && pushes[0].dy > 0);
+  assert.ok(Math.abs(pushes[0].dy - (MELEE.knockback - ZCFG.stunMinSpeed) / ZCFG.knockFriction) < 1e-9);
+});
+
+test('WO7 meleeAttack with the real zombie.damageZombie: normal 150, Insta-Kill lethal, boss per-hit cap', () => {
+  resetWeaponDeps();
+  setWeaponDeps({ applyKnockback: () => true, pushZombie: () => true, damageZombie: realDamageZombie });
+  const state = createEmptyState(3);
+  state.map = null;
+  const p = withPerks(state, []);
+  const z = { ...zombie(1, 30, 0, 5000), kind: 'normal' };
+  state.zombies.push(z);
+  meleeAttack(state, p);
+  assert.equal(z.hp, 5000 - MELEE.damage);
+  state.powerups.active.instaKill = (state.time || 0) + 10;
+  p.meleeCd = 0;
+  meleeAttack(state, p);
+  assert.ok(!(z.hp > 0), 'Insta-Kill makes the knife lethal');
+  delete state.powerups.active.instaKill;
+  const b = { ...zombie(2, 30, 0, 100000), kind: 'boss', radius: 34, maxHp: 100000 };
+  state.zombies = [b];
+  p.meleeCd = 0;
+  meleeAttack(state, p);
+  assert.equal(100000 - b.hp, Math.min(MELEE.damage, BOSS_CFG.maxHitFrac * 100000));
+  const small = { ...zombie(3, 30, 0, 1000), kind: 'boss', radius: 34, maxHp: 1000 };
+  state.zombies = [small];
+  p.meleeCd = 0;
+  meleeAttack(state, p);
+  assert.ok(Math.abs((1000 - small.hp) - BOSS_CFG.maxHitFrac * 1000) < 1e-9, 'capped');
 });

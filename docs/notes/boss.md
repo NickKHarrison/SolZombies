@@ -88,3 +88,26 @@ Headless check on the real level-1 map: 60 s of fight with a circling, invulnera
 - Headless check (QA-3 harness, 10 seeds, god mode, random drops off), L1 R10 boss 9,900 HP:
   KN-44 + Argus 45.7 s median (40-55), R12 52.9 s, R8 44.4 s, 0 runs dry; with Insta-Kill forced at
   start 17.4 s; Ray Gun + KN-44 34.4 s; Thundergun + KN-44 38.0 s. Mortal R10: 10/12 won.
+
+## WO7 (Agent H): acid hazards
+- **`updateHazards(state, dt)`** (INT: call it in the loop after `updateZombies`).
+  - Creates `state.hazards` / `state.acidGlobs` if missing; `dt <= 0` is a no-op after the checks.
+  - **Level change**: a module `WeakMap` remembers the `state.map` object seen last per state; a
+    different map object clears hazards and globs (no `level.js` change needed).
+    `game:restart` (listener in `initBoss`) clears them too. Export `clearHazards(state)` for INT.
+  - **Globs** (`state.acidGlobs`, see below): `ttl -= dt`, move by `vx/vy * dt`; at `ttl <= 0` the
+    glob becomes a pool at exactly `(tx, ty)`.
+  - **Pools** (`state.hazards`, contract shape `{ id, kind: 'acid', x, y, r, ttl, maxTtl, dps }`):
+    the player takes `dps * dt` via `player.damagePlayer` while its centre is within `r`.
+    Overlapping pools do not stack (highest dps applies). Skipped while `player.down`,
+    `downT > 0`, `invulnT > 0` or `invulnerable`. Pools never hurt zombies. Pruned at `ttl <= 0`.
+- **Deviation: globs are NOT in `state.bullets`.** `weapons.updateBullets` treats every bullet as
+  a ray-gun projectile (raycasts zombies/walls and calls `detonate`), so an acid glob there would
+  explode on the first zombie and never land. Globs live in **`state.acidGlobs`**:
+  `{ id, kind: 'acid', x, y, sx, sy, tx, ty, vx, vy, ttl, maxTtl, r, poolTtl, dps }`.
+  Render (Agent C): draw from `state.acidGlobs`; `sx, sy` = launch point, `tx, ty` = landing point,
+  progress `1 - ttl / maxTtl`; the arc height is purely visual.
+- `damagePlayer` is called every frame while inside a pool, so `player:damaged` fires per frame;
+  audio/HUD should throttle hurt feedback (or treat amounts < 1 as a tick).
+- Constants: all from `BOSS.acid`; fallbacks (6 / 0.5 / 3 / 0.44 / 0.8 / 50 / 5 / 25) only if the
+  config block is missing.

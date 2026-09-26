@@ -264,3 +264,42 @@ Tests that need the real `player.damagePlayer` or map functions are skipped whil
     `BOSS.instaKillFrac` is kept only for the contract test and is unused.
 - **Thundergun near share (#9):** `BOSS.thunderNearFrac` 0.15 -> 0.08 (config).
 - Minions still die instantly to Insta-Kill.
+
+## WO7 (Agent H): boss ability, acid spit, downed-player rule
+- **Ability**: `spawnZombie(kind 'boss')` sets `z.ability = bossAbilityOf(state, opts)`:
+  `opts.ability` wins, else `state.level.def.boss.ability`; only `'acid'` is recognised, anything
+  else (missing, unknown) is `'charge'`. Acid bosses also get `z.acid = { timer: BOSS.acid.every,
+  phase: 'idle' | 'telegraph', t }`. `z.charge` is still created (stays idle) so render code that
+  reads `z.charge.phase` keeps working. Bosses spawned without `ability` (old saves/tests) charge.
+- **Acid AI** (`updateBossAcid`, replaces `updateBossCharge` for acid bosses): hunts and melees as
+  normal; the timer counts down in idle; at 0 (player targetable, no swing winding up) it enters
+  `telegraph`: stops, cancels the attack, emits `boss:spit { x, y }`. After `BOSS.acid.telegraph`
+  it calls `lobAcid` at the player's current position and returns to idle with the timer reset.
+- **`lobAcid(state, z, px, py, A = acidCfg())`** (exported): `A.globs` globs in an even fan over
+  `[-spread, +spread]` around the boss->player bearing at the player's distance (centre glob on
+  the player for odd counts), target clamped to the map bounds, flight `A.flight`. Pushed into
+  **`state.acidGlobs`**, not `state.bullets` (weapons.updateBullets would detonate them; see
+  boss.md). Landing/pools/damage are `boss.updateHazards`. Deterministic (no rng).
+- **Downed-player rule**: `playerTargetable(p)` (exported) = `!p.down && !(downT > 0) &&
+  !(invulnT > 0)`. All kinds: no attack starts (they still chase, and stop at body contact),
+  a wind-up in progress is cancelled with no damage, the boss does not start a charge or spit,
+  and a dash passes without contact damage/knockback while the player is untargetable.
+- `killZombie` also resets `z.acid` to idle.
+- Tests: `tests/zombie.test.js` WO7 block (ability switch, spit cadence/telegraph, glob fan and
+  flight, downed/invulnerable rule for normal, minion and both boss abilities).
+
+## WO7 FIX-5 (docs/qa/wo7-playtest.md #4): acid globs land on reachable floor
+
+- `lobAcid` still fans the globs around the boss->player direction, then passes each target
+  through the new export `acidLandingPoint(map, arena, x, y, px, py)`:
+  - landing set = `map.arenaTiles` when the boss stands in the arena (`map.inArena`), otherwise
+    any tile `map.isWalkable` for the player (windows/pockets excluded);
+  - a target already on a valid tile is kept exactly (so the centre glob still lands on the player);
+  - otherwise it snaps to the centre of the nearest valid tile (Euclidean from the intended point;
+    arena: scan of `arenaTiles`, else a ring search);
+  - if no valid tile exists it falls back to the player's position.
+  The glob's velocity is aimed at the final point, so flight time is unchanged. Maps without a tile
+  grid (bare stubs) skip the snap.
+- Tests: `tests/zombie.test.js` "WO7 FIX-5 lobAcid" (pillar, past the arena wall, off-map aims all
+  land on arena floor; nearest-tile snaps; valid points untouched; player fallback; outside-arena
+  snap to the nearest walkable tile).

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PLAYER, POINTS } from '../src/config.js';
+import { PLAYER, POINTS, PERKS, MELEE } from '../src/config.js';
 import * as events from '../src/events.js';
 import { createEmptyState } from '../src/state.js';
 import * as weapons from '../src/weapons.js';
@@ -8,6 +8,7 @@ import * as powerups from '../src/powerups.js';
 import {
   createPlayer, initPlayer, updatePlayer, damagePlayer, addPoints, spendPoints,
   getActiveWeapon, giveWeapon, hasWeapon, equipTemporary, clearTemporary,
+  perkMods, addPerk, removeAllPerks, hasPerk,
 } from '../src/player.js';
 
 const isStub = (fn) => String(fn).includes('not implemented');
@@ -287,4 +288,237 @@ test('firing sets triggerHeld and auto-reloads on empty mag', { skip: weaponsStu
   assert.equal(w.reloading, true);
   updatePlayer(s, noInput, { x: 200, y: 100 }, 0.016);
   assert.equal(w.triggerHeld, false);
+});
+
+// ---- WO7: perks, Quick Revive, knife ----
+
+const REV = PERKS.list.revive;
+
+test('WO7 createPlayer has perk/knife fields', () => {
+  const p = createPlayer(0, 0);
+  assert.deepEqual(p.perks, []);
+  assert.equal(p.reviveUses, 0);
+  assert.equal(p.invulnT, 0);
+  assert.equal(p.downT, 0);
+  assert.equal(p.meleeCd, 0);
+  assert.equal(p.meleeT, 0);
+});
+
+test('WO7 perkMods: neutral without perks, multiplies per held perk', () => {
+  const p = createPlayer(0, 0);
+  assert.deepEqual(perkMods(p), {
+    reloadMult: 1, rpmMult: 1, bulletDamageMult: 1, speedMult: 1, sprintMult: 1,
+    weaponSlots: PLAYER.weaponSlots, maxHealth: PLAYER.maxHealth,
+  });
+  p.perks = ['speed', 'dtap', 'stamin', 'mule', 'jugg'];
+  const m = perkMods(p);
+  assert.equal(m.reloadMult, PERKS.list.speed.reloadMult);
+  assert.equal(m.rpmMult, PERKS.list.dtap.rpmMult);
+  assert.equal(m.bulletDamageMult, PERKS.list.dtap.bulletDamageMult);
+  assert.equal(m.speedMult, PERKS.list.stamin.speedMult);
+  assert.equal(m.sprintMult, PERKS.list.stamin.sprintMult);
+  assert.equal(m.weaponSlots, 3);
+  assert.equal(m.maxHealth, 250);
+  assert.equal(perkMods(null).speedMult, 1);
+});
+
+test('WO7 addPerk: unique, unknown refused, cap at maxPerks, counts perksBought', () => {
+  const s = makeState();
+  assert.equal(addPerk(s, 'speed'), true);
+  assert.equal(hasPerk(s.player, 'speed'), true);
+  assert.equal(addPerk(s, 'speed'), false, 'duplicate');
+  assert.equal(addPerk(s, 'nope'), false, 'unknown');
+  assert.equal(addPerk(s, 'dtap'), true);
+  assert.equal(addPerk(s, 'stamin'), true);
+  assert.equal(addPerk(s, 'revive'), true);
+  assert.equal(PERKS.maxPerks, 4);
+  assert.equal(addPerk(s, 'jugg'), false, 'cap');
+  assert.deepEqual(s.player.perks, ['speed', 'dtap', 'stamin', 'revive']);
+  assert.equal(s.stats.perksBought, 4);
+  assert.equal(hasPerk(s.player, 'jugg'), false);
+  assert.equal(hasPerk(null, 'jugg'), false);
+});
+
+test('WO7 Juggernog: maxHealth 250 and heals to full; lost -> back to 150', () => {
+  const s = makeState();
+  s.player.health = 40;
+  assert.equal(addPerk(s, 'jugg'), true);
+  assert.equal(s.player.maxHealth, PERKS.list.jugg.maxHealth);
+  assert.equal(s.player.health, 250);
+  const lost = capture('perk:lost');
+  removeAllPerks(s, 'debug');
+  assert.equal(s.player.maxHealth, PLAYER.maxHealth);
+  assert.equal(s.player.health, PLAYER.maxHealth);
+  assert.deepEqual(lost, [{ perkId: 'jugg', reason: 'debug' }]);
+  assert.deepEqual(s.player.perks, []);
+});
+
+test('WO7 Mule Kick: third slot, giveWeapon fills it, digit 3 and Q cycle 3 slots', { skip: weaponsStub }, () => {
+  const s = makeState();
+  giveWeapon(s, 'mr6');
+  giveWeapon(s, 'kn44');
+  assert.equal(addPerk(s, 'mule'), true);
+  assert.equal(s.player.weapons.length, 3);
+  assert.equal(s.player.weapons[2], null);
+  giveWeapon(s, 'mr6');
+  assert.equal(s.player.activeSlot, 2, 'third gun goes to the new slot');
+  updatePlayer(s, { ...noInput, slot: 1 }, null, 0.016);
+  assert.equal(s.player.activeSlot, 0);
+  updatePlayer(s, { ...noInput, swap: true }, null, 0.016);
+  assert.equal(s.player.activeSlot, 1);
+  updatePlayer(s, { ...noInput, swap: true }, null, 0.016);
+  assert.equal(s.player.activeSlot, 2);
+  updatePlayer(s, { ...noInput, swap: true }, null, 0.016);
+  assert.equal(s.player.activeSlot, 0);
+  updatePlayer(s, { ...noInput, slot: 3 }, null, 0.016);
+  assert.equal(s.player.activeSlot, 2);
+});
+
+test('WO7 Mule Kick lost: third gun dropped, active slot 2 falls back to slot 0', () => {
+  const s = makeState();
+  const a = fakeWeapon('a'), b = fakeWeapon('b'), c = fakeWeapon('c', { reloading: true, reloadT: 1 });
+  s.player.weapons = [a, b];
+  addPerk(s, 'mule');
+  s.player.weapons[2] = c;
+  s.player.activeSlot = 2;
+  const eq = capture('weapon:equipped');
+  removeAllPerks(s, 'revive');
+  assert.deepEqual(s.player.weapons, [a, b]);
+  assert.equal(s.player.activeSlot, 0);
+  assert.equal(c.reloading, false);
+  assert.deepEqual(eq, [{ weaponId: 'a', slot: 0 }]);
+  // Not active: slot 1 stays selected, third gun still dropped.
+  addPerk(s, 'mule');
+  s.player.weapons[2] = c;
+  s.player.activeSlot = 1;
+  removeAllPerks(s, 'debug');
+  assert.deepEqual(s.player.weapons, [a, b]);
+  assert.equal(s.player.activeSlot, 1);
+  // Re-buying gives an empty third slot.
+  addPerk(s, 'mule');
+  assert.deepEqual(s.player.weapons, [a, b, null]);
+});
+
+test('WO7 removeAllPerks emits perk:lost per perk in order; no-op when empty', () => {
+  const s = makeState();
+  addPerk(s, 'speed'); addPerk(s, 'revive'); addPerk(s, 'stamin');
+  const lost = capture('perk:lost');
+  removeAllPerks(s, 'revive');
+  assert.deepEqual(lost.map((e) => e.perkId), ['speed', 'revive', 'stamin']);
+  assert.ok(lost.every((e) => e.reason === 'revive'));
+  removeAllPerks(s, 'debug');
+  assert.equal(lost.length, 3);
+});
+
+test('WO7 without Quick Revive, 0 HP is game over as before', () => {
+  const s = makeState();
+  addPerk(s, 'speed');
+  const downed = capture('player:downed');
+  const down = capture('player:down');
+  damagePlayer(s, 999);
+  assert.equal(s.player.down, true);
+  assert.equal(s.player.downT, 0);
+  assert.equal(downed.length, 0);
+  assert.equal(down.length, 1);
+});
+
+test('WO7 Quick Revive: down pause, no move/fire, revive at 150 with invulnerability, all perks lost', () => {
+  const s = makeState();
+  s.player.reviveUses = 1;
+  addPerk(s, 'jugg'); addPerk(s, 'revive'); addPerk(s, 'stamin');
+  const downed = capture('player:downed');
+  const revived = capture('player:revived');
+  const down = capture('player:down');
+  const lost = capture('perk:lost');
+  damagePlayer(s, 300);
+  assert.equal(s.player.down, false, 'not game over');
+  assert.equal(s.player.health, 0);
+  assert.equal(s.player.downT, REV.downSeconds);
+  assert.deepEqual(downed, [{ reviveIn: REV.downSeconds }]);
+  assert.equal(down.length, 0);
+  // Further damage is ignored while down.
+  damagePlayer(s, 50);
+  assert.equal(s.player.health, 0);
+  // No movement while down.
+  const x0 = s.player.x;
+  updatePlayer(s, { ...noInput, moveX: 1, fire: true }, null, 0.5);
+  assert.equal(s.player.x, x0);
+  assert.equal(s.player.moving, false);
+  assert.equal(revived.length, 0);
+  assert.ok(Math.abs(s.player.downT - (REV.downSeconds - 0.5)) < 1e-9);
+  updatePlayer(s, noInput, null, 0.5);
+  assert.equal(revived.length, 0);
+  updatePlayer(s, noInput, null, 0.6); // pause over
+  assert.equal(s.player.downT, 0);
+  assert.equal(s.player.maxHealth, PLAYER.maxHealth);
+  assert.equal(s.player.health, PLAYER.maxHealth);
+  assert.deepEqual(revived, [{ health: PLAYER.maxHealth }]);
+  assert.deepEqual(s.player.perks, []);
+  assert.deepEqual(lost.map((e) => e.perkId), ['jugg', 'revive', 'stamin']);
+  assert.equal(s.player.reviveUses, 1, 'uses unchanged by revive');
+  assert.equal(s.player.invulnT, REV.invulnSeconds);
+  // Invulnerable: damage ignored until invulnT runs out.
+  damagePlayer(s, 100);
+  assert.equal(s.player.health, PLAYER.maxHealth);
+  updatePlayer(s, noInput, null, 1.0);
+  damagePlayer(s, 100);
+  assert.equal(s.player.health, PLAYER.maxHealth);
+  updatePlayer(s, noInput, null, 1.01);
+  assert.equal(s.player.invulnT, 0);
+  damagePlayer(s, 100);
+  assert.equal(s.player.health, PLAYER.maxHealth - 100);
+  // Now without the perk, going down again is game over.
+  damagePlayer(s, 999);
+  assert.equal(s.player.down, true);
+  assert.equal(down.length, 1);
+});
+
+test('WO7 Stamin-Up: move speed x1.07, sprint mult x1.2', () => {
+  const s = makeState();
+  addPerk(s, 'stamin');
+  const st = PERKS.list.stamin;
+  updatePlayer(s, { ...noInput, moveX: 1 }, null, 1);
+  assert.ok(Math.abs(s.player.x - (100 + PLAYER.speed * st.speedMult)) < 1e-6);
+  const x1 = s.player.x;
+  updatePlayer(s, { ...noInput, moveX: 1, sprint: true }, null, 1);
+  assert.ok(Math.abs(s.player.x - (x1 + PLAYER.speed * st.speedMult * PLAYER.sprintMult * st.sprintMult)) < 1e-6);
+});
+
+test('WO7 knife timers tick down; melee input without a target is harmless', () => {
+  const s = makeState();
+  s.player.meleeCd = 0.5; s.player.meleeT = 0.25;
+  updatePlayer(s, noInput, null, 0.2);
+  assert.ok(Math.abs(s.player.meleeCd - 0.3) < 1e-9);
+  assert.ok(Math.abs(s.player.meleeT - 0.05) < 1e-9);
+  updatePlayer(s, noInput, null, 0.2);
+  assert.equal(s.player.meleeT, 0);
+  assert.doesNotThrow(() => updatePlayer(s, { ...noInput, melee: true }, { x: 200, y: 100 }, 0.016));
+});
+
+test('WO7 knife input calls weapons.meleeAttack (sets the swing timers)',
+  { skip: typeof weapons.meleeAttack !== 'function' }, () => {
+    const s = makeState();
+    s.zombies = [];
+    updatePlayer(s, { ...noInput, melee: true }, { x: 200, y: 100 }, 0.016);
+    assert.ok(s.player.meleeT > 0 || s.player.meleeCd > 0);
+  });
+
+test('WO7 no firing during the knife swing', { skip: weaponsStub }, () => {
+  const s = makeState();
+  const w = giveWeapon(s, 'mr6');
+  const mag = w.mag;
+  s.player.meleeT = 0.2;
+  updatePlayer(s, { ...noInput, fire: true }, { x: 200, y: 100 }, 0.016);
+  assert.equal(w.mag, mag);
+});
+
+test('WO7 knife kill pays MELEE.bonusPoints on top of perKill and counts meleeKills', { skip: powerupsStub }, () => {
+  const s = makeState();
+  initPlayer(s);
+  events.emit('zombie:killed', { zombie: {}, cause: 'melee', x: 1, y: 2 });
+  events.emit('melee:hit', { zombieId: 1, killed: true });
+  events.emit('melee:hit', { zombieId: 2, killed: false });
+  assert.equal(s.player.points, POINTS.perKill + MELEE.bonusPoints);
+  assert.equal(s.stats.meleeKills, 1);
+  assert.equal(s.stats.kills, 1);
 });

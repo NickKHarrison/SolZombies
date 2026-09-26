@@ -64,3 +64,12 @@ because map.js is rewritten concurrently). Main should never call it.
   `ROUNDS.firstRoundDelay` and does not heal. Debug `setLevel(i > 0)` heals too.
 - **Power-ups during the fade:** handled in `main.js` (not here): while `state.transition` is
   set, every numeric `state.powerups.active[type]` is pushed forward by `dt`.
+
+## WO7 FIX-3
+
+- **L1:** `startLevel` resets `state.hazards` and `state.acidGlobs`, so acid pools and globs from the old level are gone from the midpoint swap on. Before this, they were drawn on the new map for the rest of the fade.
+- **Balance #4:** `LEVELS_CFG.loopWallUpgrade` maps wall gun ids to replacements. It is one step and not chained. Examples: level-1 layout `sheiva→m8a7`, `kn44→peacekeeper`, `kuda→hg40`; level-2 layout `weevil→hg40`, `xr2→m8a7`, `manowar→peacekeeper`.
+  - `levelDefFor` (loop ≥ 1) builds a new `wallbuys` object with `loopWallbuys(base.wallbuys)` inside the memoized loop def. Letters are kept, and base defs are never mutated.
+  - Levels 4+ sell tier-3 guns and their ammo.
+- **Balance #5:** `LEVELS_CFG.loop.speedMultCap` is raised from 1.15 to 1.3. Speed is now L4 1.236, L5 1.273, L6+ 1.3.
+- **Tests:** `tests/level.test.js` covers hazards on start and mid-fade, the loop wall buys (including the real `map.loadMap`), and the speed cap.

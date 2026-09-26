@@ -1,13 +1,14 @@
 // weapons.js (Agent C) — weapon definitions, firing (hitscan + ray gun projectiles),
 // reload, ammo refills. Pure logic: no DOM access. See WORK_ORDER.md 5.4 and docs/notes/weapons.md.
 
-import { PRICES, COLORS, FIXED_DT_CAP, WEAPON_FX, SHOP, BOSS, ZOMBIE } from './config.js';
+import { PRICES, COLORS, FIXED_DT_CAP, WEAPON_FX, SHOP, BOSS, ZOMBIE, PERKS, MELEE } from './config.js';
 import { emit } from './events.js';
 import { rayCircle, dist, nextId } from './math.js';
 import { raycastWalls } from './map.js';
 import { damageZombie } from './zombie.js';
 import * as zombieMod from './zombie.js';
 import { damagePlayer } from './player.js';
+import * as playerMod from './player.js';
 
 // Tunables live in config.js WEAPON_FX (moved by integrator).
 const DEFAULT_RANGE = WEAPON_FX.defaultRange;
@@ -34,7 +35,7 @@ function def(o) {
     cone: null,
     cost: null,
     noReload: false,
-    tier: 1,          // WO5: 2 = level-2 wall gun (box weight stays boxOnly)
+    tier: 1,          // WO5: 2 = level-2 wall gun, WO7: 3 = level-3 wall gun (box weight boxOnly)
     ...o,
   });
 }
@@ -71,6 +72,12 @@ export const WEAPONS = Object.freeze({
   marshal16:  def({ id: 'marshal16',  name: 'Marshal 16',   cls: 'shotgun', sprite: 'marshal16', cost: 225, tier: 2, damage: 100, rpm: 150, auto: false, mag: 2,  reserve: 40,  reloadTime: 1.5, spread: 0.16, pellets: 8, range: 650 }),
   gorgon:     def({ id: 'gorgon',     name: 'Gorgon',       cls: 'lmg',     sprite: 'gorgon',    cost: 300, tier: 2, damage: 175, rpm: 480, auto: true,  mag: 48, reserve: 240, reloadTime: 4.0, spread: 0.05, penetration: 3 }),
   dredge48:   def({ id: 'dredge48',   name: '48 Dredge',    cls: 'lmg',     sprite: 'dredge48',  cost: 275, tier: 2, damage: 85,  rpm: 900, auto: true,  mag: 48, reserve: 288, reloadTime: 3.6, spread: 0.07 }),
+  // WO7 1.5 (Agent F): level-3 (tier 3) wall guns, box weight boxOnly (2), ammo x PERKS.ammoMultTier3.
+  // Damage/rpm retuned from the 1.5 table so each beats every tier-2 gun on level-3 health
+  // (healthMult 2.0) and price tracks power; tests/weapons.test.js "WO7 tier-3 TTK" pins it.
+  hg40:       def({ id: 'hg40',       name: 'HG 40',           cls: 'smg', sprite: 'hg40',        cost: 350, tier: 3, damage: 130, rpm: 800, auto: true, mag: 40, reserve: 280, reloadTime: 1.9, spread: 0.05, penetration: 2 }),  // WO7 FIX-5 (balance #2): 120 -> 130, pen 1 -> 2
+  m8a7:       def({ id: 'm8a7',       name: 'M8A7',            cls: 'ar',  sprite: 'm8a7',        cost: 375, tier: 3, damage: 140, rpm: 780, auto: true, mag: 32, reserve: 256, reloadTime: 2.2, spread: 0.02, penetration: 3 }),  // WO7 FIX-5 (balance #3): pen 2 -> 3
+  peacekeeper: def({ id: 'peacekeeper', name: 'Peacekeeper MK2', cls: 'ar', sprite: 'peacekeeper', cost: 400, tier: 3, damage: 185, rpm: 650, auto: true, mag: 30, reserve: 270, reloadTime: 2.3, spread: 0.035, penetration: 3 }),
   raygun:     def({ id: 'raygun',     name: 'Ray Gun',      cls: 'special', sprite: 'raygun', cost: null, damage: 1000, rpm: 180,  auto: false, mag: 20,  reserve: 160, reloadTime: 3.0, spread: 0.01,
                     projectile: Object.freeze({ speed: 900, splashRadius: 90, splashDamage: 300 }) }),
   thundergun: def({ id: 'thundergun', name: 'Thundergun', cls: 'special', sprite: 'thundergun', cost: null,
@@ -91,11 +98,12 @@ export const BOX_WEAPON_IDS = Object.freeze(
 export const WONDER_WEAPON_IDS = Object.freeze(['raygun', 'thundergun']);
 
 // WO5 3.4: wall guns whose box weight is SHOP.boxWeights.wall (3) = the level-1 (WO4) wall guns.
+// WO7: tier-3 (level-3) wall guns are excluded too (box weight boxOnly = 2).
 // Level-2 wall guns (def.tier === 2: the six new guns + haymaker12 + drakon) have a cost but keep
 // the boxOnly weight (2), so adding them does not change the relative odds of the WO4 box guns.
 // shop.boxWeights(boxIds, wallIds) should default wallIds to this list to stay consistent.
 export const BOX_WALL_WEIGHT_IDS = Object.freeze(
-  WALL_WEAPON_IDS.filter((id) => WEAPONS[id].tier !== 2),
+  WALL_WEAPON_IDS.filter((id) => !(WEAPONS[id].tier >= 2)),
 );
 
 // Extra export (not in contract 3.6): mystery box weights, for shop.js.
@@ -124,7 +132,34 @@ const DEFAULT_DEPS = Object.freeze({
 let deps = { ...DEFAULT_DEPS };
 
 export function setWeaponDeps(overrides) { deps = { ...deps, ...overrides }; }
-export function resetWeaponDeps() { deps = { ...DEFAULT_DEPS }; }
+export function resetWeaponDeps() { deps = { ...DEFAULT_DEPS }; lastState = null; }
+
+// ---------------------------------------------------------------------------
+// WO7 T2: perk multipliers (player.perkMods, Agent E). Read lazily through the namespace import
+// and guarded, so a missing / throwing perkMods means "no perks" (every multiplier 1).
+// ---------------------------------------------------------------------------
+
+const NO_MODS = Object.freeze({ reloadMult: 1, rpmMult: 1, bulletDamageMult: 1 });
+
+// startReload(w) / updateWeapon(w, dt) predate perks and are called without state (player.js).
+// They fall back to the last state seen by tryFire / meleeAttack / updateBullets (main.js calls
+// updateBullets every frame), so Speed Cola still applies. Tests reset it via resetWeaponDeps.
+let lastState = null;
+function remember(state) { if (state && typeof state === 'object') lastState = state; }
+
+function num(v) { return (typeof v === 'number' && Number.isFinite(v) && v > 0) ? v : 1; }
+
+// Extra export: the weapon-relevant perk multipliers for state.player. Death Machine (a timed
+// power-up weapon with fixed stats) ignores perks entirely (WO7 decision, docs/notes/weapons.md).
+export function weaponPerkMods(state, w) {
+  if (w && w.def && w.def.id === 'deathmachine') return NO_MODS;
+  const p = state && state.player;
+  if (!p || typeof playerMod.perkMods !== 'function') return NO_MODS;
+  let m;
+  try { m = playerMod.perkMods(p); } catch { return NO_MODS; }
+  if (!m) return NO_MODS;
+  return { reloadMult: num(m.reloadMult), rpmMult: num(m.rpmMult), bulletDamageMult: num(m.bulletDamageMult) };
+}
 
 // ---------------------------------------------------------------------------
 // Weapon instances
@@ -156,11 +191,13 @@ export function updateWeapon(w, dt) {
   }
 }
 
-export function startReload(w) {
+// WO7: optional `state` (defaults to the last state seen) for Speed Cola (reloadTime x reloadMult).
+export function startReload(w, state = lastState) {
   if (!w || w.def.noReload || w.reloading) return false;
   if (!(w.reserve > 0) || !(w.mag < w.def.mag)) return false;
+  remember(state);
   w.reloading = true;
-  w.reloadT = w.def.reloadTime;
+  w.reloadT = w.def.reloadTime * weaponPerkMods(state, w).reloadMult;
   emit('weapon:reload', { weaponId: w.id });
   return true;
 }
@@ -179,15 +216,19 @@ export function refillAll(w) {
 }
 
 const TIER2_AMMO_MULT = 0.3;
+const TIER3_AMMO_MULT = 0.3;
 
 export function ammoCost(id) {
   const d = WEAPONS[id];
   if (!d || typeof d.cost !== 'number') return Infinity; // not sold on walls: never affordable
   // WO5 balance #10: level-2 (tier 2) wall ammo is 0.3x the gun price (level-2 zombies have 1.5x
   // health but still pay 10 per kill); tier-1 guns keep PRICES.wallAmmoMult (0.5).
-  const mult = d.tier === 2
-    ? (typeof PRICES.wallAmmoMultTier2 === 'number' ? PRICES.wallAmmoMultTier2 : TIER2_AMMO_MULT)
-    : PRICES.wallAmmoMult;
+  // WO7: tier 3 (level-3 walls) uses PERKS.ammoMultTier3 (0.3).
+  const mult = d.tier === 3
+    ? (PERKS && typeof PERKS.ammoMultTier3 === 'number' ? PERKS.ammoMultTier3 : TIER3_AMMO_MULT)
+    : d.tier === 2
+      ? (typeof PRICES.wallAmmoMultTier2 === 'number' ? PRICES.wallAmmoMultTier2 : TIER2_AMMO_MULT)
+      : PRICES.wallAmmoMult;
   return Math.round(d.cost * mult);
 }
 
@@ -206,7 +247,8 @@ function isAlive(z) {
 // Extra export: single hitscan ray. Finds walls via deps.raycastWalls (skipped when state.map is
 // null), hits the nearest `penetration` live zombies in front of the wall with `damage`, and
 // pushes a tracer effect. Returns { hits: [zombie...], endX, endY }.
-export function hitscan(state, ox, oy, dx, dy, range, penetration, damage) {
+// WO7 FIX-5: optional `bossDamage` (default `damage`) is dealt instead to zombies of kind 'boss'.
+export function hitscan(state, ox, oy, dx, dy, range, penetration, damage, bossDamage = damage) {
   let wallT = state.map ? deps.raycastWalls(state.map, ox, oy, dx, dy, range) : Infinity;
   if (!(wallT >= 0)) wallT = Infinity;
   const maxT = Math.min(wallT, range);
@@ -226,7 +268,7 @@ export function hitscan(state, ox, oy, dx, dy, range, penetration, damage) {
     const { z, t } = cands[i];
     const hx = ox + dx * t, hy = oy + dy * t;
     hits.push(z);
-    deps.damageZombie(state, z, damage, 'weapon', hx, hy);
+    deps.damageZombie(state, z, z.kind === 'boss' ? bossDamage : damage, 'weapon', hx, hy);
     if (i === penetration - 1) endT = t;
   }
   if (!Number.isFinite(endT)) endT = range;
@@ -315,12 +357,13 @@ function thunderBoss(state, z, zx, zy, d, near) {
 
 export function tryFire(state, w, ox, oy, dx, dy) {
   if (!w) return false;
+  remember(state);
   const wasHeld = w.triggerHeld;
   w.triggerHeld = true; // the trigger is being pulled right now
 
   if (w.reloading) return false;
   if (w.mag <= 0) {
-    if (w.reserve > 0) startReload(w);
+    if (w.reserve > 0) startReload(w, state);
     else if (!wasHeld) emit('weapon:empty', { weaponId: w.id });
     return false;
   }
@@ -328,7 +371,11 @@ export function tryFire(state, w, ox, oy, dx, dy) {
   if (w.cooldown > 0) return false;
 
   const d = w.def;
-  const interval = 60 / d.rpm;
+  const mods = weaponPerkMods(state, w);
+  // WO7 Double Tap II: rate of fire x rpmMult for every gun (Death Machine exempt, see above).
+  const interval = 60 / (d.rpm * mods.rpmMult);
+  const bossMult = Math.min(mods.bulletDamageMult,
+    BOSS && Number.isFinite(BOSS.dtapDamageMult) ? BOSS.dtapDamageMult : Infinity);
   // Carry negative cooldown only during sustained fire; a fresh pull starts a clean interval.
   w.cooldown = (wasHeld && w.cooldown < 0) ? w.cooldown + interval : interval;
   w.mag -= 1;
@@ -353,7 +400,11 @@ export function tryFire(state, w, ox, oy, dx, dy) {
     let anyHit = false;
     for (let p = 0; p < d.pellets; p++) {
       const a = baseAngle + jitter();
-      const res = hitscan(state, ox, oy, Math.cos(a), Math.sin(a), d.range, d.penetration, d.damage);
+      // WO7 Double Tap II: hitscan bullets (incl. shotgun pellets) deal x bulletDamageMult; the
+      // Ray Gun projectile and the Thundergun cone above are unchanged.
+      // WO7 FIX-5 (balance #1): vs the boss the multiplier is capped at BOSS.dtapDamageMult.
+      const res = hitscan(state, ox, oy, Math.cos(a), Math.sin(a), d.range, d.penetration,
+        d.damage * mods.bulletDamageMult, d.damage * bossMult);
       if (res.hits.length) anyHit = true;
     }
     if (anyHit && state.stats) state.stats.shotsHit++;
@@ -364,7 +415,7 @@ export function tryFire(state, w, ox, oy, dx, dy) {
   emit('weapon:fired', { weaponId: w.id, x: ox, y: oy, dirX: bx, dirY: by });
 
   // Auto-reload as soon as the mag runs dry (player may also call startReload; it is idempotent).
-  if (w.mag <= 0 && w.reserve > 0) startReload(w);
+  if (w.mag <= 0 && w.reserve > 0) startReload(w, state);
   return true;
 }
 
@@ -418,10 +469,14 @@ function detonate(state, b, x, y, direct) {
 }
 
 export function updateBullets(state, dt) {
+  remember(state);
   const bullets = state.bullets;
   if (!Array.isArray(bullets) || bullets.length === 0) return;
   const keep = [];
   for (const b of bullets) {
+    // WO7: acid globs (kind 'acid', Agent H) and anything else without a weapon projectile def
+    // share state.bullets; they are not ours to move or detonate, keep them untouched.
+    if (!b || b.kind === 'acid' || !b.def || !b.def.projectile) { if (b) keep.push(b); continue; }
     const speed = Math.hypot(b.vx, b.vy);
     if (!(speed > 0)) continue;
     const dx = b.vx / speed, dy = b.vy / speed;
@@ -451,4 +506,90 @@ export function updateBullets(state, dt) {
   }
   bullets.length = 0;
   for (const b of keep) bullets.push(b);
+}
+
+// ---------------------------------------------------------------------------
+// WO7 T3: knife (1.3 / 3.3)
+// ---------------------------------------------------------------------------
+
+const SLASH_TTL = 0.18;
+const MELEE_DEFAULTS = Object.freeze({ damage: 150, cooldown: 0.5, reach: 44, halfAngle: 0.7, maxTargets: 3,
+  knockback: 90, swingTime: 0.25, bonusPoints: 5 });
+function meleeCfg() { return { ...MELEE_DEFAULTS, ...(MELEE || {}) }; }
+
+function activeWeaponOf(p) {
+  if (typeof playerMod.getActiveWeapon === 'function') {
+    try { return playerMod.getActiveWeapon(p); } catch { /* fall through */ }
+  }
+  return p.tempWeapon || (Array.isArray(p.weapons) ? p.weapons[p.activeSlot | 0] : null) || null;
+}
+
+// Knife swing. Respects player.meleeCd (no swing while > 0, or while the player is down), sets
+// meleeCd = MELEE.cooldown and meleeT = MELEE.swingTime, cancels an active reload (BO3 rule),
+// pushes a 'slash' effect and emits melee:swing, then hits up to MELEE.maxTargets live zombies
+// (nearest first) whose edge is within MELEE.reach of the player's edge, within MELEE.halfAngle
+// of player.angle, and in line of sight (walls, windows, doors block, same test as the ray gun
+// splash / Thundergun). Damage MELEE.damage via damageZombie (cause 'weapon', so kills pay
+// POINTS.perKill and can drop power-ups; Insta-Kill and the boss per-hit cap apply inside
+// damageZombie; Double Tap does not). Survivors are knocked back at MELEE.knockback px/s with a
+// stun equal to the slide time (boss: pushed by the same slide distance, no stun). Emits
+// melee:hit { zombieId, killed } per target (player.js pays MELEE.bonusPoints on killed).
+// Returns the number of zombies hit (0 when the swing was refused or whiffed).
+export function meleeAttack(state, player) {
+  remember(state);
+  const p = player || (state && state.player);
+  if (!p) return 0;
+  if (p.meleeCd > 0 || p.downT > 0 || p.down) return 0;
+  const M = meleeCfg();
+  p.meleeCd = M.cooldown;
+  p.meleeT = M.swingTime;
+
+  const w = activeWeaponOf(p);
+  if (w && w.reloading) { w.reloading = false; w.reloadT = 0; }
+
+  const angle = Number.isFinite(p.angle) ? p.angle : 0;
+  const pr = Number.isFinite(p.radius) ? p.radius : 0;
+  const ox = p.x, oy = p.y;
+  pushEffect(state, { type: 'slash', x: ox, y: oy, angle, ttl: SLASH_TTL, maxTtl: SLASH_TTL });
+  emit('melee:swing', { x: ox, y: oy, angle });
+
+  const cands = [];
+  for (const z of (state && state.zombies) || []) {
+    if (!isAlive(z)) continue;
+    const zx = z.x - ox, zy = z.y - oy;
+    const d = Math.hypot(zx, zy);
+    const zr = Number.isFinite(z.radius) ? z.radius : 0;
+    if (d - zr - pr > M.reach) continue;
+    if (d > 1e-6 && Math.abs(angleDiff(Math.atan2(zy, zx), angle)) > M.halfAngle) continue;
+    if (!splashVisible(state, ox, oy, z.x, z.y, zr)) continue;
+    cands.push({ z, d, zx, zy });
+  }
+  cands.sort((a, b) => a.d - b.d);
+  const targets = cands.slice(0, Math.max(0, M.maxTargets | 0));
+
+  const vMin = ZOMBIE.stunMinSpeed, k = ZOMBIE.knockFriction;
+  const kb = M.knockback;
+  const slidePx = k > 0 ? Math.max(0, (kb - vMin) / k) : 0;
+  const stun = (k > 0 && vMin > 0 && kb > vMin) ? Math.log(kb / vMin) / k : 0;
+
+  let hits = 0;
+  for (const { z, d, zx, zy } of targets) {
+    if (!isAlive(z)) continue;
+    const ux = d > 1e-6 ? zx / d : Math.cos(angle), uy = d > 1e-6 ? zy / d : Math.sin(angle);
+    const zr = Number.isFinite(z.radius) ? z.radius : 0;
+    const hx = z.x - ux * zr, hy = z.y - uy * zr;
+    const res = deps.damageZombie(state, z, M.damage, 'weapon', hx, hy);
+    const killed = res === true || !isAlive(z);
+    hits++;
+    if (!killed && kb > 0) {
+      if (z.kind === 'boss') {
+        const pushed = slidePx > 0 ? deps.pushZombie(state, z, ux * slidePx, uy * slidePx) : false;
+        if (pushed == null && stun > 0) deps.applyKnockback(state, z, ux * kb, uy * kb, stun);
+      } else if (stun > 0) {
+        deps.applyKnockback(state, z, ux * kb, uy * kb, stun);
+      }
+    }
+    emit('melee:hit', { zombieId: z.id, killed });
+  }
+  return hits;
 }

@@ -6,6 +6,8 @@ import { on } from './events.js';
 import { POWERUP_LABEL } from './powerups.js';
 import { createFaceState, updateFaceState, faceEvent, faceFrameKey, composeFace } from './sprites/face.js';
 import * as bossMod from './boss.js'; // WO5: boss bar reads bossHpFrac lazily (guarded)
+import * as config from './config.js'; // WO7: PERKS (perk row, revive overlay, banner), guarded
+import * as weaponsMod from './weapons.js'; // WO7: favourite weapon name on game over (guarded)
 
 // Fallback labels in case powerups.js does not (yet) provide a key.
 const FALLBACK_LABEL = {
@@ -57,6 +59,12 @@ let bossBarKey = null;           // bossId of the fight the lag belongs to
 // ACTION button carries the prompt). Kept across initHud so either call order works.
 let mobileHud = false;
 let lastState = null;            // for rebuilding the centre screen when mobileHud flips
+// WO7 T4: high-score data for the menu (setScores) and the game-over run summary
+// (setGameOverSummary). scoreSummary survives initHud (menu data, set at boot); the game-over
+// summary is dropped when a new game starts (phase -> playing / menu).
+let scoreSummary = null;
+let gameOverSummary = null;
+const TOP_ROWS = 5;
 
 // ---------- small DOM helpers ----------
 
@@ -147,6 +155,14 @@ function build() {
 
   const screen = el('div', 'hud-screen hidden');
 
+  // WO7 T2: perk bottles above HEALTH (bottom-left) and the Quick Revive "down" overlay.
+  const perks = el('div', 'hud-perks hidden');
+  const down = el('div', 'hud-down hidden');
+  const downFill = el('div', 'hud-down-fill');
+  const downTrack = el('div', 'hud-down-track');
+  downTrack.append(downFill);
+  down.append(el('div', 'hud-down-text', 'REVIVING\u2026'), downTrack);
+
   // WO5 3.6: persistent level label under the round counter, boss bar below the power-up chips.
   const levelLabel = el('div', 'hud-level hidden');
   round.append(levelLabel);
@@ -158,7 +174,7 @@ function build() {
   bossTrack.append(bossLagEl, bossFill);
   bossBar.append(bossName, bossTrack);
 
-  root.append(points, round, weapon, powerups, bossBar, bottomCenter, screen, faceBox, vitals);
+  root.append(points, round, weapon, powerups, bossBar, bottomCenter, down, screen, faceBox, vitals, perks);
   faceCtx = faceCanvas.getContext('2d');
 
   els = {
@@ -168,6 +184,7 @@ function build() {
     powerups, banner, prompt, screen,
     faceBox, vitals, health, healthValue, faceCanvas, kills, killsValue,
     levelLabel, bossBar, bossName, bossLag: bossLagEl, bossFill,
+    perks, down, downFill,
   };
 
   // Self-cleaning animations.
@@ -185,23 +202,26 @@ function buildScreen(state) {
   s.textContent = '';
   const phase = state.phase;
   if (phase === 'menu') {
-    s.append(
-      el('div', 'screen-title', 'SOL ZOMBIES'),
-      el('div', 'screen-sub blink', mobileHud ? 'Tap to start' : 'Click / press Enter to start'),
-    );
+    s.append(el('div', 'screen-title', 'SOL ZOMBIES'));
+    // WO7 T4: best run under the title.
+    const best = bestOf(scoreSummary);
+    if (best) s.append(el('div', 'screen-best', `BEST: ROUND ${best.round} · ${fmtInt(best.points)} PTS`));
+    s.append(el('div', 'screen-sub blink', mobileHud ? 'Tap to start' : 'Click / press Enter to start'));
     const list = el('ul', 'screen-controls');
     const controls = mobileHud ? [
       ['Left stick', 'Move (full = sprint)'],
       ['Right stick', 'Aim + fire'],
       ['RELOAD / SWAP / ‖', 'Reload / swap weapon / pause'],
+      ['KNIFE', 'Melee swing'],
       ['ACTION', 'Buy / open / rebuild (hold)'],
     ] : [
       ['WASD / Arrows', 'Move'],
       ['Shift', 'Sprint'],
       ['Mouse', 'Aim / Fire'],
       ['R', 'Reload'],
-      ['F / E', 'Buy guns / open doors / rebuild (hold)'],
-      ['1 / 2 / Q / Wheel', 'Swap weapon'],
+      ['V', 'Knife'],
+      ['F / E', 'Buy guns / perks / doors / rebuild (hold)'],
+      ['1 / 2 / 3 / Q / Wheel', 'Swap weapon (3 = Mule Kick)'],
       ['Esc / P', 'Pause'],
     ];
     for (const [k, v] of controls) {
@@ -209,23 +229,57 @@ function buildScreen(state) {
       li.append(el('span', 'key', k), el('span', 'what', v));
       list.append(li);
     }
-    s.append(list);
+    // WO7 T4: controls and the top-5 table side by side (fits 16:9 on desktop and mobile).
+    const cols = el('div', 'screen-cols');
+    cols.append(list);
+    const top = topOf(scoreSummary);
+    if (top.length) cols.append(buildTopTable(top, 0));
+    s.append(cols);
   } else if (phase === 'gameover') {
-    const st = state.stats || {};
-    const n = st.roundReached || (state.rounds && state.rounds.round) || 0;
-    const fired = st.shotsFired || 0;
-    const acc = fired > 0 ? Math.round(((st.shotsHit || 0) / fired) * 100) : 0;
+    const g = gameOverSummary;
+    const sum = runSummary(state, g);
     s.append(
       el('div', 'screen-title gameover', 'GAME OVER'),
-      el('div', 'screen-headline', `YOU SURVIVED ${n} ROUND${n === 1 ? '' : 'S'}`),
+      el('div', 'screen-headline', `YOU SURVIVED ${sum.rounds} ROUND${sum.rounds === 1 ? '' : 'S'}`),
     );
+    // WO7 T4: rank line ("NEW BEST ROUND!" and/or "#3 ALL TIME").
+    if (g && g.rankText) {
+      // FIX-2 (playtest #13): unranked runs (died before round 1) show main.js's rankText instead.
+      const line = el('div', 'screen-rank');
+      line.append(el('span', 'rank-pos', String(g.rankText)));
+      s.append(line);
+    } else if (g) {
+      const rank = Number(g.rank) > 0 ? (g.rank | 0) : 0;
+      const bestText = g.isBestRound ? 'NEW BEST ROUND!' : (g.isBestPoints ? 'NEW BEST SCORE!' : '');
+      if (bestText || rank) {
+        const line = el('div', 'screen-rank' + (bestText ? ' best' : ''));
+        if (bestText) line.append(el('span', 'rank-best', bestText));
+        if (rank) line.append(el('span', 'rank-pos', `#${rank} ALL TIME`));
+        s.append(line);
+      }
+    }
     const table = el('div', 'screen-stats');
-    for (const [k, v] of [['Kills', st.kills || 0], ['Points earned', st.pointsEarned || 0], ['Accuracy', acc + '%']]) {
+    const rows = [
+      ['Rounds', sum.rounds],
+      ['Kills', fmtInt(sum.kills)],
+      ['Points earned', fmtInt(sum.points)],
+      ['Accuracy', sum.accuracy + '%'],
+      ['Time', fmtTime(sum.timeSec)],
+    ];
+    if (sum.level != null) rows.push(['Level reached', sum.level]);
+    if (sum.bosses != null) rows.push(['Bosses', sum.bosses]);
+    if (sum.perks) rows.push(['Perks used', sum.perks]);
+    if (sum.weapon) rows.push(['Favourite weapon', sum.weapon]);
+    for (const [k, v] of rows) {
       const row = el('div', 'stat');
       row.append(el('span', 'stat-k', k), el('span', 'stat-v', String(v)));
       table.append(row);
     }
-    s.append(table, el('div', 'screen-sub blink', mobileHud ? 'Tap to restart' : 'Press Enter to restart'));
+    const cols = el('div', 'screen-cols');
+    cols.append(table);
+    const top = topOf(g);
+    if (top.length) cols.append(buildTopTable(top, g && Number(g.rank) > 0 ? (g.rank | 0) : 0));
+    s.append(cols, el('div', 'screen-sub blink', mobileHud ? 'Tap to restart' : 'Press Enter to restart'));
   } else if (phase === 'paused') {
     s.append(
       el('div', 'screen-title', 'PAUSED'),
@@ -233,6 +287,108 @@ function buildScreen(state) {
     );
   }
   s.dataset.phase = phase;
+}
+
+// ---------- WO7 T4: score formatting helpers ----------
+
+function numOr(v, d = 0) { const n = Number(v); return Number.isFinite(n) ? n : d; }
+
+function fmtInt(v) {
+  const n = Math.floor(numOr(v));
+  try { return n.toLocaleString('en-US'); } catch { return String(n); }
+}
+
+function fmtTime(sec) {
+  const t = Math.max(0, Math.floor(numOr(sec)));
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+}
+
+function perksCfg() {
+  return (config.PERKS && config.PERKS.list) || {};
+}
+
+function perkName(id) {
+  const d = perksCfg()[id];
+  return d && d.name ? d.name : String(id);
+}
+
+function weaponName(id) {
+  if (!id) return '';
+  try {
+    const W = weaponsMod.WEAPONS;
+    if (W && W[id] && W[id].name) return W[id].name;
+  } catch { /* weapons.js not ready */ }
+  return String(id).toUpperCase();
+}
+
+// Best run for the menu line: summary.best, else the first top entry. Null on an empty table.
+function bestOf(sum) {
+  if (!sum) return null;
+  const b = sum.best || (Array.isArray(sum.top) && sum.top[0]) || null;
+  if (!b) return null;
+  const round = Math.floor(numOr(b.round));
+  if (!(round > 0)) return null;
+  return { round, points: numOr(b.points) };
+}
+
+function topOf(sum) {
+  return sum && Array.isArray(sum.top) ? sum.top.filter((e) => e && typeof e === 'object').slice(0, TOP_ROWS) : [];
+}
+
+// Top-5 table: # / ROUND / POINTS / KILLS / TIME / LVL. highlightRank (1-based) marks this run.
+function buildTopTable(top, highlightRank) {
+  const wrap = el('div', 'screen-top');
+  wrap.append(el('div', 'screen-top-title', 'TOP RUNS'));
+  const grid = el('div', 'screen-top-grid');
+  // FIX-2 (playtest #7): KILLS / LVL carry .c-opt and are dropped on the touch layout.
+  const heads = [['#', ''], ['ROUND', ''], ['POINTS', ''], ['KILLS', ' c-opt'], ['TIME', ''], ['LVL', ' c-opt']];
+  for (const [h, c] of heads) grid.append(el('span', 'th' + c, h));
+  top.forEach((e, i) => {
+    const hl = highlightRank === i + 1 ? ' me' : '';
+    grid.append(
+      el('span', 'td rank' + hl, String(i + 1)),
+      el('span', 'td' + hl, String(Math.floor(numOr(e.round)))),
+      el('span', 'td pts' + hl, fmtInt(e.points)),
+      el('span', 'td c-opt' + hl, fmtInt(e.kills)),
+      el('span', 'td' + hl, fmtTime(e.timeSec)),
+      el('span', 'td c-opt' + hl, String(Math.floor(numOr(e.level, 1)))),
+    );
+  });
+  wrap.append(grid);
+  return wrap;
+}
+
+// Merge the game-over summary (stats spread + rank/top, maybe an entry) with live state.stats.
+// Summary fields win; missing ones fall back to the entry, then state.stats / state.player.
+function runSummary(state, g) {
+  const st = state.stats || {};
+  const src = g && typeof g === 'object' ? g : {};
+  const entry = src.entry && typeof src.entry === 'object' ? src.entry : {};
+  const pick = (...vals) => { for (const v of vals) if (v != null && v !== '') return v; return null; };
+  const rounds = Math.floor(numOr(pick(src.roundReached, src.round, entry.round, st.roundReached,
+    state.rounds && state.rounds.round), 0));
+  const fired = numOr(pick(src.shotsFired, st.shotsFired), 0);
+  const hit = numOr(pick(src.shotsHit, st.shotsHit), 0);
+  const accuracy = fired > 0 ? Math.round((hit / fired) * 100) : 0;
+  const level = pick(src.levelReached, src.level, entry.level, st.levelReached);
+  const bosses = pick(src.bossesKilled, src.bosses, entry.bosses, st.bossesKilled);
+  // FIX-2 (playtest #6): perksRun = every perk bought this run (main.js), so a Quick Revive death
+  // (which strips p.perks) still lists them. Falls back to the held list.
+  let perks = pick(src.perksRun, src.perks, entry.perksRun, entry.perks, state.player && state.player.perks);
+  if (Array.isArray(perks)) perks = perks.filter((id, i, a) => typeof id === 'string' && a.indexOf(id) === i);
+  perks = Array.isArray(perks) ? (perks.length ? perks.map(perkName).join(', ') : 'None') : null;
+  const wid = pick(src.bestWeaponId, src.weapon, entry.weapon, st.bestWeaponId);
+  return {
+    rounds,
+    kills: numOr(pick(src.kills, entry.kills, st.kills), 0),
+    points: numOr(pick(src.pointsEarned, src.points, entry.points, st.pointsEarned), 0),
+    accuracy,
+    timeSec: numOr(pick(src.timeSurvived, src.timeSec, entry.timeSec, st.timeSurvived, state.time), 0),
+    level: level == null ? null : Math.floor(numOr(level, 1)),
+    bosses: bosses == null ? null : Math.floor(numOr(bosses)),
+    perks,
+    weapon: pick(src.weaponName, wid ? weaponName(wid) : null),
+  };
 }
 
 // ---------- event-driven animations ----------
@@ -316,6 +472,12 @@ function onLevelStart(p) {
   queueBanner(p.name ? `LEVEL ${n} — ${String(p.name).toUpperCase()}` : `LEVEL ${n}`);
 }
 
+// WO7 T2: "<PERK NAME>" banner on purchase (same queue as FIRE SALE! / BOSS / LEVEL banners).
+function onPerkBought(p) {
+  if (!p || !p.perkId) return;
+  queueBanner(perkName(p.perkId).toUpperCase());
+}
+
 function onPlayerDamaged() {
   if (faceState) faceEvent(faceState, 'hurt');
 }
@@ -378,6 +540,7 @@ export function initHud(rootEl) {
     on('boss:start', onBossStart),
     on('boss:defeated', onBossDefeated),
     on('level:start', onLevelStart),
+    on('perk:bought', onPerkBought),
   );
 }
 
@@ -390,6 +553,7 @@ export function updateHud(state) {
     lastPhase = phase;
     root.dataset.phase = phase;
     const showScreen = phase === 'menu' || phase === 'gameover' || phase === 'paused';
+    if (phase === 'playing' || phase === 'menu') gameOverSummary = null; // new game: drop last run
     if (showScreen) buildScreen(state);
     setHidden(els.screen, !showScreen);
     if (phase === 'menu' || phase === 'gameover') resetBanners();
@@ -404,8 +568,68 @@ export function updateHud(state) {
   updateStatus(state);
   updateLevelLabel(state);
   updateBossBar(state);
+  updatePerks(state);
+  updateDown(state);
   markSeenWeapons(state.player);
 }
+
+// ---------- WO7 T4: high scores (menu) + run summary (game over) ----------
+
+// Menu data: { best: { round, points } | null, top: Entry[] }. Kept across initHud; rebuilds the
+// menu screen at once if it is showing. Safe before initHud; null clears it.
+export function setScores(summary) {
+  scoreSummary = summary && typeof summary === 'object' ? summary : null;
+  if (els && lastState && lastPhase === 'menu') buildScreen(lastState);
+}
+
+// Game-over data: { ...stats, rank, isBestRound, isBestPoints, top, entry? }. May be called just
+// before or after the phase flips to 'gameover'; rebuilds the screen if game over is showing.
+// Cleared when the next game starts (phase -> playing / menu).
+export function setGameOverSummary(summary) {
+  gameOverSummary = summary && typeof summary === 'object' ? summary : null;
+  if (els && lastState && lastPhase === 'gameover') buildScreen(lastState);
+}
+
+// ---------- WO7 T2: perk row + revive overlay ----------
+
+// Bottle icons in purchase order, above HEALTH. Rebuilt only when the perk list changes.
+// #hud gets .has-perks so the points block moves up above the row.
+function updatePerks(state) {
+  const p = state.player;
+  const list = p && Array.isArray(p.perks) ? p.perks.filter((id) => typeof id === 'string') : [];
+  const cfg = perksCfg();
+  // FIX-2 (playtest #11): the Quick Revive badge shows revives in hand (always 1 while the perk
+  // is held), not purchases left; purchases left belong to the machine prompt.
+  const key = list.join(',');
+  setHidden(els.perks, list.length === 0);
+  root.classList.toggle('has-perks', list.length > 0); // direct: build() resets root.className
+  if (els.perks.__key === key) return;
+  els.perks.__key = key;
+  els.perks.textContent = '';
+  for (const id of list) {
+    const d = cfg[id] || {};
+    const b = el('div', 'hud-perk');
+    b.dataset.perk = id;
+    b.style.setProperty('--perk-color', d.color || '#cccccc');
+    b.append(el('span', 'hud-perk-letter', d.letter || String(id).charAt(0).toUpperCase()));
+    if (id === 'revive') b.append(el('span', 'hud-perk-uses', '×1'));
+    els.perks.append(b);
+  }
+}
+
+// "REVIVING…" with a bar filling over PERKS.list.revive.downSeconds while player.downT > 0.
+function updateDown(state) {
+  const p = state.player;
+  const t = p ? numOr(p.downT, 0) : 0;
+  const show = t > 0 && (lastPhase === 'playing' || lastPhase === 'paused');
+  setHidden(els.down, !show);
+  if (!show) return;
+  const total = numOr((perksCfg().revive || {}).downSeconds, 1.5) || 1.5;
+  const frac = Math.max(0, Math.min(1, 1 - t / total));
+  const w = (frac * 100).toFixed(1) + '%';
+  if (els.downFill.__w !== w) { els.downFill.__w = w; els.downFill.style.width = w; }
+}
+
 
 // ---------- WO6: mobile HUD + rotate overlay ----------
 
@@ -571,13 +795,9 @@ function updateWeapon(player) {
   const infinite = def.id === 'deathmachine' || w.id === 'deathmachine' || !Number.isFinite(w.mag);
   setText(els.weaponName, def.name || w.id || '');
 
-  let secondary = null;
-  if (player.weapons) {
-    secondary = player.tempWeapon
-      ? player.weapons[player.activeSlot] || player.weapons.find(Boolean)
-      : player.weapons[player.activeSlot === 0 ? 1 : 0];
-  }
-  setText(els.weaponSecondary, secondary ? ((secondary.def && secondary.def.name) || secondary.id) : '');
+  // FIX-2 (playtest #2 / review L5): every held weapon other than the active one, in slot order
+  // (2 with Mule Kick). While a temp weapon (Death Machine) is out, every slot weapon is listed.
+  updateWeaponSecondary(player);
 
   if (infinite) {
     setText(els.ammoMag, '∞');
@@ -594,6 +814,25 @@ function updateWeapon(player) {
   setClass(els.ammoMag, 'empty', !infinite && (w.mag | 0) === 0);
   const reloading = !infinite && !!w.reloading;
   setClass(els.weapon, 'reloading', reloading);
+}
+
+function updateWeaponSecondary(player) {
+  const list = [];
+  const ws = Array.isArray(player.weapons) ? player.weapons : [];
+  ws.forEach((w, i) => {
+    if (!w || (!player.tempWeapon && i === player.activeSlot)) return;
+    list.push({ slot: i + 1, name: String((w.def && w.def.name) || w.id || '').toUpperCase() });
+  });
+  const key = list.map((x) => x.slot + ':' + x.name).join('|');
+  const box = els.weaponSecondary;
+  if (box.__key === key) return;
+  box.__key = key;
+  box.textContent = '';
+  for (const x of list) {
+    const line = el('div', 'hud-weapon-sec');
+    line.append(el('span', 'hud-weapon-sec-slot', String(x.slot)), el('span', 'hud-weapon-sec-name', x.name));
+    box.append(line);
+  }
 }
 
 function updatePowerups(state) {

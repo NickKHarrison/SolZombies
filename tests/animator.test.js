@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createPlayerAnim, updatePlayerAnim, noteShot, resetPlayerAnim, wrapAngle } from '../src/sprites/animator.js';
-import { SPRITES } from '../src/config.js';
+import { createPlayerAnim, updatePlayerAnim, noteShot, resetPlayerAnim, wrapAngle, meleePose } from '../src/sprites/animator.js';
+import { SPRITES, MELEE } from '../src/config.js';
+import { SOLDIER } from '../src/sprites/soldier.js';
 import { gunSpriteFor } from '../src/sprites/guns.js';
 
 const STEP = SPRITES.strideLength / 8; // world px per leg frame (walking)
@@ -342,4 +343,101 @@ test('deterministic: identical inputs give identical states', () => {
     return a;
   }
   assert.deepEqual(run(), run());
+});
+
+// ---- WO7 (T3): knife swing pose timing ----
+const SWING = MELEE.swingTime;
+
+test('WO7: createPlayerAnim has melee fields at rest', () => {
+  const a = createPlayerAnim();
+  assert.equal(a.melee, 0);
+  assert.equal(a.meleeFrame, 0);
+  assert.equal(a.gunPose, 'twohand');
+});
+
+test('WO7: meleeT > 0 sets pose knife; gunPose keeps the gun pose; back to the gun after', () => {
+  const p = mkPlayer();
+  const a = start(p);
+  p.meleeT = SWING;
+  updatePlayerAnim(a, p, LMG, idleWeapon, DT);
+  assert.equal(a.pose, 'knife');
+  assert.equal(a.gunPose, 'heavy');
+  assert.equal(a.melee, 0);
+  assert.equal(a.meleeFrame, 0);
+  p.meleeT = 0;
+  updatePlayerAnim(a, p, LMG, idleWeapon, DT);
+  assert.equal(a.pose, 'heavy');
+  assert.equal(a.melee, 0);
+  assert.equal(a.meleeFrame, 0);
+});
+
+test('WO7: frame 0 (cocked) for the first 40 % of the swing, frame 1 (thrust) after', () => {
+  const p = mkPlayer();
+  const a = start(p);
+  const cases = [[0, 0], [0.1, 0], [0.39, 0], [0.4, 1], [0.41, 1], [0.7, 1], [0.99, 1]];
+  for (const [prog, frame] of cases) {
+    p.meleeT = SWING * (1 - prog);
+    updatePlayerAnim(a, p, PISTOL, idleWeapon, DT);
+    assert.equal(a.pose, 'knife', `pose at ${prog}`);
+    assert.ok(Math.abs(a.melee - prog) < 1e-9, `melee ${a.melee} ~ ${prog}`);
+    assert.equal(a.meleeFrame, frame, `frame at progress ${prog}`);
+  }
+});
+
+test('WO7: a full swing simulated with meleeT counting down in the sim', () => {
+  const p = mkPlayer();
+  const a = start(p);
+  p.meleeT = SWING;
+  const frames = [];
+  let prev = -1;
+  while (p.meleeT > 0) {
+    updatePlayerAnim(a, p, PISTOL, idleWeapon, DT);
+    assert.ok(a.melee >= prev, 'progress is monotonic');
+    prev = a.melee;
+    frames.push(a.meleeFrame);
+    p.meleeT = Math.max(0, p.meleeT - DT);
+  }
+  updatePlayerAnim(a, p, PISTOL, idleWeapon, DT);
+  assert.equal(a.pose, 'onehand');
+  const n0 = frames.filter((f) => f === 0).length, n1 = frames.length - n0;
+  assert.ok(n0 > 0 && n1 > 0, 'both frames shown');
+  assert.deepEqual(frames, [...frames].sort(), 'cocked frames come before thrust frames');
+  // 0.25 s at 60 fps = 15 updates: 6 cocked (progress < 0.4), 9 thrust.
+  assert.ok(Math.abs(n0 / frames.length - 0.4) < 0.1, `cocked share ${n0}/${frames.length}`);
+});
+
+test('WO7: odd meleeT values are safe (NaN, negative, > swingTime, missing player)', () => {
+  assert.deepEqual(meleePose(null), { active: false, melee: 0, meleeFrame: 0 });
+  assert.deepEqual(meleePose({ meleeT: NaN }), { active: false, melee: 0, meleeFrame: 0 });
+  assert.deepEqual(meleePose({ meleeT: -0.1 }), { active: false, melee: 0, meleeFrame: 0 });
+  assert.deepEqual(meleePose({}), { active: false, melee: 0, meleeFrame: 0 });
+  assert.deepEqual(meleePose({ meleeT: SWING * 3 }), { active: true, melee: 0, meleeFrame: 0 });
+  const tiny = meleePose({ meleeT: 1e-9 });
+  assert.equal(tiny.active, true);
+  assert.equal(tiny.meleeFrame, 1);
+});
+
+test('WO7: knife pose survives dt = 0, down and reload (the swing cancels reload in weapons)', () => {
+  const p = mkPlayer();
+  const a = start(p);
+  p.meleeT = SWING * 0.5;
+  updatePlayerAnim(a, p, PISTOL, { reloading: true }, 0);
+  assert.equal(a.pose, 'knife');
+  assert.equal(a.meleeFrame, 1);
+  p.down = true;
+  updatePlayerAnim(a, p, PISTOL, idleWeapon, DT);
+  assert.equal(a.pose, 'knife');
+});
+
+test('WO7: SOLDIER.torso.knife has the 2 frames the animator indexes', () => {
+  const k = SOLDIER.torso.knife;
+  assert.ok(Array.isArray(k) && k.length === 2);
+  for (const f of k) { assert.equal(f.w, 16); assert.equal(f.h, 16); }
+  const h = SOLDIER.torso.helmet.sprite.pixels;
+  for (const [fi, f] of k.entries()) {
+    for (let i = 0; i < h.length; i += 4) {
+      if (h[i + 3] === 0) continue;
+      for (let c = 0; c < 4; c++) assert.equal(f.pixels[i + c], h[i + c], `knife[${fi}] helmet pixel ${i / 4}`);
+    }
+  }
 });

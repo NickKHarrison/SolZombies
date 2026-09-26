@@ -125,7 +125,9 @@ export function updatePowerups(state, dt) {
     item.ttl -= dt;
     item.bob += dt;
     if (item.ttl <= 0) { pu.items.splice(i, 1); continue; }
-    if (pl && !pl.down &&
+    // WO7 FIX-3 (QA review L6): no pickup during the Quick Revive down pause (downT > 0); items
+    // stay on the floor (their ttl keeps running) and active timers keep running (BO3).
+    if (pl && !pl.down && !(pl.downT > 0) &&
         dist(pl.x, pl.y, item.x, item.y) < POWERUPS.pickupRadius + pl.radius) {
       pu.items.splice(i, 1);
       applyPowerup(state, item.type);

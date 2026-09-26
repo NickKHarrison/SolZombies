@@ -117,8 +117,20 @@ export function loopTheme(base, loop) {
     doorIron: tintHex(b.doorIron || '#2b2d31', v.tint, 0.2, bright),
     ambient: v.ambient,
     torch: !!(b.torch || v.torch),
+    flicker: !!b.flicker, // WO7: LABORATORY II+ keeps its failing fluorescent tubes
     variant: v.label,
   };
+}
+
+// WO7 FIX-3 (balance #4): loop levels sell upgraded wall guns (LEVELS_CFG.loopWallUpgrade, one
+// step per id, letters kept). Always a new object; the base def's wallbuys are never mutated.
+export function loopWallbuys(wallbuys) {
+  const up = (LEVELS_CFG && LEVELS_CFG.loopWallUpgrade) || {};
+  const out = {};
+  for (const [k, id] of Object.entries(wallbuys || {})) {
+    out[k] = (typeof id === 'string' && Object.prototype.hasOwnProperty.call(up, id) && up[id]) || id;
+  }
+  return out;
 }
 
 const variantCache = new Map(); // `${pos}:${loop}` -> derived def
@@ -132,7 +144,10 @@ function levelDefFor(index, loop) {
   if (def && def.baseDef === base) return def;
   const num = romanNumeral(loop + 1);
   const boss = base.boss ? { ...base.boss, name: base.boss.name ? `${base.boss.name} ${num}` : base.boss.name } : base.boss;
-  def = { ...base, name: `${base.name} ${num}`, theme: loopTheme(base.theme, loop), boss, loop, baseDef: base };
+  def = {
+    ...base, name: `${base.name} ${num}`, theme: loopTheme(base.theme, loop), boss, loop, baseDef: base,
+    wallbuys: loopWallbuys(base.wallbuys),
+  };
   variantCache.set(key, def);
   return def;
 }
@@ -188,6 +203,10 @@ export function startLevel(state, index = 0) {
   state.zombies = [];
   state.bullets = [];
   state.effects = [];
+  // WO7 FIX-3 (QA review L1): acid pools / globs belong to the old level (they would be drawn on
+  // the new map during the fade-in otherwise).
+  state.hazards = [];
+  state.acidGlobs = [];
   state.flow = null;
 
   if (!state.powerups) state.powerups = { items: [], active: {}, dropsThisRound: 0, nuke: null };

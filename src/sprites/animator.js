@@ -4,7 +4,10 @@
 // WO4: the legs turn toward their target at a capped rate (no snapping), and moving more than
 // ~100 deg away from the aim switches to a backpedal (legs face movement + 180 deg, the walk
 // cycle runs backwards), with hysteresis so it does not flicker around 90 deg.
-import { SPRITES } from '../config.js';
+// WO7 (T3): knife swing. While player.meleeT > 0 (seconds left, set to MELEE.swingTime by
+// weapons.meleeAttack) pose = 'knife', melee = swing progress 0..1 and meleeFrame = 0 (cocked) for
+// the first MELEE.thrustAt of the swing, then 1 (thrust). gunPose always keeps the held gun's pose.
+import * as CONFIG from '../config.js';
 import { gunSpriteFor } from './guns.js';
 
 const FRAMES = 8;
@@ -15,6 +18,20 @@ const POSES = { onehand: 1, twohand: 1, heavy: 1 };
 const DEG = Math.PI / 180;
 const TAU = Math.PI * 2;
 const FLIP_ARC = 170 * DEG; // a turn this large goes through the aim side, not the back
+const MELEE_THRUST_AT_DEFAULT = 0.4; // fallback for CONFIG.MELEE.thrustAt (swing progress cocked -> thrust)
+const SPRITES = CONFIG.SPRITES;
+
+// Knife swing state from player.meleeT (seconds remaining) and MELEE.swingTime.
+// Returns { active, melee (0..1 progress), meleeFrame (0 cocked | 1 thrust) }.
+export function meleePose(player) {
+  const M = CONFIG.MELEE || {};
+  const swing = num(M.swingTime, 0.25) > 0 ? M.swingTime : 0.25;
+  const t = player ? player.meleeT : 0;
+  if (!(Number.isFinite(t) && t > 0)) return { active: false, melee: 0, meleeFrame: 0 };
+  const melee = Math.min(1, Math.max(0, 1 - t / swing));
+  const thrustAt = num(M.thrustAt, MELEE_THRUST_AT_DEFAULT);
+  return { active: true, melee, meleeFrame: melee < thrustAt ? 0 : 1 };
+}
 
 function num(v, fallback) { return Number.isFinite(v) ? v : fallback; }
 
@@ -74,6 +91,9 @@ export function createPlayerAnim() {
     recoilFresh: false, // set by noteShot: the next update skips decay so the peak is drawn once
     legTarget: 0,    // WO4: angle the legs are turning toward (movement, movement + PI, or aim)
     backpedal: false, // WO4: moving away from the aim: legs face movement + PI, cycle reversed
+    melee: 0,        // WO7: knife swing progress 0..1 (0 when not swinging)
+    meleeFrame: 0,   // WO7: SOLDIER.torso.knife frame index (0 cocked, 1 thrust)
+    gunPose: 'twohand', // WO7: the held gun's pose even while pose === 'knife'
   };
 }
 
@@ -155,7 +175,11 @@ export function updatePlayerAnim(anim, player, weaponDef, weapon, dt) {
     anim.reloadFrame = 0;
   }
 
-  anim.pose = gunInfo(weaponDef).pose;
+  anim.gunPose = gunInfo(weaponDef).pose;
+  const mp = meleePose(player);
+  anim.melee = mp.melee;
+  anim.meleeFrame = mp.meleeFrame;
+  anim.pose = mp.active ? 'knife' : anim.gunPose;
   return anim;
 }
 

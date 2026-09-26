@@ -19,6 +19,7 @@ import * as boss from './boss.js';
 import * as level from './level.js';
 import * as touch from './touch.js';
 import * as device from './device.js';
+import * as scores from './scores.js';
 
 const canvas = document.getElementById('game');
 const hudRoot = document.getElementById('hud');
@@ -38,6 +39,12 @@ let mobile = false;       // device.isMobile() at boot
 let rotatePaused = false; // the game was auto-paused because the phone turned to portrait
 let lastRotate = null;    // last value sent to hud.setRotateOverlay (null = resend)
 let lastPrompt;           // last value sent to touch.setTouchPrompt (undefined = resend)
+// WO7 run stats: kills per weapon id (bestWeaponId) and the id the last weapon kill went to.
+let weaponKills = new Map();
+let lastKillWeapon = null;
+// WO7 FIX-3 (playtest #6): every perk bought this run, in purchase order, no duplicates. Reset
+// with the run (initStats); a Quick Revive strip does not remove entries.
+let perksRun = [];
 
 // touch.js / hud.js mobile exports are optional at runtime: call only when present.
 function call(mod, name, ...args) {
@@ -79,7 +86,84 @@ function initAll(s) {
   shop.initShop(s);
   boss.initBoss(s);
   events.on('player:down', onPlayerDown);
+  initStats(s);
+  call(hud, 'setScores', scoresSummary());
   applyMobile();
+}
+
+// ---------------------------------------------------------------------------
+// WO7 run stats (from events) and high scores
+// ---------------------------------------------------------------------------
+
+// meleeKills (player.js, melee:hit) and perksBought (player.addPerk) are counted by their owners.
+function initStats(s) {
+  weaponKills = new Map();
+  lastKillWeapon = null;
+  perksRun = [];
+  const st = () => (state === s ? s.stats : null);
+  events.on('purchase:made', (p) => { const t = st(); if (t && p && p.kind === 'door') t.doorsOpened++; });
+  events.on('powerup:collected', () => { const t = st(); if (t) t.powerupsCollected++; });
+  events.on('perk:bought', (p) => {
+    if (state !== s || !p || typeof p.perkId !== 'string' || !p.perkId) return;
+    if (!perksRun.includes(p.perkId)) perksRun.push(p.perkId);
+  });
+  events.on('boss:defeated', () => { const t = st(); if (t) t.bossesKilled++; });
+  events.on('level:start', (p) => {
+    const t = st();
+    if (t && p && Number.isFinite(p.index)) t.levelReached = Math.max(t.levelReached || 1, p.index + 1);
+  });
+  // Weapon kills are tallied to the active weapon at kill time. A knife kill is also cause
+  // 'weapon' (zombie:killed fires first, then melee:hit { killed }), so it is moved to 'knife'.
+  events.on('zombie:killed', (p) => {
+    lastKillWeapon = null;
+    if (!p || p.cause !== 'weapon' || state !== s || !s.player) return;
+    const w = player.getActiveWeapon(s.player);
+    if (w && w.id) { lastKillWeapon = w.id; tallyKill(s, w.id, 1); }
+  });
+  events.on('melee:hit', (p) => {
+    if (!p || !p.killed || state !== s) return;
+    if (lastKillWeapon) tallyKill(s, lastKillWeapon, -1);
+    lastKillWeapon = null;
+    tallyKill(s, 'knife', 1);
+  });
+}
+
+function tallyKill(s, id, d) {
+  const n = (weaponKills.get(id) || 0) + d;
+  if (n > 0) weaponKills.set(id, n); else weaponKills.delete(id);
+  let best = null, bn = 0;
+  for (const [k, v] of weaponKills) if (v > bn) { best = k; bn = v; }
+  s.stats.bestWeaponId = best;
+}
+
+function scoresSummary() {
+  let best = null, top = [];
+  try { best = scores.bestScore(); top = scores.topScores(5); } catch (err) { console.error('[main] scores error', err); }
+  return { best, top };
+}
+
+// Once per game over: record the run, then hand the summary to the HUD.
+// WO7 FIX-3 (playtest #13): a run that dies before round 1 starts (roundReached 0) is not
+// recorded; the summary is still shown, with rank null and recorded false ("Not ranked").
+function recordGameOver(s) {
+  try {
+    s.stats.timeSurvived = s.time;
+    const perks = s.player && Array.isArray(s.player.perks) ? s.player.perks.slice() : [];
+    const run = perksRun.slice();
+    if (!((s.stats.roundReached | 0) > 0)) {
+      call(hud, 'setGameOverSummary', {
+        ...s.stats, rank: null, isBestRound: false, isBestPoints: false, recorded: false,
+        rankText: 'Not ranked', top: scores.topScores(5), perks, perksRun: run,
+      });
+      return;
+    }
+    const result = scores.recordRun(s.stats, { perks });
+    events.emit('score:recorded', { rank: result.rank, entry: result.entry, isBestRound: result.isBestRound, isBestPoints: result.isBestPoints });
+    call(hud, 'setGameOverSummary', { ...s.stats, ...result, recorded: true, top: scores.topScores(5), perks, perksRun: run });
+    call(hud, 'setScores', scoresSummary());
+  } catch (err) {
+    console.error('[main] score record error', err);
+  }
 }
 
 // WO6: (re)apply the touch scheme. Runs after hud.initHud so the HUD mobile mode survives restarts.
@@ -138,6 +222,7 @@ function onPlayerDown(p) {
     kills: (p && p.kills) || state.stats.kills,
     points: (p && p.points) || (state.player ? state.player.points : 0),
   });
+  recordGameOver(state);
 }
 
 // Called from inside a DOM user-gesture handler so audio.js can create/resume its AudioContext.
@@ -179,6 +264,7 @@ function updateCamera(s) {
 function update(s, inp, dt) {
   s.dt = dt;
   s.time += dt;
+  if (s.stats) s.stats.timeSurvived = s.time;
   // WO5: level transition first. While it runs (fade out, swap at the midpoint, fade in) no
   // gameplay system updates; render/HUD still run from tick().
   level.updateLevel(s, dt);
@@ -208,6 +294,7 @@ function update(s, inp, dt) {
     s.flow = pathfinding.buildFlowField(s.map, s.player.x, s.player.y);
   }
   zombie.updateZombies(s, dt);
+  call(boss, 'updateHazards', s, dt); // WO7: acid globs land, pools hurt the player
   boss.updateBoss(s, dt);
   weapons.updateBullets(s, dt);
   powerups.updatePowerups(s, dt);
@@ -219,7 +306,7 @@ function update(s, inp, dt) {
 // Edge-triggered flags must only act once even when a frame is split into sub-steps.
 function withoutEdges(inp) {
   return { ...inp, firePressed: false, reload: false, interact: false, swap: false, slot: 0, wheel: 0,
-    restart: false, start: false, pause: false, debugKey: false };
+    restart: false, start: false, pause: false, debugKey: false, melee: false };
 }
 
 function frame(now) {
@@ -428,11 +515,21 @@ function installDebug() {
     restart() { restartGame(); },
     // WO6: the boot-time touch detection result (true = touch scheme active).
     mobile() { return mobile; },
+    // WO7. givePerk goes through player.addPerk (cap / uniqueness apply; free, no purchase event,
+    // reviveUses untouched). removePerks strips every perk (reason 'debug').
+    givePerk(id) { return player.addPerk(state, id); },
+    removePerks() { player.removeAllPerks(state, 'debug'); return state.player.perks.slice(); },
+    perks() { return state.player.perks.slice(); },
+    knife() { return weapons.meleeAttack(state, state.player); },
+    clearScores() { const ok = scores.clearScores(); call(hud, 'setScores', scoresSummary()); return ok; },
+    scores() { return scoresSummary(); },
+    // WO7 FIX-3: perks bought this run (purchase order, no duplicates; survives a revive strip).
+    perksRun() { return perksRun.slice(); },
   };
   window.__game = {
     get state() { return state; },
     debug,
-    modules: { events, input, player, weapons, zombie, pathfinding, waves, powerups, map, shop, render, hud, audio, boss, level, touch, device },
+    modules: { events, input, player, weapons, zombie, pathfinding, waves, powerups, map, shop, render, hud, audio, boss, level, touch, device, scores },
   };
 }
 

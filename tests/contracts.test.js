@@ -171,6 +171,15 @@ const CANONICAL_EVENTS = [
   'boss:defeated',  // { name, level }          boss.js
   'level:start',    // { index, name, loop }    level.js
   'level:descend',  // { from, to }             level.js
+  // WO7 3.2 (purchase:made / purchase:denied also gain kind 'perk')
+  'perk:bought',     // { perkId, cost }                                shop.js
+  'perk:lost',       // { perkId, reason: 'revive' | 'debug' }          player.js
+  'player:downed',   // { reviveIn }                                    player.js (Quick Revive path only)
+  'player:revived',  // { health }                                      player.js
+  'melee:swing',     // { x, y, angle }                                 weapons.js
+  'melee:hit',       // { zombieId, killed }                            weapons.js
+  'boss:spit',       // { x, y }                                        zombie.js (acid telegraph start)
+  'score:recorded',  // { rank, entry, isBestRound, isBestPoints }      main.js
 ];
 
 test('3.2 events.js: exports', () => {
@@ -356,6 +365,8 @@ const PURE_FILES = [
   'sprites/palette', 'sprites/soldier', 'sprites/guns', 'sprites/face', 'sprites/animator',
   // WO5 rule: boss.js, level.js, levels/*.js are pure
   'boss', 'level', 'levels/levels', 'levels/level1', 'levels/level2',
+  // WO7: new pure modules (scores.js only touches globalThis.localStorage, guarded)
+  'sprites/zombie', 'scores', 'levels/level3',
 ];
 
 for (const name of PURE_FILES) {
@@ -612,4 +623,158 @@ test('WO5 new exports', async () => {
   need(levels, 'levels', 'LEVELS', ARR);
   need(levels, 'levels', 'levelByIndex', F);
   assert.deepEqual(missing, [], `missing WO5 exports:\n  ${missing.join('\n  ')}`);
+});
+
+// ---------------------------------------------------------------------------------------------
+// WORK_ORDER_7 (Agent 0, Phase 0): config 3.1, state additions, new modules 3.3
+// ---------------------------------------------------------------------------------------------
+
+test('WO7 3.1 config: PERKS, MELEE, SCORES, BOSS.acid, SPRITES strides', () => {
+  const P = config.PERKS;
+  assert.equal(kindOf(P), OBJ, 'config.PERKS');
+  assert.equal(P.maxPerks, 4);
+  assert.equal(P.ammoMultTier3, 0.3);
+  assert.deepEqual(Object.keys(P.list).sort(), ['dtap', 'jugg', 'mule', 'revive', 'speed', 'stamin']);
+  const letters = new Set();
+  for (const [id, p] of Object.entries(P.list)) {
+    for (const k of ['name', 'letter', 'color']) assert.equal(typeof p[k], 'string', `PERKS.list.${id}.${k}`);
+    assert.equal(typeof p.cost, 'number', `PERKS.list.${id}.cost`);
+    assert.match(p.color, /^#[0-9a-f]{6}$/i, `PERKS.list.${id}.color`);
+    letters.add(p.letter);
+  }
+  assert.deepEqual([...letters].sort(), ['C', 'J', 'K', 'N', 'Q', 'U']);
+  assert.equal(P.list.jugg.maxHealth, 250);
+  assert.equal(P.list.revive.maxUses, 3);
+  assert.equal(P.list.mule.weaponSlots, 3);
+  const M = config.MELEE;
+  for (const k of ['damage', 'cooldown', 'reach', 'halfAngle', 'maxTargets', 'knockback', 'swingTime', 'bonusPoints']) {
+    assert.equal(typeof M[k], 'number', `MELEE.${k}`);
+  }
+  assert.equal(M.bonusPoints + config.POINTS.perKill, 15, 'knife kills pay 15');
+  assert.deepEqual(config.SCORES, { key: 'solzombies.scores.v1', max: 10 });
+  for (const k of ['every', 'telegraph', 'globs', 'spread', 'flight', 'poolRadius', 'poolSeconds', 'dps']) {
+    assert.equal(typeof config.BOSS.acid[k], 'number', `BOSS.acid.${k}`);
+  }
+  assert.equal(typeof config.SPRITES.zombieStride, 'number');
+  assert.equal(typeof config.SPRITES.bossStride, 'number');
+});
+
+test('WO7 state.js: stats additions and hazards', () => {
+  const s = stateMod.createEmptyState(1);
+  assert.deepEqual(s.hazards, []);
+  for (const k of ['timeSurvived', 'levelReached', 'bossesKilled', 'powerupsCollected', 'doorsOpened', 'meleeKills', 'perksBought']) {
+    assert.equal(typeof s.stats[k], 'number', `state.stats.${k}`);
+  }
+  assert.equal(s.stats.levelReached, 1);
+  assert.ok('bestWeaponId' in s.stats && s.stats.bestWeaponId === null, 'state.stats.bestWeaponId = null');
+  assert.notEqual(stateMod.createEmptyState(1).hazards, s.hazards, 'fresh hazards array per state');
+});
+
+const WO7_MODULE_SPEC = {
+  'sprites/zombie': { ZOMBIE_SPRITES: OBJ, zombieSpriteFor: F },
+  scores: { loadScores: F, saveScores: F, recordRun: F, topScores: F, clearScores: F, formatTime: F },
+  'levels/level3': { LEVEL3: OBJ },
+};
+
+for (const [name, spec] of Object.entries(WO7_MODULE_SPEC)) {
+  test(`WO7 ${name}.js (pure): imports in Node without throwing and has every contract export`, async () => {
+    let mod;
+    try {
+      mod = await import(`../src/${name}.js`);
+    } catch (err) {
+      assert.fail(`importing src/${name}.js threw at module load: ${err && err.name}: ${err && err.message}\n${err && err.stack}`);
+    }
+    assertExports(mod, spec, `${name}.js`);
+  });
+}
+
+test('WO7 sprites/zombie.js: ZOMBIE_SPRITES shape (3.3)', async () => {
+  const { ZOMBIE_SPRITES: Z, zombieSpriteFor } = await import('../src/sprites/zombie.js');
+  const isSprite = (s, w, h, label) => {
+    assert.equal(kindOf(s), OBJ, label);
+    assert.equal(s.w, w, `${label}.w`); assert.equal(s.h, h, `${label}.h`);
+    assert.ok(s.pixels && s.pixels.length === w * h * 4, `${label}.pixels`);
+  };
+  for (const v of ['walker', 'jogger', 'sprinter']) isSprite(Z.normal.body[v], 16, 16, `normal.body.${v}`);
+  assert.equal(Z.normal.legs.frames.length, 6);
+  Z.normal.legs.frames.forEach((f, i) => isSprite(f, 16, 16, `normal.legs.frames[${i}]`));
+  for (const k of ['tearing', 'damaged', 'corpse']) isSprite(Z.normal[k], 16, 16, `normal.${k}`);
+  assert.deepEqual(Z.normal.anchor, { x: 8, y: 8 });
+  isSprite(Z.minion.body, 12, 12, 'minion.body');
+  isSprite(Z.minion.corpse, 12, 12, 'minion.corpse');
+  assert.equal(Z.minion.legs.frames.length, 4);
+  assert.deepEqual(Z.minion.anchor, { x: 6, y: 6 });
+  for (const k of ['body', 'charge', 'corpse']) isSprite(Z.boss[k], 40, 40, `boss.${k}`);
+  assert.equal(Z.boss.legs.frames.length, 4);
+  assert.deepEqual(Z.boss.anchor, { x: 20, y: 20 });
+  assert.equal(typeof Z.boss.tintColor, 'string');
+  for (const z of [{ kind: 'normal', tier: 'walk' }, { kind: 'normal', tier: 'jog' }, { kind: 'normal', tier: 'sprint' },
+    { kind: 'minion', tier: 'sprint' }, { kind: 'boss', tier: 'walk' }, {}]) {
+    const r = zombieSpriteFor(z);
+    for (const k of ['body', 'legs', 'corpse', 'anchor']) assert.ok(r && r[k], `zombieSpriteFor(${JSON.stringify(z)}).${k}`);
+  }
+  assert.equal(zombieSpriteFor({ kind: 'normal', tier: 'jog' }).body, Z.normal.body.jogger);
+  assert.equal(zombieSpriteFor({ kind: 'boss' }).body, Z.boss.body);
+});
+
+test('WO7 level defs: boss.ability, level 3 = LABORATORY', async () => {
+  const { LEVELS } = await import('../src/levels/levels.js');
+  assert.ok(LEVELS.length >= 3, 'at least three levels');
+  assert.equal(LEVELS[0].boss.ability, 'charge');
+  assert.equal(LEVELS[1].boss.ability, 'charge');
+  const L3 = LEVELS[2];
+  assert.equal(L3.id, 'lab');
+  assert.equal(L3.name, 'LABORATORY');
+  assert.deepEqual(L3.boss, { name: 'THE SUBJECT', tint: '#7fe040', ability: 'acid' });
+  assert.equal(L3.theme.flicker, true);
+  assert.ok(L3.difficulty.healthMult > LEVELS[1].difficulty.healthMult, 'level 3 harder than level 2');
+});
+
+// Exports added by Agents A-J in WO7 Phase 1 (3.3). EXPECTED TO FAIL until they land.
+// Every import is guarded, so a module that fails to load is reported instead of thrown.
+test('WO7 new exports', async () => {
+  const missing = [];
+  const load = async (name) => {
+    try { return await import(`../src/${name}.js`); } catch (err) { missing.push(`${name}.js failed to import: ${err && err.message}`); return {}; }
+  };
+  const player = await load('player');
+  const weapons = await load('weapons');
+  const map = await load('map');
+  const shop = await load('shop');
+  const boss = await load('boss');
+  const scores = await load('scores');
+  const hud = await load('hud');
+  const sprites = await load('sprites/zombie');
+  const need = (mod, label, name, kind) => {
+    if (kindOf(mod[name]) !== kind) missing.push(`${label}.${name} (${kind})`);
+  };
+  // sprites/zombie.js (A): real art, not placeholders
+  need(sprites, 'sprites/zombie', 'ZOMBIE_SPRITES', OBJ);
+  need(sprites, 'sprites/zombie', 'zombieSpriteFor', F);
+  const Z = sprites.ZOMBIE_SPRITES;
+  if (Z && Z.normal && Z.normal.body && Z.normal.body.walker && Z.normal.body.walker.placeholder) {
+    missing.push('ZOMBIE_SPRITES.normal still PLACEHOLDER (Agent A)');
+  }
+  // player.js (E)
+  for (const f of ['perkMods', 'addPerk', 'removeAllPerks', 'hasPerk']) need(player, 'player', f, F);
+  // weapons.js (F)
+  need(weapons, 'weapons', 'meleeAttack', F);
+  need(weapons, 'weapons', 'ammoCost', F);
+  const W = weapons.WEAPONS || {};
+  for (const id of ['hg40', 'm8a7', 'peacekeeper']) {
+    if (kindOf(W[id]) !== OBJ) missing.push(`WEAPONS.${id}`);
+    else if (W[id].tier !== 3) missing.push(`WEAPONS.${id}.tier === 3`);
+  }
+  // map.js / shop.js (G)
+  need(map, 'map', 'TILE_PERK', 'number');
+  if (map.TILE_PERK !== undefined && map.TILE_PERK !== 10) missing.push('map.TILE_PERK === 10');
+  need(shop, 'shop', 'buyPerk', F);
+  // boss.js (H)
+  need(boss, 'boss', 'updateHazards', F);
+  // scores.js (J)
+  for (const f of ['loadScores', 'recordRun', 'topScores', 'clearScores', 'formatTime']) need(scores, 'scores', f, F);
+  // hud.js (D)
+  need(hud, 'hud', 'setScores', F);
+  need(hud, 'hud', 'setGameOverSummary', F);
+  assert.deepEqual(missing, [], `missing WO7 exports:\n  ${missing.join('\n  ')}`);
 });

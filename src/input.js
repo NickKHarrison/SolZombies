@@ -16,6 +16,10 @@
 //   aimVector : {x, y} unit (last non-zero touch aim) while touch is active, else null (desktop)
 //   autoFire  : true while the touch aim stick is past the fire threshold (semi-autos cycle at rpm)
 // and merges touch.getTouchState() when touch.isTouchActive(). Keyboard/mouse keep working.
+//
+// WO7 (knife / Mule Kick): getInput() also returns
+//   melee : edge, true for the frame V was pressed (or the touch KNIFE button was tapped)
+//   slot  : may now be 3 (digit 3) for the Mule Kick third weapon slot
 
 import { INPUT } from './config.js';
 import * as touch from './touch.js';
@@ -32,6 +36,8 @@ const INTERACT = ['KeyF', 'KeyE'];
 const SWAP = ['KeyQ'];
 const SLOT1 = ['Digit1', 'Numpad1'];
 const SLOT2 = ['Digit2', 'Numpad2'];
+const SLOT3 = ['Digit3', 'Numpad3'];
+const MELEE = ['KeyV'];
 const START = ['Enter', 'NumpadEnter', 'Space'];
 const PAUSE = ['Escape', 'KeyP'];
 const DEBUG = ['Backquote'];
@@ -47,7 +53,7 @@ let mouseDown = false;           // left button held
 const edge = {
   firePressed: false, reload: false, interact: false, swap: false,
   restart: false, start: false, pause: false, debugKey: false,
-  slot: 0, wheel: 0,
+  slot: 0, wheel: 0, melee: false,
 };
 
 let cleanup = null;
@@ -68,6 +74,7 @@ function clearEdges() {
   edge.debugKey = false;
   edge.slot = 0;
   edge.wheel = 0;
+  edge.melee = false;
 }
 
 /** Release all held keys/buttons and clear edges (used on blur, hidden tab, restart). */
@@ -88,6 +95,8 @@ function onKeyDown(e) {
   if (SWAP.includes(code)) edge.swap = true;
   if (SLOT1.includes(code)) edge.slot = 1;
   if (SLOT2.includes(code)) edge.slot = 2;
+  if (SLOT3.includes(code)) edge.slot = 3;
+  if (MELEE.includes(code)) edge.melee = true;
   if (START.includes(code)) { edge.start = true; edge.restart = true; }
   if (PAUSE.includes(code)) edge.pause = true;
   if (DEBUG.includes(code)) edge.debugKey = true;
@@ -190,6 +199,7 @@ export function getInput() {
     debugKey: edge.debugKey,
     slot: edge.slot,
     wheel: edge.wheel,
+    melee: edge.melee,
     aimVector: null,
     autoFire: false,
   };
@@ -215,6 +225,7 @@ function mergeTouch(out, t) {
   out.pause = out.pause || t.pause;
   out.start = out.start || t.start;
   out.restart = out.restart || t.start;
+  out.melee = out.melee || !!t.melee;
 }
 
 /** Clear edge-triggered flags. Call once at the end of each frame. */

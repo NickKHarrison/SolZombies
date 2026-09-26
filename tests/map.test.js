@@ -779,3 +779,111 @@ test('WO5 registry levels with an arena: arena is clean and reachable once every
     assert.equal(m.activeSpawnIds.size, active, `${L}: stairs open no spawns`);
   }
 });
+
+// ---------------- WO7: perk machines ----------------
+
+import * as mapNs from '../src/map.js';
+import { PERKS } from '../src/config.js';
+import { buildFlowField, distanceAt } from '../src/pathfinding.js';
+
+const PERK_FIXTURE = [
+  '###########',
+  '#P........#',
+  '#.J.Q.C.N.#',
+  '#.........#',
+  '#.U.K.....#',
+  '###########',
+];
+
+test('WO7 TILE_PERK and letter table come from config PERKS', () => {
+  assert.equal(mapNs.TILE_PERK, 10);
+  const want = {};
+  for (const [id, p] of Object.entries(PERKS.list)) want[p.letter] = id;
+  assert.deepEqual(mapNs.PERK_LETTERS, want);
+  assert.deepEqual(Object.keys(want).sort(), ['C', 'J', 'K', 'N', 'Q', 'U']);
+});
+
+test('WO7 perk letters collide with no other legend letter (fixed chars, doors, wall buys)', () => {
+  const fixed = ['#', '.', 'P', 'W', 'S', 'O', 'B', 'M', 'Z', 'X', 'T', ...Object.keys(DOOR_MAP)];
+  for (const ch of Object.keys(mapNs.PERK_LETTERS)) {
+    assert.ok(!fixed.includes(ch), `perk letter ${ch} is a fixed legend char`);
+    assert.ok(!Object.prototype.hasOwnProperty.call(WALLBUY_MAP, ch), `perk letter ${ch} in WALLBUY_MAP`);
+    for (const def of LEVELS) {
+      assert.ok(!Object.prototype.hasOwnProperty.call(def.wallbuys || {}, ch), `perk letter ${ch} in ${def.id} wallbuys`);
+    }
+  }
+  // lowercase 'c' is still a level-1 wall buy, distinct from Speed Cola 'C'
+  const m = loadMap(['#####', '#PcC#', '#####']);
+  assert.equal(m.wallBuys.length, 1); assert.equal(m.perkMachines.length, 1);
+  assert.equal(m.perkMachines[0].perkId, 'speed');
+  // a level def that reuses a perk letter for a wall buy is rejected
+  assert.throws(() => loadMap({ id: 'z', ascii: ['####', '#PJ#', '####'], wallbuys: { J: 'sheiva' } }), /perk machine and a wall buy/);
+});
+
+test('WO7 parse: perkMachines ids, perk ids, tiles, rects, soldOut', () => {
+  const m = loadMap(PERK_FIXTURE);
+  const got = m.perkMachines.map((p) => [p.id, p.perkId, p.tx, p.ty]);
+  assert.deepEqual(got, [
+    [1, 'jugg', 2, 2], [2, 'revive', 4, 2], [3, 'speed', 6, 2], [4, 'dtap', 8, 2],
+    [5, 'stamin', 2, 4], [6, 'mule', 4, 4],
+  ]);
+  for (const p of m.perkMachines) {
+    assert.equal(code(m, p.tx, p.ty), mapNs.TILE_PERK);
+    assert.deepEqual([p.x, p.y, p.w, p.h], [p.tx * TILE, p.ty * TILE, TILE, TILE]);
+    assert.equal(p.soldOut, false);
+  }
+  // not merged into wall rects, no wall buys created
+  assert.equal(m.wallBuys.length, 0);
+  // maps without machines still carry an empty list
+  assert.deepEqual(loadMap(['###', '#P#', '###']).perkMachines, []);
+});
+
+test('WO7 perk machines block movers, rays and zombie pathing', () => {
+  const m = loadMap(PERK_FIXTURE);
+  const j = m.perkMachines[0];
+  assert.equal(isWalkable(m, j.tx, j.ty, false), false);
+  assert.equal(isWalkable(m, j.tx, j.ty, true), false);
+  // ray from the left, along row 2, stops at the machine's left edge
+  const c = tileToWorld(1, 2);
+  const d = raycastWalls(m, c.x, c.y, 1, 0);
+  assert.ok(Math.abs(d - (j.x - c.x)) < 1e-6, `ray distance ${d}`);
+  // circle pushed out of the machine for both movers
+  for (const fz of [false, true]) {
+    const r = resolveCircle(m, j.x - 5, j.y + TILE / 2, 14, fz);
+    assert.ok(r.x <= j.x - 14 + 1e-6, `pushed x ${r.x}`);
+  }
+  // pathfinding: machine tiles are unreachable, floor around them is
+  const t = tileToWorld(1, 1);
+  const flow = buildFlowField(m, t.x, t.y);
+  const mc = tileToWorld(j.tx, j.ty);
+  assert.ok(!(distanceAt(flow, mc.x, mc.y) >= 0) || distanceAt(flow, mc.x, mc.y) === Infinity,
+    'machine tile has no flow distance');
+  const nb = tileToWorld(j.tx, j.ty + 1);
+  assert.ok(Number.isFinite(distanceAt(flow, nb.x, nb.y)) && distanceAt(flow, nb.x, nb.y) >= 0);
+});
+
+test('WO7 nearestInteractable: perk kind, range edge, sold-out still reported, tie order', () => {
+  const m = loadMap(PERK_FIXTURE);
+  const j = m.perkMachines[0];
+  // standing below the Juggernog machine (row 3), 10 px from its bottom edge
+  let hit = nearestInteractable(m, j.x + TILE / 2, j.y + TILE + 10, PLAYER.interactRange);
+  assert.equal(hit.kind, 'perk'); assert.equal(hit.ref, j);
+  assert.ok(Math.abs(hit.dist - 10) < 1e-9);
+  // exactly at range: included; just past it: nothing
+  assert.equal(nearestInteractable(m, j.x + TILE / 2, j.y + TILE + 15, 15).kind, 'perk');
+  assert.equal(nearestInteractable(m, j.x + TILE / 2, j.y + TILE + 15.01, 15), null);
+  m.perkMachines[1].soldOut = true;
+  const q = m.perkMachines[1];
+  hit = nearestInteractable(m, q.x + TILE / 2, q.y + TILE + 5, PLAYER.interactRange);
+  assert.equal(hit.kind, 'perk'); assert.equal(hit.ref, q);
+  // tie: wall buy beats perk, perk beats a door (machine and neighbours equidistant)
+  const tie = loadMap(['#####', '#1.J#', '#.P.#', '#####']);
+  const pm = tie.perkMachines[0], wb = tie.wallBuys[0];
+  const midX = (wb.x + wb.w + pm.x) / 2; // centre of the floor tile between them
+  hit = nearestInteractable(tie, midX, pm.y + TILE / 2, PLAYER.interactRange);
+  assert.equal(hit.kind, 'wallbuy');
+  const tie2 = loadMap(['#####', '#D.J#', '#.P.#', '#####']);
+  const pm2 = tie2.perkMachines[0];
+  hit = nearestInteractable(tie2, (tie2.doors[0].x + TILE + pm2.x) / 2, pm2.y + TILE / 2, PLAYER.interactRange);
+  assert.equal(hit.kind, 'perk');
+});

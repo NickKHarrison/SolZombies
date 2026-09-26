@@ -53,3 +53,17 @@ one and the offset is measured from its fixed centre (so touching off-centre app
 touches further away grab nothing (they still count as a start/restart tap). Only the knob moves
 and it springs back to the base centre on release. The ACTION pill is capped to the gap between
 the sticks, and mobile banners moved up to 36cqh so they clear the sticks.
+
+## WO7 (Agent K) — KNIFE button
+- New `.tbtn.tbtn-knife` "KNIFE" (`data-btn="knife"`, button name `knife`), built in the same
+  button list as RELOAD/SWAP/PAUSE (DOM order: reload, swap, knife, pause, action). Layout/style is
+  Agent D's in styles.css (bottom-right cluster, left of RELOAD); JS sets no position.
+- Press sets the `melee` edge; `getTouchState().melee` exposes it until `endTouchFrame()`.
+  input.js merges it into `getInput().melee`. `.pressed` while held; one pointerId per button, so
+  a second finger on a held KNIFE is ignored.
+- Button hits are resolved before the stick grab logic in `onPointerDown`, so a touch on KNIFE
+  never grabs a stick and does not count as a start/restart tap.
+- Verified in Chrome (`?debug=1&touch=1`, synthetic touch PointerEvents): left stick held by
+  finger 11 while finger 12 taps KNIFE -> `melee` true for one frame (false after `endFrame()`),
+  moveX kept at 0.26 (stick unaffected), right stick not grabbed, `.pressed` cleared on
+  pointerup. No console errors from the game.
