@@ -1,6 +1,6 @@
 export const CANVAS = { width: 1280, height: 720 };
 // Camera zoom: world px per screen px = 1/zoom. Touch devices see a closer view (WO6 follow-up).
-export const CAMERA = { zoom: 1, mobileZoom: 1.4 };
+export const CAMERA = { zoom: 1, mobileZoom: 1.96 };
 export const TILE = 40;                       // world units (px) per map tile
 export const FIXED_DT_CAP = 1 / 30;           // clamp big frame gaps
 

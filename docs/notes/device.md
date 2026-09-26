@@ -52,3 +52,5 @@ Touch devices showed the same world area as desktop, so the level looked tiny. `
 camera offset. `render()` does `ctx.scale(zoom, zoom)` for world space and shrinks the culling
 view to `W / zoom x H / zoom`; screen-space overlays and the DOM HUD are untouched. On a phone
 the visible world is 914x514 px instead of 1280x720.
+
+Update: mobileZoom raised to 1.96 (another 40% closer) at the user's request; phones now see about 653x367 world px.
