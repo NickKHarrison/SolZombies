@@ -1,0 +1,513 @@
+/* styles.css — Agent J (HUD + page layout). See WORK_ORDER.md 5.11.
+   Sizing: #stage is scaled to fit the window at 16:9. #hud is a size container, so every HUD
+   dimension uses cqh (1% of the HUD/canvas height) and scales with the canvas. A vmin fallback
+   is given first for browsers without container query units. */
+
+:root {
+  --hud-text: #f2f2f2;
+  --hud-points: #ffd54a;
+  --hud-round: #d21f1f;
+  --hud-round-bright: #ff3b2f;
+  --hud-dim: #8a8a8a;
+  --hud-red: #ff3030;
+  --hud-green: #6cf542;
+  /* WO4: face box top-left (face keeps the WO3 0.8 scale); health/kills readouts bottom-left.
+     --status-h / --status-w are the bottom-left readout block's approximate height and width:
+     the points block sits above it, and the bottom-centre prompt stays clear of it. */
+  --status-scale: 0.8;
+  --status-top: 3cqh;
+  --status-bottom: 3cqh;
+  --status-left: 3cqh;
+  --status-h: 9cqh;              /* label 2cqh + value 5cqh (line-height 1.1) + 1.2cqh padding */
+  --status-w: 34cqh;             /* HEALTH 13.5 + gap 3 + KILLS (4 digits) + padding */
+  --status-font: "Courier New", Courier, "Lucida Console", monospace;
+  --hud-shadow: 0 0 0.4em rgba(0, 0, 0, 0.9), 0 0.08em 0.1em rgba(0, 0, 0, 0.9);
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+}
+
+/* ---------- stage: 16:9, centered, scale-to-fit ---------- */
+
+#stage {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: min(100vw, calc(100vh * 16 / 9));
+  height: min(100vh, calc(100vw * 9 / 16));
+  background: #000;
+  overflow: hidden;
+}
+
+#game {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: auto;
+  cursor: crosshair;
+}
+
+#hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  user-select: none;
+  container-type: size;
+  overflow: hidden;
+  color: var(--hud-text);
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-size: 2.4vmin;           /* fallback */
+  font-size: 2.6cqh;
+  text-shadow: var(--hud-shadow);
+  line-height: 1.1;
+}
+
+#hud * { pointer-events: none; box-sizing: border-box; }
+#hud .hidden { display: none !important; }
+
+/* Gameplay widgets are hidden on the menu / game over screens. */
+#hud[data-phase="menu"] .hud-points,
+#hud[data-phase="menu"] .hud-round,
+#hud[data-phase="menu"] .hud-weapon,
+#hud[data-phase="menu"] .hud-powerups,
+#hud[data-phase="menu"] .hud-bottom-center,
+#hud[data-phase="menu"] .hud-facebox,
+#hud[data-phase="menu"] .hud-vitals,
+#hud[data-phase="gameover"] .hud-weapon,
+#hud[data-phase="gameover"] .hud-powerups,
+#hud[data-phase="gameover"] .hud-bottom-center,
+#hud[data-phase="gameover"] .hud-points {
+  display: none;
+}
+
+/* ---------- bottom-left: points (WO3: directly above the lower-left status bezel) ---------- */
+
+.hud-points {
+  position: absolute;
+  left: var(--status-left);
+  bottom: calc(var(--status-bottom) + var(--status-h) + 1.2cqh);
+}
+
+.hud-points-value {
+  color: var(--hud-points);
+  font-weight: 800;
+  font-size: 6vmin;
+  font-size: 6.5cqh;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  transform-origin: left bottom;
+}
+
+.hud-points-value.bump { animation: hud-bump 0.25s ease-out; }
+
+@keyframes hud-bump {
+  0% { transform: scale(1.12); color: #fff3b0; }
+  100% { transform: scale(1); }
+}
+
+.hud-points-flicks {
+  position: absolute;
+  left: 0.2em;
+  bottom: 100%;
+  width: 20cqh;
+  height: 0;
+}
+
+.hud-flick {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  font-weight: 700;
+  font-size: 3cqh;
+  color: var(--hud-points);
+  animation: hud-flick 0.8s ease-out forwards;
+}
+
+.hud-flick.spend { color: var(--hud-red); }
+
+@keyframes hud-flick {
+  0% { opacity: 0; transform: translate(0, 0.4em); }
+  15% { opacity: 1; transform: translate(0.2em, 0); }
+  100% { opacity: 0; transform: translate(1.2em, -1.6em); }
+}
+
+/* ---------- left-center: round counter ---------- */
+
+.hud-round {
+  position: absolute;
+  left: 3cqh;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--hud-round);
+  font-family: Georgia, "Times New Roman", serif;
+  font-style: italic;
+  font-weight: 700;
+  transition: color 1.2s ease, filter 1.2s ease;
+  text-shadow: 0 0 0.25em rgba(80, 0, 0, 0.9), 0 0.05em 0.1em #000;
+}
+
+.hud-round-num {
+  font-size: 14vmin;
+  font-size: 15cqh;
+  line-height: 1;
+  padding-right: 0.15em;
+}
+
+.hud-round-tally {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 1.6cqh;
+  height: 13cqh;
+  padding: 0 1cqh;
+}
+
+.hud-round-tally .stroke {
+  display: block;
+  width: 1.3cqh;
+  height: 12cqh;
+  background: currentColor;
+  border-radius: 40% 60% 45% 55% / 10% 10% 8% 8%;
+  transform: skewX(-8deg);
+  box-shadow: 0 0 0.8cqh rgba(80, 0, 0, 0.9);
+  transition: background-color 1.2s ease;
+}
+
+.hud-round-tally .stroke:nth-child(2) { height: 11cqh; transform: skewX(-4deg); }
+.hud-round-tally .stroke:nth-child(3) { height: 12.5cqh; transform: skewX(-10deg); }
+.hud-round-tally .stroke:nth-child(4) { height: 11.5cqh; transform: skewX(-6deg); }
+
+.hud-round-tally .stroke.slash {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  height: 16cqh;
+  transform: translate(-50%, -50%) rotate(62deg);
+}
+
+.hud-round.break {
+  color: var(--hud-round-bright);
+  filter: drop-shadow(0 0 1.2cqh rgba(255, 40, 20, 0.6));
+}
+
+.hud-round.round-start { animation: hud-round-start 1.4s ease-out; }
+
+@keyframes hud-round-start {
+  0% { color: #ffffff; filter: drop-shadow(0 0 2cqh rgba(255, 60, 40, 0.9)); }
+  40% { color: var(--hud-round-bright); }
+  100% { color: var(--hud-round); filter: none; }
+}
+
+/* ---------- bottom-right: weapon ---------- */
+
+.hud-weapon {
+  position: absolute;
+  right: 3cqh;
+  bottom: 3cqh;
+  text-align: right;
+  padding: 0.6cqh 1cqh;
+  border-radius: 0.8cqh;
+}
+
+.hud-weapon-secondary {
+  font-size: 2cqh;
+  color: var(--hud-dim);
+  min-height: 1.1em;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.hud-weapon-name {
+  font-size: 3.4cqh;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.hud-weapon-ammo {
+  font-size: 5cqh;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-ammo-sep, .hud-ammo-reserve { color: #cfcfcf; font-size: 0.7em; font-weight: 700; }
+.hud-ammo-mag.empty, .hud-ammo-reserve.empty { color: var(--hud-red); }
+
+.hud-weapon-reload {
+  display: none;
+  font-size: 2.2cqh;
+  font-weight: 800;
+  letter-spacing: 0.2em;
+  color: var(--hud-red);
+}
+
+.hud-weapon.reloading .hud-weapon-reload { display: block; }
+.hud-weapon.reloading { animation: hud-reload-pulse 0.6s ease-in-out infinite alternate; }
+
+@keyframes hud-reload-pulse {
+  from { background: rgba(200, 20, 20, 0.05); }
+  to { background: rgba(200, 20, 20, 0.35); }
+}
+
+/* ---------- top-center: power-up chips ---------- */
+
+.hud-powerups {
+  position: absolute;
+  top: 2.5cqh;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 1.2cqh;
+  white-space: nowrap;
+}
+
+.hud-chip {
+  display: flex;
+  align-items: baseline;
+  gap: 0.8cqh;
+  padding: 0.6cqh 1.4cqh;
+  border: 0.25cqh solid var(--hud-green);
+  border-radius: 1cqh;
+  background: rgba(10, 30, 5, 0.6);
+  box-shadow: 0 0 1.2cqh rgba(108, 245, 66, 0.45);
+  font-size: 2.2cqh;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+}
+
+.hud-chip .chip-label { color: var(--hud-green); }
+.hud-chip .chip-time { color: var(--hud-text); font-variant-numeric: tabular-nums; min-width: 1.4em; text-align: right; }
+
+.hud-chip[data-type="instaKill"] .chip-label::before { content: "\2620  "; }
+.hud-chip[data-type="instaKill"] { animation: hud-skull-pulse 1.2s ease-in-out infinite; }
+
+@keyframes hud-skull-pulse {
+  0%, 100% { box-shadow: 0 0 1cqh rgba(108, 245, 66, 0.4); }
+  50% { box-shadow: 0 0 2.2cqh rgba(108, 245, 66, 0.9); }
+}
+
+.hud-chip.flash { animation: hud-chip-flash 0.5s steps(2, jump-none) infinite; }
+
+@keyframes hud-chip-flash {
+  0% { opacity: 1; }
+  100% { opacity: 0.25; }
+}
+
+/* ---------- bottom-center: prompt + fire sale banner ---------- */
+
+.hud-bottom-center {
+  position: absolute;
+  left: 50%;
+  /* WO3: back to the v1 bottom-centre position (the bezel now lives in the lower-left). */
+  bottom: 6cqh;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.5cqh;
+  /* WO3: never wider than the gap between the lower-left bezel and its mirror image, so even the
+     longest prompt ("Press F for Mystery Box [950] FIRE SALE") wraps instead of running under the
+     bezel. ~47cqh at 16:9; the usual prompts fit on one line. */
+  width: calc(100% - 2 * (var(--status-left) + var(--status-w) + 1.5cqh));
+  text-align: center;
+  text-wrap: balance;
+}
+
+.hud-prompt {
+  font-size: 2.8cqh;
+  font-weight: 600;
+  padding: 0.6cqh 1.6cqh;
+  border-radius: 0.6cqh;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.hud-prompt.cant-afford { color: var(--hud-dim); }
+
+.hud-banner {
+  font-family: Georgia, "Times New Roman", serif;
+  font-style: italic;
+  font-weight: 700;
+  font-size: 6cqh;
+  color: #ffb13b;
+  text-shadow: 0 0 1.5cqh rgba(255, 90, 0, 0.9), 0 0.1em 0.1em #000;
+  opacity: 0;
+  transform-origin: center bottom; /* intro scale grows upward from the 6cqh baseline */
+}
+
+.hud-banner.show { animation: hud-banner 3s ease-out forwards; }
+
+@keyframes hud-banner {
+  0% { opacity: 0; transform: scale(1.3); } /* WO3: 1.6 -> 1.3 so the intro never reaches the lower-left bezel */
+  12% { opacity: 1; transform: scale(1); }
+  80% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* ---------- center screens ---------- */
+
+.hud-screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2.5cqh;
+  text-align: center;
+  background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.55) 0%, rgba(0, 0, 0, 0.85) 100%);
+}
+
+.hud-screen[data-phase="paused"] { background: rgba(0, 0, 0, 0.5); }
+
+.screen-title {
+  font-family: Georgia, "Times New Roman", serif;
+  font-style: italic;
+  font-weight: 700;
+  font-size: 11cqh;
+  color: var(--hud-round);
+  letter-spacing: 0.04em;
+  text-shadow: 0 0 2cqh rgba(160, 0, 0, 0.8), 0 0.05em 0.1em #000;
+}
+
+.screen-headline {
+  font-size: 4.5cqh;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.screen-sub { font-size: 3cqh; color: #dddddd; }
+.screen-sub.blink { animation: hud-blink 1.4s ease-in-out infinite; }
+
+@keyframes hud-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.screen-controls {
+  list-style: none;
+  margin: 1cqh 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: auto auto;
+  column-gap: 3cqh;
+  row-gap: 0.8cqh;
+  font-size: 2.3cqh;
+}
+
+.screen-controls li { display: contents; }
+.screen-controls .key { text-align: right; color: var(--hud-points); font-weight: 700; }
+.screen-controls .what { text-align: left; color: #cccccc; }
+
+.screen-stats {
+  display: grid;
+  grid-template-columns: auto auto;
+  column-gap: 4cqh;
+  row-gap: 1cqh;
+  font-size: 3cqh;
+}
+
+.screen-stats .stat { display: contents; }
+.screen-stats .stat-k { text-align: right; color: #bbbbbb; }
+.screen-stats .stat-v { text-align: left; color: var(--hud-points); font-weight: 800; font-variant-numeric: tabular-nums; }
+
+/* ---------- WO4: face box (top-left) + plain health/kills readouts (bottom-left) ---------- */
+/* The WO2 steel bezel is reduced to a small box around the face only, in the top-left corner.
+   HEALTH and KILLS lose their recessed wells and use the weapon/ammo readout style instead
+   (no background, HUD sans font, 5cqh weight-800 numbers, dim uppercase labels), so the
+   bottom of the screen stays clear for gameplay. Face size keeps the WO3 0.8 scale. */
+
+/* Steel frame around the face window: rivets, brushed plate, bevelled edge. */
+.hud-facebox {
+  position: absolute;
+  left: var(--status-left);
+  top: var(--status-top);
+  z-index: 2;                    /* above the game-over overlay so the dead face stays visible */
+  padding: calc(1.1cqh * var(--status-scale)) calc(1.4cqh * var(--status-scale));
+  border: calc(0.55cqh * var(--status-scale)) solid;
+  border-color: #d4d4dc #3a3a42 #1e1e24 #b4b4be;
+  border-radius: calc(0.3cqh * var(--status-scale));
+  line-height: 0;
+  background:
+    radial-gradient(circle at calc(0.9cqh * var(--status-scale)) calc(0.9cqh * var(--status-scale)), #e6e6ee 0 calc(0.22cqh * var(--status-scale)), #55555e calc(0.4cqh * var(--status-scale)), transparent calc(0.55cqh * var(--status-scale))),
+    radial-gradient(circle at calc(100% - calc(0.9cqh * var(--status-scale))) calc(0.9cqh * var(--status-scale)), #e6e6ee 0 calc(0.22cqh * var(--status-scale)), #55555e calc(0.4cqh * var(--status-scale)), transparent calc(0.55cqh * var(--status-scale))),
+    radial-gradient(circle at calc(0.9cqh * var(--status-scale)) calc(100% - calc(0.9cqh * var(--status-scale))), #e6e6ee 0 calc(0.22cqh * var(--status-scale)), #55555e calc(0.4cqh * var(--status-scale)), transparent calc(0.55cqh * var(--status-scale))),
+    radial-gradient(circle at calc(100% - calc(0.9cqh * var(--status-scale))) calc(100% - calc(0.9cqh * var(--status-scale))), #e6e6ee 0 calc(0.22cqh * var(--status-scale)), #55555e calc(0.4cqh * var(--status-scale)), transparent calc(0.55cqh * var(--status-scale))),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 calc(0.25cqh * var(--status-scale)), rgba(0, 0, 0, 0.04) calc(0.25cqh * var(--status-scale)) calc(0.5cqh * var(--status-scale))),
+    linear-gradient(180deg, #9a9aa4 0%, #7a7a84 18%, #5e5e68 55%, #4a4a53 100%);
+  box-shadow:
+    inset 0 calc(0.35cqh * var(--status-scale)) 0 rgba(255, 255, 255, 0.28),
+    inset 0 calc(-0.35cqh * var(--status-scale)) 0 rgba(0, 0, 0, 0.35),
+    0 0 0 calc(0.25cqh * var(--status-scale)) #0b0b0d,
+    0 calc(0.6cqh * var(--status-scale)) calc(1.6cqh * var(--status-scale)) rgba(0, 0, 0, 0.7);
+}
+
+/* Dark recessed window around the face. */
+.hud-face {
+  display: inline-block;
+  padding: calc(0.5cqh * var(--status-scale));
+  border: calc(0.45cqh * var(--status-scale)) solid;
+  border-color: #1c1c22 #b8b8c2 #d0d0d8 #2a2a30;
+  background: #050507;
+  box-shadow: inset 0 0 calc(1.2cqh * var(--status-scale)) rgba(0, 0, 0, 0.95);
+  line-height: 0;
+}
+
+.hud-face-canvas {
+  display: block;
+  width: calc(13.333cqh * var(--status-scale));
+  height: calc(16.667cqh * var(--status-scale));
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  image-rendering: pixelated;
+}
+
+/* Bottom-left readouts, matched to .hud-weapon / .hud-weapon-ammo (bottom-right). */
+.hud-vitals {
+  position: absolute;
+  left: var(--status-left);
+  bottom: var(--status-bottom);
+  z-index: 2;                    /* stays readable above the game-over overlay */
+  display: flex;
+  align-items: flex-end;
+  gap: 3cqh;
+  padding: 0.6cqh 1cqh;          /* same inset as .hud-weapon so both corners line up */
+  white-space: nowrap;
+}
+
+.hud-vital-label {
+  font-size: 2cqh;               /* = .hud-weapon-secondary */
+  color: var(--hud-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  min-height: 1.1em;
+}
+
+.hud-vital-value {
+  font-size: 5cqh;               /* = .hud-weapon-ammo */
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--hud-text);
+}
+
+/* Fixed width so "100%" -> "7%" never shifts the KILLS readout sideways. */
+.hud-vital-health { min-width: 13.5cqh; }
+
+.hud-vital-health.warn .hud-vital-value { color: #ffd54a; }
+.hud-vital-health.crit .hud-vital-value { color: var(--hud-red); }
+.hud-vital-health.crit .hud-vital-value { animation: hud-vital-crit 0.8s steps(2, jump-none) infinite; }
+
+@keyframes hud-vital-crit {
+  0% { opacity: 1; }
+  100% { opacity: 0.45; }
+}
+
+#hud[data-phase="gameover"] .hud-vital-health.crit .hud-vital-value,
+#hud[data-phase="paused"] .hud-vital-health.crit .hud-vital-value { animation: none; }

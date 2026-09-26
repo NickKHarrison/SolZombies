@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sprite Preview</title>
+<!-- WO2 3.13 — sprite preview page (Phase 0, FROZEN). Serve the project root, open /tools/sprite-preview.html. -->
+<style>
+  :root { --bg: #16161b; --panel: #1f1f26; --line: #33333d; --text: #d9d9e0; --dim: #8b8b98; --warn: #ff00ff; --err: #ff5555; --ok: #57c46a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, sans-serif; }
+  header { padding: 10px 16px; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  header h1 { font-size: 16px; margin: 0 12px 0 0; }
+  header .hint { color: var(--dim); }
+  #banners > div { padding: 8px 16px; font-weight: 600; }
+  .banner-placeholder { background: var(--warn); color: #000; }
+  .banner-error { background: #5a1010; color: #fff; border-bottom: 2px solid var(--err); }
+  .banner-ok { background: #173a1f; color: #bff5c9; }
+  .banner-placeholder details, .banner-error details { font-weight: 400; margin-top: 4px; }
+  .banner-placeholder code { background: rgba(0,0,0,.12); padding: 0 3px; }
+  main { padding: 8px 16px 40px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; margin: 12px 0; padding: 8px 12px 12px; }
+  section h2 { font-size: 14px; margin: 2px 0 8px; }
+  section h3 { font-size: 12px; margin: 10px 0 4px; color: var(--dim); font-weight: 600; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+  figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 3px; }
+  figure.native canvas { outline: 2px solid var(--ok); }
+  figcaption { font-size: 11px; color: var(--dim); text-align: center; max-width: 260px; }
+  figcaption b { color: var(--text); font-weight: 600; }
+  canvas { image-rendering: pixelated; image-rendering: crisp-edges; }
+  .checker { background-color: #3a3a44; background-image: conic-gradient(#2c2c34 25%, #3a3a44 0 50%, #2c2c34 0 75%, #3a3a44 0); background-size: 12px 12px; }
+  .err { color: var(--err); white-space: pre-wrap; font: 12px/1.3 ui-monospace, monospace; background: #2a1414; border: 1px solid #5a2020; padding: 6px 8px; border-radius: 4px; margin: 4px 0; }
+  .warn { color: #ffb3ff; font-size: 11px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 8px; }
+  .controls label { display: inline-flex; gap: 4px; align-items: center; }
+  button, select, input { font: inherit; }
+  .live { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+  .mono { font: 12px/1.35 ui-monospace, monospace; white-space: pre; color: var(--dim); }
+  .legend span { display: inline-block; margin-right: 12px; }
+  .sw { display: inline-block; width: 10px; height: 10px; vertical-align: -1px; margin-right: 4px; border: 1px solid #000; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Sprite Preview (WO2)</h1>
+  <label>Static scale <select id="scaleSel"><option>3</option><option>4</option><option selected>6</option><option>8</option></select></label>
+  <span class="legend">
+    <span><i class="sw" style="background:#00e5ff"></i>anchor</span>
+    <span><i class="sw" style="background:#ff9f1a"></i>hand</span>
+    <span><i class="sw" style="background:#39ff6a"></i>grip</span>
+    <span><i class="sw" style="background:#ffe600"></i>muzzle</span>
+  </span>
+  <span class="hint">Edit a sprite module, then hard-reload (Ctrl+Shift+R). Green outline = gun's native pose.</span>
+</header>
+<div id="banners"></div>
+<main>
+  <section id="live">
+    <h2>Live</h2>
+    <div class="controls">
+      <label>Gun <select id="gunSel"></select></label>
+      <label><input type="checkbox" id="sprintChk"> sprint</label>
+      <label><input type="checkbox" id="downChk"> down</label>
+      <label><input type="checkbox" id="fireChk" checked> fire every 0.5 s</label>
+      <label><input type="checkbox" id="reloadChk" checked> reload every 4 s</label>
+      <button id="pauseBtn">Pause</button>
+    </div>
+    <div class="live">
+      <figure><canvas id="live1" width="170" height="170"></canvas><figcaption><b>1x</b> game scale</figcaption></figure>
+      <figure><canvas id="live3" width="440" height="440"></canvas><figcaption><b>3x</b> game scale</figcaption></figure>
+      <div>
+        <div class="controls">
+          <label>Health <input type="range" id="hpRange" min="0" max="100" value="100"> <span id="hpVal">100%</span></label>
+          <label><input type="checkbox" id="faceDownChk"> down</label>
+          <button id="hurtBtn">hurt</button>
+          <button id="grinBtn">grin</button>
+        </div>
+        <div class="row">
+          <figure><canvas id="face1" width="24" height="30" class="checker"></canvas><figcaption><b>1x</b></figcaption></figure>
+          <figure><canvas id="face4" width="24" height="30" class="checker" style="width:96px;height:120px"></canvas><figcaption><b>faceScale</b></figcaption></figure>
+          <figure><canvas id="face6" width="24" height="30" class="checker" style="width:144px;height:180px"></canvas><figcaption><b>6x</b></figcaption></figure>
+          <div class="mono" id="faceInfo"></div>
+        </div>
+      </div>
+      <div class="mono" id="animInfo"></div>
+    </div>
+    <div id="liveErr"></div>
+  </section>
+  <div id="static"></div>
+</main>
+
+<script type="module">
+// ------------------------------------------------------------------------------------------------
+// Module loading: each import is isolated so a half-finished art module cannot take the page down.
+const loadErrors = [];
+async function load(label, path) {
+  try { return await import(path); }
+  catch (e) { loadErrors.push({ label, path, e }); return null; }
+}
+const pixel    = await load('pixel.js', '../src/sprites/pixel.js');
+const config   = await load('config.js', '../src/config.js');
+const soldierM = await load('soldier.js', '../src/sprites/soldier.js');
+const gunsM    = await load('guns.js', '../src/sprites/guns.js');
+const faceM    = await load('face.js', '../src/sprites/face.js');
+const animM    = await load('animator.js', '../src/sprites/animator.js');
+
+const SPRITES = (config && config.SPRITES) || { scale: 2, directions: 32, faceScale: 4, sprintCycleMult: 1.5 };
+const SOLDIER = soldierM && soldierM.SOLDIER;
+const GUN_SPRITES = gunsM && gunsM.GUN_SPRITES;
+const FACE = faceM && faceM.FACE;
+const POSES = ['onehand', 'twohand', 'heavy'];
+const EYES = ['center', 'left', 'right', 'closed', 'squint', 'pain'];
+const MOUTHS = ['neutral', 'frown', 'grit', 'grin', 'pain', 'slack'];
+const TIER_DEFAULT = [
+  { mouth: 'neutral', eyes: 'center' }, { mouth: 'frown', eyes: 'center' }, { mouth: 'grit', eyes: 'center' },
+  { mouth: 'grit', eyes: 'squint' }, { mouth: 'pain', eyes: 'squint', pale: true },
+];
+const MARK = { anchor: '#00e5ff', hand: '#ff9f1a', grip: '#39ff6a', muzzle: '#ffe600' };
+
+// ------------------------------------------------------------------------------------------------
+// Helpers
+const $ = (id) => document.getElementById(id);
+function el(tag, attrs = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') n.className = v; else if (k === 'text') n.textContent = v; else n.setAttribute(k, v);
+  }
+  for (const k of kids) if (k != null) n.append(k);
+  return n;
+}
+function fmtErr(e) { return (e && (e.stack || e.message)) ? String(e.stack || e.message) : String(e); }
+function errBox(e, prefix = '') { return el('div', { class: 'err', text: prefix + fmtErr(e) }); }
+function isSprite(s) {
+  return !!s && typeof s === 'object' && Number.isInteger(s.w) && Number.isInteger(s.h) &&
+    s.pixels && typeof s.pixels.length === 'number' && s.pixels.length === s.w * s.h * 4;
+}
+function need(s, what) { if (!isSprite(s)) throw new Error(`${what}: not a Sprite (${s === undefined ? 'undefined' : typeof s})`); return s; }
+function get(obj, path) {
+  let o = obj;
+  for (const k of path.split('.')) { if (o == null) return undefined; o = o[k]; }
+  return o;
+}
+function section(parent, title, fn) {
+  const body = el('div');
+  const sec = el('section', {}, el('h2', { text: title }), body);
+  parent.append(sec);
+  try { fn(body); } catch (e) { body.append(errBox(e)); }
+  return sec;
+}
+function inBounds(p, s) { return p && Number.isFinite(p.x) && Number.isFinite(p.y) && p.x >= 0 && p.y >= 0 && p.x <= s.w && p.y <= s.h; }
+
+// Draw a marker on a sprite-px coordinate (drawn as a hollow 1-px cell + cross) at `scale`.
+function marker(ctx, x, y, scale, color, ox = 0, oy = 0) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  const px = (ox + x) * scale, py = (oy + y) * scale;
+  ctx.save();
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(px - 4, py); ctx.lineTo(px + 4, py); ctx.moveTo(px, py - 4); ctx.lineTo(px, py + 4); ctx.stroke();
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(px - 4, py); ctx.lineTo(px + 4, py); ctx.moveTo(px, py - 4); ctx.lineTo(px, py + 4); ctx.stroke();
+  ctx.restore();
+}
+
+// A figure holding the sprite at `scale`, with optional markers [{x,y,color}].
+function spriteFig(sprite, scale, label, sub, marks = [], extraClass = '') {
+  const fig = el('figure', { class: extraClass });
+  try {
+    need(sprite, label);
+    const c = el('canvas', { class: 'checker' });
+    c.width = sprite.w * scale; c.height = sprite.h * scale;
+    const ctx = c.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(pixel.toCanvas(sprite, scale), 0, 0);
+    for (const m of marks) marker(ctx, m.x, m.y, scale, m.color);
+    fig.append(c);
+    const warns = [];
+    if (pixel.isPlaceholder(sprite)) warns.push('PLACEHOLDER');
+    for (const m of marks) if (m.name && !inBounds(m, sprite)) warns.push(`${m.name} out of bounds (${m.x},${m.y})`);
+    fig.append(el('figcaption', {}, el('b', { text: label }), el('br'), `${sprite.w}x${sprite.h}${sub ? ' · ' + sub : ''}`,
+      warns.length ? el('div', { class: 'warn', text: warns.join(' · ') }) : null));
+  } catch (e) {
+    fig.append(errBox(e), el('figcaption', {}, el('b', { text: label })));
+  }
+  return fig;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Placeholder / structure scan for the banner
+function scanSprites(root, rootName, out, seen = new Set()) {
+  if (root == null || typeof root !== 'object' || seen.has(root)) return;
+  seen.add(root);
+  if (isSprite(root)) { if (pixel.isPlaceholder(root)) out.push(rootName); return; }
+  for (const [k, v] of Object.entries(root)) {
+    if (v && typeof v === 'object') scanSprites(v, Array.isArray(root) ? `${rootName}[${k}]` : `${rootName}.${k}`, out, new Set(seen));
+  }
+}
+function composedFaceFor(frac, down) {
+  const fs = faceM.createFaceState(1);
+  faceM.updateFaceState(fs, frac, down, 0);
+  return { fs, sprite: faceM.composeFace(fs), key: faceM.faceFrameKey(fs) };
+}
+const TIER_SAMPLES = [
+  { label: 'tier 0', frac: 1.0, down: false }, { label: 'tier 1', frac: 0.75, down: false },
+  { label: 'tier 2', frac: 0.55, down: false }, { label: 'tier 3', frac: 0.35, down: false },
+  { label: 'tier 4', frac: 0.1, down: false }, { label: 'dead', frac: 0, down: true },
+];
+
+function renderBanners() {
+  const host = $('banners');
+  host.textContent = '';
+  if (loadErrors.length) {
+    const d = el('div', { class: 'banner-error', text: `Module load errors (${loadErrors.length}): ${loadErrors.map((x) => x.label).join(', ')}` });
+    const det = el('details', {}, el('summary', { text: 'details' }));
+    for (const x of loadErrors) det.append(errBox(x.e, `${x.path}\n`));
+    d.append(det);
+    host.append(d);
+  }
+  if (!pixel) return;
+  const ph = [];
+  try {
+    if (SOLDIER) scanSprites(SOLDIER, 'SOLDIER', ph);
+    if (GUN_SPRITES) scanSprites(GUN_SPRITES, 'GUN_SPRITES', ph);
+    if (FACE) scanSprites(FACE, 'FACE', ph);
+    if (faceM) for (const t of TIER_SAMPLES) {
+      try { const r = composedFaceFor(t.frac, t.down); if (pixel.isPlaceholder(r.sprite)) ph.push(`composeFace(${t.label})`); }
+      catch { /* shown in its own section */ }
+    }
+  } catch (e) { host.append(el('div', { class: 'banner-error', text: 'placeholder scan failed: ' + e.message })); }
+  if (ph.length) {
+    const d = el('div', { class: 'banner-placeholder', text: `PLACEHOLDER sprites still present: ${ph.length}` });
+    const det = el('details', {}, el('summary', { text: 'list' }));
+    det.append(...ph.flatMap((p, i) => [i ? ', ' : '', el('code', { text: p })]));
+    d.append(det);
+    host.append(d);
+  } else if (!loadErrors.length) {
+    host.append(el('div', { class: 'banner-ok', text: 'No placeholder sprites. All modules loaded.' }));
+  }
+}
+
+// ------------------------------------------------------------------------------------------------
+// Static sections
+function renderStatic() {
+  const root = $('static');
+  root.textContent = '';
+  if (!pixel) { root.append(errBox('pixel.js failed to load; nothing can be drawn.')); return; }
+  const S = Number($('scaleSel').value) || 6;
+
+  section(root, 'Legs — 8-frame walk cycle (frame 0 neutral)', (body) => {
+    if (!SOLDIER) throw new Error('soldier.js not loaded');
+    const legs = SOLDIER.legs, a = legs && legs.anchor;
+    if (!legs || !Array.isArray(legs.frames)) throw new Error('SOLDIER.legs.frames is not an array');
+    if (legs.frames.length !== 8) body.append(el('div', { class: 'warn', text: `expected 8 frames, got ${legs.frames.length}` }));
+    const row = el('div', { class: 'row' });
+    legs.frames.forEach((f, i) => row.append(spriteFig(f, S, `legs[${i}]`, '', a ? [{ ...a, color: MARK.anchor, name: 'anchor' }] : [])));
+    body.append(row);
+  });
+
+  section(root, 'Torso — poses and reload frames', (body) => {
+    if (!SOLDIER) throw new Error('soldier.js not loaded');
+    const t = SOLDIER.torso;
+    if (!t) throw new Error('SOLDIER.torso missing');
+    for (const pose of POSES) {
+      body.append(el('h3', { text: pose }));
+      const row = el('div', { class: 'row' });
+      const marks = [];
+      if (t.anchor) marks.push({ ...t.anchor, color: MARK.anchor, name: 'anchor' });
+      if (t.hand && t.hand[pose]) marks.push({ ...t.hand[pose], color: MARK.hand, name: 'hand' });
+      row.append(spriteFig(get(t, `idle.${pose}`), S, `idle.${pose}`, '', marks));
+      if (pose === POSES[0] && t.helmet && t.helmet.sprite) row.append(spriteFig(t.helmet.sprite, S, 'helmet (overlay)', 'drawn after the gun', t.helmet.anchor ? [{ ...t.helmet.anchor, color: MARK.anchor, name: 'anchor' }] : []));
+      const rl = get(t, `reload.${pose}`);
+      if (!Array.isArray(rl)) row.append(errBox(`torso.reload.${pose} is not an array`));
+      else rl.forEach((f, i) => row.append(spriteFig(f, S, `reload.${pose}[${i}]`, '', marks)));
+      const wl = t.walk && t.walk[pose];
+      if (Array.isArray(wl)) wl.forEach((f, i) => { if (i === 2 || i === 6) row.append(spriteFig(f, S, `walk.${pose}[${i}]`, '', marks)); });
+      body.append(row);
+    }
+  });
+
+  section(root, 'Pose × gun — gun grip placed on the torso hand anchor', (body) => {
+    if (!SOLDIER || !GUN_SPRITES) throw new Error('soldier.js and guns.js are both required');
+    const t = SOLDIER.torso;
+    for (const pose of POSES) {
+      body.append(el('h3', { text: pose }));
+      const row = el('div', { class: 'row' });
+      for (const [key, g] of Object.entries(GUN_SPRITES)) {
+        const fig = el('figure', { class: g && g.pose === pose ? 'native' : '' });
+        try {
+          const torso = need(get(t, `idle.${pose}`), `torso.idle.${pose}`);
+          const gs = need(g && g.sprite, `GUN_SPRITES.${key}.sprite`);
+          const hand = (t.hand && t.hand[pose]) || { x: torso.w / 2, y: torso.h / 2 };
+          const grip = g.grip || { x: 0, y: 0 };
+          const gx = hand.x - grip.x, gy = hand.y - grip.y;
+          const minX = Math.min(0, gx), minY = Math.min(0, gy);
+          const maxX = Math.max(torso.w, gx + gs.w), maxY = Math.max(torso.h, gy + gs.h);
+          const c = el('canvas', { class: 'checker' });
+          c.width = (maxX - minX) * S; c.height = (maxY - minY) * S;
+          const ctx = c.getContext('2d');
+          ctx.imageSmoothingEnabled = false;
+          ctx.drawImage(pixel.toCanvas(torso, S), -minX * S, -minY * S);
+          ctx.drawImage(pixel.toCanvas(gs, S), (gx - minX) * S, (gy - minY) * S);
+          if (t.helmet && t.helmet.sprite) { const ha = t.helmet.anchor || t.anchor; ctx.drawImage(pixel.toCanvas(t.helmet.sprite, S), (t.anchor.x - ha.x - minX) * S, (t.anchor.y - ha.y - minY) * S); }
+          if (g.muzzle) marker(ctx, gx + g.muzzle.x, gy + g.muzzle.y, S, MARK.muzzle, -minX, -minY);
+          fig.append(c, el('figcaption', {}, el('b', { text: key }), g.pose === pose ? ' (native)' : ''));
+        } catch (e) { fig.append(errBox(e), el('figcaption', { text: key })); }
+        row.append(fig);
+      }
+      body.append(row);
+    }
+  });
+
+  section(root, 'Guns — alone, grip and muzzle marked', (body) => {
+    if (!GUN_SPRITES) throw new Error('guns.js not loaded');
+    const row = el('div', { class: 'row' });
+    for (const [key, g] of Object.entries(GUN_SPRITES)) {
+      const marks = [];
+      if (g && g.grip) marks.push({ ...g.grip, color: MARK.grip, name: 'grip' });
+      if (g && g.muzzle) marks.push({ ...g.muzzle, color: MARK.muzzle, name: 'muzzle' });
+      const sub = g ? `${g.pose} · w${g.weight}` + (g.grip && g.muzzle && !(g.muzzle.x > g.grip.x) ? ' · muzzle.x <= grip.x!' : '') : 'missing';
+      row.append(spriteFig(g && g.sprite, S, key, sub, marks));
+    }
+    body.append(row);
+    if (gunsM && gunsM.gunSpriteFor) {
+      const probes = [{ cls: 'pistol' }, { cls: 'special', id: 'raygun' }, { sprite: 'thundergun' }, { cls: 'nope' }, null];
+      body.append(el('div', { class: 'mono', text: probes.map((p) => {
+        try { const r = gunSpriteFor(p); const k = Object.keys(GUN_SPRITES).find((kk) => GUN_SPRITES[kk] === r); return `gunSpriteFor(${JSON.stringify(p)}) -> ${k}`; }
+        catch (e) { return `gunSpriteFor(${JSON.stringify(p)}) threw: ${e.message}`; }
+      }).join('\n') }));
+    }
+  });
+
+  section(root, 'Down sprite and shadow', (body) => {
+    if (!SOLDIER) throw new Error('soldier.js not loaded');
+    const d = SOLDIER.down || {};
+    const row = el('div', { class: 'row' });
+    row.append(spriteFig(d.sprite, S, 'down', '', d.anchor ? [{ ...d.anchor, color: MARK.anchor, name: 'anchor' }] : []));
+    const sh = SOLDIER.shadow;
+    if (sh) {
+      const c = el('canvas', { class: 'checker' }); c.width = 16 * S; c.height = 16 * S;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.beginPath(); ctx.ellipse(8 * S, 8 * S, sh.rx * S, sh.ry * S, 0, 0, Math.PI * 2); ctx.fill();
+      row.append(el('figure', {}, c, el('figcaption', {}, el('b', { text: 'shadow' }), el('br'), `rx ${sh.rx} ry ${sh.ry}`)));
+    }
+    body.append(row);
+  });
+
+  section(root, 'Face layers (raw)', (body) => {
+    if (!FACE) throw new Error('face.js not loaded');
+    if (FACE.w !== 24 || FACE.h !== 30) body.append(el('div', { class: 'warn', text: `FACE.w/h is ${FACE.w}x${FACE.h}, expected 24x30` }));
+    const row = el('div', { class: 'row' });
+    row.append(spriteFig(FACE.base, S, 'base'));
+    for (const k of ['neat', 'messy']) row.append(spriteFig(get(FACE, `hair.${k}`), S, `hair.${k}`));
+    (Array.isArray(FACE.blood) ? FACE.blood : []).forEach((b, i) => row.append(spriteFig(b, S, `blood[${i}]`)));
+    if (!Array.isArray(FACE.blood)) row.append(errBox('FACE.blood is not an array'));
+    row.append(spriteFig(FACE.dead, S, 'dead'));
+    body.append(row);
+    body.append(el('h3', { text: 'eyes (raw)' }));
+    const er = el('div', { class: 'row' });
+    for (const k of EYES) er.append(spriteFig(get(FACE, `eyes.${k}`), S, `eyes.${k}`));
+    body.append(er);
+    body.append(el('h3', { text: 'mouth (raw)' }));
+    const mr = el('div', { class: 'row' });
+    for (const k of MOUTHS) mr.append(spriteFig(get(FACE, `mouth.${k}`), S, `mouth.${k}`));
+    body.append(mr);
+  });
+
+  // Hand-composed layers per tier so every eye/mouth variant is visible at every tier, independent
+  // of composeFace (which picks only one combination per state).
+  function paleTint(sprite) {
+    // Preview-only approximation of the tier-4 pale tint: skin 's' -> 'P'.
+    const pal = [0xe5, 0xb4, 0x8f], to = [0xf0, 0xcd, 0xb0];
+    return pixel.tint(sprite, (r, g, b, a) => (r === pal[0] && g === pal[1] && b === pal[2]) ? [to[0], to[1], to[2], a] : [r, g, b, a]);
+  }
+  function faceCombo(tier, eyes, mouth) {
+    const base = need(FACE.base, 'FACE.base');
+    const layers = [{ sprite: base }];
+    const hair = tier >= 3 ? get(FACE, 'hair.messy') : get(FACE, 'hair.neat');
+    if (isSprite(hair)) layers.push({ sprite: hair });
+    layers.push({ sprite: need(get(FACE, `eyes.${eyes}`), `eyes.${eyes}`) });
+    layers.push({ sprite: need(get(FACE, `mouth.${mouth}`), `mouth.${mouth}`) });
+    const blood = Array.isArray(FACE.blood) ? FACE.blood[tier] : null;
+    if (isSprite(blood)) layers.push({ sprite: blood });
+    const out = pixel.compose(layers);
+    return TIER_DEFAULT[tier].pale ? paleTint(out) : out;
+  }
+  section(root, 'Face tiers × eye / mouth variants (layered: base + hair + eyes + mouth + blood[tier])', (body) => {
+    if (!FACE) throw new Error('face.js not loaded');
+    for (let tier = 0; tier <= 4; tier++) {
+      const def = TIER_DEFAULT[tier];
+      body.append(el('h3', { text: `tier ${tier} — eyes vary (mouth ${def.mouth}), then mouths vary (eyes ${def.eyes})${def.pale ? ', pale' : ''}` }));
+      const row = el('div', { class: 'row' });
+      for (const e of EYES) {
+        try { row.append(spriteFig(faceCombo(tier, e, def.mouth), S, `eyes.${e}`)); } catch (err) { row.append(errBox(err)); }
+      }
+      for (const m of MOUTHS) {
+        try { row.append(spriteFig(faceCombo(tier, def.eyes, m), S, `mouth.${m}`)); } catch (err) { row.append(errBox(err)); }
+      }
+      body.append(row);
+    }
+  });
+
+  section(root, 'composeFace — tiers 0–4 and dead (real module output)', (body) => {
+    if (!faceM) throw new Error('face.js not loaded');
+    const row = el('div', { class: 'row' });
+    for (const t of TIER_SAMPLES) {
+      try {
+        const r = composedFaceFor(t.frac, t.down);
+        row.append(spriteFig(r.sprite, S, t.label, `hp ${Math.round(t.frac * 100)}%${t.down ? ' down' : ''} · ${r.key}`));
+      } catch (e) { row.append(el('figure', {}, errBox(e), el('figcaption', { text: t.label }))); }
+    }
+    body.append(row);
+  });
+}
+
+// ------------------------------------------------------------------------------------------------
+// Live strip
+const gunSpriteFor = gunsM && gunsM.gunSpriteFor ? gunsM.gunSpriteFor : () => null;
+const liveErr = $('liveErr');
+const liveErrMsgs = new Map();
+function reportLive(where, e) {
+  const msg = `${where}: ${fmtErr(e)}`;
+  if (liveErrMsgs.get(where) === msg) return;
+  liveErrMsgs.set(where, msg);
+  liveErr.textContent = '';
+  for (const m of liveErrMsgs.values()) liveErr.append(errBox(m));
+}
+function clearLive(where) {
+  if (!liveErrMsgs.has(where)) return;
+  liveErrMsgs.delete(where);
+  liveErr.textContent = '';
+  for (const m of liveErrMsgs.values()) liveErr.append(errBox(m));
+}
+
+const gunSel = $('gunSel');
+if (GUN_SPRITES) for (const k of Object.keys(GUN_SPRITES)) gunSel.append(el('option', { value: k, text: k }));
+if (GUN_SPRITES && GUN_SPRITES.ar) gunSel.value = 'ar';
+
+let paused = false;
+$('pauseBtn').addEventListener('click', () => { paused = !paused; $('pauseBtn').textContent = paused ? 'Resume' : 'Pause'; });
+
+const sim = {
+  t: 0, player: { x: 0, y: 0, angle: 0, sprinting: false, moving: true, down: false },
+  weapon: { reloading: false, reloadT: 0 }, fireT: 0, reloadCycleT: 0, flashT: 0,
+  anim: null,
+};
+try { if (animM) sim.anim = animM.createPlayerAnim(); } catch (e) { reportLive('createPlayerAnim', e); }
+
+function stepSim(dt) {
+  const p = sim.player;
+  const sprint = $('sprintChk').checked;
+  const speed = 110 * (sprint ? 1.35 : 1);
+  const R = 50;
+  sim.t += dt;
+  sim.phase = (sim.phase || 0) + (speed / R) * dt;
+  p.x = Math.cos(sim.phase) * R; p.y = Math.sin(sim.phase) * R;
+  p.angle = -sim.t * 0.6;             // aim rotates independently of movement
+  p.sprinting = sprint; p.moving = true; p.down = $('downChk').checked;
+  // reload every 4 s for 1.5 s
+  sim.reloadCycleT += dt;
+  if (sim.reloadCycleT >= 4) sim.reloadCycleT -= 4;
+  sim.weapon.reloading = $('reloadChk').checked && sim.reloadCycleT < 1.5;
+  sim.weapon.reloadT = sim.weapon.reloading ? 1.5 - sim.reloadCycleT : 0;
+  sim.flashT = Math.max(0, sim.flashT - dt);
+  const def = { id: gunSel.value, sprite: gunSel.value, cls: gunSel.value };
+  sim.fireT += dt;
+  if (sim.fireT >= 0.5) {
+    sim.fireT -= 0.5;
+    if ($('fireChk').checked && !sim.weapon.reloading && !p.down && sim.anim) {
+      try { animM.noteShot(sim.anim, def); sim.flashT = 0.06; clearLive('noteShot'); } catch (e) { reportLive('noteShot', e); }
+    }
+  }
+  if (sim.anim) {
+    try { animM.updatePlayerAnim(sim.anim, p, def, sim.weapon, dt); clearLive('updatePlayerAnim'); } catch (e) { reportLive('updatePlayerAnim', e); }
+  }
+  return def;
+}
+
+function drawSoldier(ctx, cx, cy, zoom, def) {
+  const p = sim.player, a = sim.anim || {};
+  const s = SPRITES.scale * zoom;
+  const x = cx + p.x * zoom, y = cy + p.y * zoom;
+  const dirs = SPRITES.directions;
+  const sh = SOLDIER.shadow;
+  if (sh) {
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.beginPath(); ctx.ellipse(x, y + s, sh.rx * s, sh.ry * s, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  if (p.down) {
+    const d = SOLDIER.down;
+    ctx.fillStyle = 'rgba(143,15,15,0.7)';
+    ctx.beginPath(); ctx.ellipse(x, y + 2 * s, 9 * s, 6 * s, 0, 0, Math.PI * 2); ctx.fill();
+    pixel.drawSprite(ctx, need(d.sprite, 'SOLDIER.down.sprite'), x, y, { scale: s, ax: d.anchor.x, ay: d.anchor.y, angle: 0 });
+    return;
+  }
+  const legs = SOLDIER.legs;
+  const lf = legs.frames[(a.legFrame | 0) % legs.frames.length];
+  pixel.drawSprite(ctx, need(lf, 'legs frame'), x, y, { scale: s, angle: a.legAngle ?? p.angle, ax: legs.anchor.x, ay: legs.anchor.y, directions: dirs });
+
+  const t = SOLDIER.torso;
+  const pose = POSES.includes(a.pose) ? a.pose : 'twohand';
+  const walkFrames = t.walk && t.walk[pose];
+  const torso = sim.weapon.reloading ? get(t, `reload.${pose}`)?.[a.reloadFrame | 0]
+    : (Array.isArray(walkFrames) && a.moving && !(a.recoil > 0)) ? walkFrames[(a.legFrame | 0) % walkFrames.length]
+    : get(t, `idle.${pose}`);
+  const aim = p.angle;
+  const qa = pixel.quantizeAngle(aim, dirs);
+  const rd = a.recoilDir ?? aim, rec = a.recoil || 0;
+  const lean = p.sprinting ? 1 : 0;
+  const tx = x + (-Math.cos(rd) * rec + Math.cos(aim) * lean) * s;
+  const ty = y + (-Math.sin(rd) * rec + Math.sin(aim) * lean) * s;
+  pixel.drawSprite(ctx, need(torso, `torso ${pose}`), tx, ty, { scale: s, angle: aim, ax: t.anchor.x, ay: t.anchor.y, directions: dirs });
+
+  const g = gunSpriteFor(def);
+  if (!g) return;
+  const hand0 = (t.hand && t.hand[pose]) || t.anchor;
+  const rOff = sim.weapon.reloading && Array.isArray(t.reloadGunOffset) ? (t.reloadGunOffset[a.reloadFrame | 0] || { x: 0, y: 0 }) : { x: 0, y: 0 };
+  const hand = { x: hand0.x + rOff.x, y: hand0.y + rOff.y };
+  const lx = hand.x - t.anchor.x, ly = hand.y - t.anchor.y;
+  const c = Math.cos(qa), sn = Math.sin(qa);
+  const gx = tx + (lx * c - ly * sn) * s, gy = ty + (lx * sn + ly * c) * s;
+  pixel.drawSprite(ctx, need(g.sprite, 'gun sprite'), gx, gy, { scale: s, angle: aim, ax: g.grip.x, ay: g.grip.y, directions: dirs });
+  if (t.helmet && t.helmet.sprite) { const ha = t.helmet.anchor || t.anchor; pixel.drawSprite(ctx, t.helmet.sprite, tx, ty, { scale: s, angle: aim, ax: ha.x, ay: ha.y, directions: dirs }); }
+  if (sim.flashT > 0 && g.muzzle) {
+    const mx = lx + (g.muzzle.x - g.grip.x), my = ly + (g.muzzle.y - g.grip.y);
+    const fx = tx + (mx * c - my * sn) * s, fy = ty + (mx * sn + my * c) * s;
+    ctx.fillStyle = '#ffd54a';
+    ctx.beginPath(); ctx.arc(fx, fy, 2 * s, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function drawLiveCanvas(id, zoom, def) {
+  const cv = $(id), ctx = cv.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = '#2b2a26'; ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  const grid = 40 * zoom;
+  for (let gx = (cv.width / 2) % grid; gx < cv.width; gx += grid) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, cv.height); ctx.stroke(); }
+  for (let gy = (cv.height / 2) % grid; gy < cv.height; gy += grid) { ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(cv.width, gy); ctx.stroke(); }
+  drawSoldier(ctx, cv.width / 2, cv.height / 2, zoom, def);
+}
+
+// Live face
+let fstate = null, lastFaceKey = null;
+try { if (faceM) fstate = faceM.createFaceState(7); } catch (e) { reportLive('createFaceState', e); }
+$('hpRange').addEventListener('input', () => { $('hpVal').textContent = $('hpRange').value + '%'; });
+$('hurtBtn').addEventListener('click', () => { try { if (fstate) faceM.faceEvent(fstate, 'hurt'); } catch (e) { reportLive('faceEvent', e); } });
+$('grinBtn').addEventListener('click', () => { try { if (fstate) faceM.faceEvent(fstate, 'grin'); } catch (e) { reportLive('faceEvent', e); } });
+
+function stepFace(dt) {
+  if (!fstate) return;
+  const frac = Number($('hpRange').value) / 100;
+  faceM.updateFaceState(fstate, frac, $('faceDownChk').checked, dt);
+  const key = faceM.faceFrameKey(fstate);
+  if (key !== lastFaceKey) {
+    const spr = need(faceM.composeFace(fstate), 'composeFace()');
+    for (const id of ['face1', 'face4', 'face6']) {
+      const cv = $(id);
+      if (cv.width !== spr.w || cv.height !== spr.h) { cv.width = spr.w; cv.height = spr.h; }
+      cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(spr.pixels), spr.w, spr.h), 0, 0);
+    }
+    lastFaceKey = key;
+  }
+  const f = fstate;
+  const n = (v) => (typeof v === 'number' ? v.toFixed(2) : String(v));
+  $('faceInfo').textContent = `key    ${key}\ntier   ${f.tier}  dead ${f.dead}\nlook   ${f.look}  lookT ${n(f.lookT)}\nblinkT ${n(f.blinkT)}  blinkFor ${n(f.blinkFor)}\nwinceT ${n(f.winceT)}  grinT ${n(f.grinT)}\nbreathe ${n(f.breathe)}\nplaceholder ${pixel.isPlaceholder(faceM.composeFace(f))}`;
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
+  last = now;
+  if (!paused && pixel) {
+    let def = null;
+    try { def = stepSim(dt); clearLive('sim'); } catch (e) { reportLive('sim', e); }
+    if (SOLDIER && def) {
+      try { drawLiveCanvas('live1', 1, def); drawLiveCanvas('live3', 3, def); clearLive('draw soldier'); } catch (e) { reportLive('draw soldier', e); }
+    } else if (!SOLDIER) reportLive('draw soldier', 'soldier.js not loaded');
+    if (sim.anim) {
+      const a = sim.anim, n = (v) => (typeof v === 'number' ? v.toFixed(2) : String(v));
+      $('animInfo').textContent = `anim\nlegFrame ${a.legFrame}  walkDist ${n(a.walkDist)}\nlegAngle ${n(a.legAngle)}  moving ${a.moving}\npose ${a.pose}\nrecoil ${n(a.recoil)}  dir ${n(a.recoilDir)}\nreload ${sim.weapon.reloading}  frame ${a.reloadFrame}`;
+    }
+    try { stepFace(dt); clearLive('face'); } catch (e) { reportLive('face', e); }
+  }
+  requestAnimationFrame(frame);
+}
+
+// ------------------------------------------------------------------------------------------------
+renderBanners();
+try { renderStatic(); } catch (e) { $('static').append(errBox(e)); }
+$('scaleSel').addEventListener('change', () => { try { renderStatic(); } catch (e) { $('static').append(errBox(e)); } });
+if (!faceM) reportLive('face', 'face.js not loaded');
+if (!animM) reportLive('animator', 'animator.js not loaded (legs stay on frame 0, no recoil/reload)');
+requestAnimationFrame(frame);
+window.__spritePreview = { sim, get face() { return fstate; }, loadErrors };
+</script>
+</body>
+</html>
