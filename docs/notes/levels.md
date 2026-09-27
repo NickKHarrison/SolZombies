@@ -405,3 +405,51 @@ difficulty unchanged from the scaffold.
 - Render (C): level 3 has many small free-standing wall blocks (tanks, pods, benches) that
   should read as glass tanks; perk machine K on level 3 sits on the reactor core's south face.
 - Level-1 perk tiles moved no WO4 gameplay tile (only walls became machines).
+
+## WO8 (Agent C) — Pack-a-Punch machine `A` on every level
+
+Files: `level1.js`, `level2.js`, `level3.js` (one tile each, a `#` became `A`; header comments
+updated), `tests/levels.test.js`. Legend addition: `A` = Pack-a-Punch machine (map.js
+`TILE_PAP = 11`, Agent B), a wall tile like a perk machine; `A` is never a wall-buy key (tested).
+
+### Placement rules (WO8 1.1; `validatePap`, tested on every level in `LEVELS`)
+- Exactly one `A`; its 4-neighbours are only `#` and floor, the floor all of **one zone**.
+- That zone is the deepest normal zone: it borders the mega door `M` and first becomes reachable
+  when H opens (door step 5); not the arena. Reachable with all doors open.
+- > 2 tiles (Chebyshev) from every arena tile (same rule as the FIX-1 interactables; `A` was also
+  added to that interactable list in `validateArena`).
+- >= 6 tiles (Manhattan) from every wall buy and every perk machine.
+- Positions pinned per level (`PAP_PLAN`); level-1 "edit confined to the arena/vault block" test
+  turns `A` back into `#` as well.
+
+| Level | Zone | `A` at | Stands on | Faces | Nearest buy / perk | Mega door |
+|-------|------|--------|-----------|-------|--------------------|-----------|
+| 1 BUNKER | vault (H) | (51,32) | NW corner of the vault's 3x2 pillar (51-53,32-33) | N (51,31), W (50,32) | ICR-1 (52,37) 6, Mule Kick (57,34) 8 | (53-55,28), 6 |
+| 2 CATACOMBS | sanctum (H) | (38,31) | NE corner of the 2x2 altar (37-38,31-32) | N (38,30), E (39,31) | Gorgon (37,25) 7, Drakon (43,34) 8, Mule Kick (34,37) 10 | (43,27-29), 7 |
+| 3 LABORATORY | reactor room (H) | (56,11) | east wall, inner corner | W (55,11), S (56,12) | Drakon (54,2) 11, Mule Kick (50,9) 8 | (49-51,14), 8 |
+
+Distances are Manhattan unless noted. Nearest arena tile (Chebyshev): L1 5, L2 6, L3 4. Nearest
+door-H tile: L1 4, L2 7, L3 17 — so the PaP prompt never competes with door H or `M` at the
+64 px interact range.
+
+Changed rows (column ruler as above):
+
+```
+      012345678901234567890123456789012345678901234567890123456789
+L1 32 ###................G.......##.......##.........H...A##...###
+L2 31 ###.....##......##......##......#....#A....#################
+L3 11 ###...........................#...........#.#...........A###
+```
+
+### Tests added (`tests/levels.test.js`)
+- Own parser knows `A` (`PAP_LETTER`, in `LEGEND`, `L.paps`), independent of map.js.
+- `validatePap` on every level + the pinned positions.
+- Negative cases: no machine, two machines, machine in the start zone (L1 hub), machine behind G
+  (L1 armory), 2 tiles from a wall buy, 2 tiles from a perk machine, 2 tiles from the arena, in a
+  wall between two zones (L2 chapel/crypts), buried in rock (faces no floor), `A` as a wall-buy key.
+- Verified with Agent B's map.js: `loadMap(level).pap` = (51,32) / (38,31) / (56,11).
+- `tests/levels.test.js` 22/22 green; full `npm test` 531/531 green at time of writing.
+
+### Notes for others
+- Render (D): L1 and L2 machines stand on free-standing blocks (vault pillar, sanctum altar), so
+  they are visible from two sides; L3 is in a concave corner of the reactor room's east wall.

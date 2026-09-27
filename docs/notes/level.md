@@ -73,3 +73,13 @@ because map.js is rewritten concurrently). Main should never call it.
   - Levels 4+ sell tier-3 guns and their ammo.
 - **Balance #5:** `LEVELS_CFG.loop.speedMultCap` is raised from 1.15 to 1.3. Speed is now L4 1.236, L5 1.273, L6+ 1.3.
 - **Tests:** `tests/level.test.js` covers hazards on start and mid-fade, the loop wall buys (including the real `map.loadMap`), and the speed cap.
+
+## WO8 Phase 4a (fixer)
+- New export `megaDoorCost(index)` = `DOORS.megaCost + DOORS.megaCostPerLevel * index` (250 / 500 /
+  750 / 1000 / 1250 ...). `startLevel` writes it to `state.map.megaDoor.cost` after loading the map
+  (maps without a mega door are untouched). Test in `tests/level.test.js` (real loader, L1-L4).
+
+## WO8 FIX-A (playtest #4)
+- `startLevel`: when `returnPapWeapon` hands a gun back, a gold (`#ffd36b`, 2.5 s) floating text
+  effect `{ type: 'text', text: '<UPGRADED NAME> RETURNED' }` is pushed just above the player
+  (after the player is placed at the new start). No new event types; still no `pap:done`.

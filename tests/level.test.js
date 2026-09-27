@@ -353,7 +353,123 @@ test('FIX-3 (balance #5): loop speed cap 1.3 lets speed rise past level 3', () =
   assert.equal(levelDifficulty(N + 20).speedMult, 1.3);
 });
 
+test('WO8 Phase 4a (economy #1): mega door cost 250 / 500 / 750 / 1000 per level, loop levels continue', async () => {
+  const { megaDoorCost } = await import('../src/level.js');
+  const { DOORS } = await import('../src/config.js');
+  assert.equal(DOORS.megaCostPerLevel, 250);
+  assert.deepEqual([0, 1, 2, 3, 4, 5].map(megaDoorCost), [250, 500, 750, 1000, 1250, 1500]);
+  // startLevel stamps the price on the loaded map's mega door (real loader, every authored level + loop 1)
+  setLoadMapFunction(null);
+  for (let i = 0; i <= N; i++) {
+    const s = setup();
+    setLoadMapFunction(null);
+    startLevel(s, i);
+    assert.ok(s.map.megaDoor, `level ${i} has a mega door`);
+    assert.equal(s.map.megaDoor.cost, 250 + 250 * i, `level ${i}`);
+  }
+  // a map without a mega door is left alone
+  const s = setup();
+  startLevel(s, 2);
+  assert.equal(s.map.megaDoor, undefined);
+  setLoadMapFunction(fakeLoad);
+});
+
 test('cleanup: restore default loader', () => {
   setLoadMapFunction(null);
   events.clearAll();
+});
+
+// ---------------------------------------------------------------------------
+// WO8 (INT): a gun inside the Pack-a-Punch machine comes back upgraded on a level swap.
+// ---------------------------------------------------------------------------
+import { createWeapon, isUpgraded, UPGRADES } from '../src/weapons.js';
+import * as shopMod from '../src/shop.js';
+
+function papSetup() {
+  const s = setup();
+  s.player.weapons = [createWeapon('mr6'), null];
+  s.player.activeSlot = 0;
+  s.player.tempWeapon = null;
+  return s;
+}
+
+test('WO8 startLevel: working gun returns upgraded to its empty slot, counted once, machine idle', () => {
+  const s = papSetup();
+  s.player.points = 5000;
+  s.map = { pap: null };
+  s.player.weapons = [createWeapon('mr6'), createWeapon('kn44')];
+  s.player.activeSlot = 1;
+  assert.equal(shopMod.startPap(s), true);
+  assert.equal(s.player.weapons[1], null);
+  const inside = s.shop.pap.weapon;
+  const equips = record('weapon:equipped');
+  const dones = record('pap:done');
+  startLevel(s, 1);
+  assert.equal(s.player.weapons[1], inside, 'same object back in slot 1');
+  assert.equal(isUpgraded(inside), true);
+  assert.equal(inside.def, UPGRADES.kn44);
+  assert.equal(inside.mag, UPGRADES.kn44.mag);
+  assert.equal(inside.reserve, UPGRADES.kn44.reserve);
+  assert.equal(s.player.activeSlot, 1);
+  assert.equal(s.stats.papCount, 1);
+  assert.deepEqual(s.shop.pap, { state: 'idle', timer: 0, weapon: null, slot: -1, baseId: null });
+  assert.deepEqual(equips, [{ weaponId: 'kn44', slot: 1 }]);
+  assert.deepEqual(dones, [], 'no pap:done on a level swap');
+  // A second swap does nothing more.
+  startLevel(s, 2);
+  assert.equal(s.stats.papCount, 1);
+  assert.deepEqual(s.player.weapons.map((w) => w && w.id), ['mr6', 'kn44']);
+});
+
+test('WO8 startLevel: ready gun whose slot was refilled goes to the first empty / active slot', () => {
+  const s = papSetup();
+  const g = createWeapon('mr6');
+  shopMod.updatePap(s, 0); // no-op on idle
+  s.shop.pap = { state: 'ready', timer: 0, weapon: g, slot: 0, baseId: 'mr6' };
+  s.player.weapons = [createWeapon('kn44'), createWeapon('rk5')]; // both filled meanwhile
+  s.player.activeSlot = 1;
+  startLevel(s, 1);
+  assert.equal(s.player.weapons[1], g, 'replaces the active gun');
+  assert.equal(isUpgraded(g), true, 'upgraded even if it was not yet');
+  assert.equal(s.stats.papCount, 1);
+  assert.equal(s.shop.pap.state, 'idle');
+});
+
+test('WO8 startLevel: same id bought again meanwhile is replaced, no duplicate', () => {
+  const s = papSetup();
+  const g = createWeapon('mr6');
+  s.shop.pap = { state: 'working', timer: 2, weapon: g, slot: 1, baseId: 'mr6' };
+  s.player.weapons = [createWeapon('mr6'), null];
+  s.player.activeSlot = 0;
+  startLevel(s, 1);
+  assert.deepEqual(s.player.weapons.map((w) => w && w.id), ['mr6', null]);
+  assert.equal(s.player.weapons[0], g);
+});
+
+test('WO8 startLevel: idle machine changes nothing; papCount untouched', () => {
+  const s = papSetup();
+  const before = s.player.weapons.slice();
+  startLevel(s, 1);
+  assert.deepEqual(s.player.weapons, before);
+  assert.equal(s.stats.papCount, 0);
+  assert.equal(s.shop.pap.state, 'idle');
+});
+
+test('WO8 FIX-A (playtest #4): a returned gun is announced with a gold "<NAME> RETURNED" text near the player', () => {
+  const s = papSetup();
+  s.player.weapons = [createWeapon('mr6'), createWeapon('kn44')];
+  s.player.activeSlot = 1;
+  s.player.points = 5000;
+  assert.equal(shopMod.startPap(s), true);
+  startLevel(s, 1);
+  const texts = s.effects.filter((e) => e.type === 'text');
+  assert.equal(texts.length, 1);
+  const t = texts[0];
+  assert.equal(t.text, `${UPGRADES.kn44.name.toUpperCase()} RETURNED`);
+  assert.equal(t.color, '#ffd36b');
+  assert.ok(t.ttl > 0 && t.maxTtl === t.ttl);
+  assert.ok(Math.abs(t.x - s.player.x) < 1 && Math.abs(t.y - s.player.y) < 60);
+  // nothing in the machine: no text
+  startLevel(s, 2);
+  assert.equal(s.effects.filter((e) => e.type === 'text').length, 0);
 });

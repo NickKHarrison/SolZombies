@@ -9,6 +9,8 @@
   --hud-round: #d21f1f;
   --hud-round-bright: #ff3b2f;
   --hud-dim: #8a8a8a;
+  --hud-gold: #ffc93c;       /* WO8: Pack-a-Punch upgraded weapon names */
+  --hud-gold-dim: #d9a92c;
   --hud-red: #ff3030;
   --hud-green: #6cf542;
   /* WO4: face box top-left (face keeps the WO3 0.8 scale); health/kills readouts bottom-left.
@@ -284,6 +286,17 @@ html, body {
 }
 
 .hud-weapon.reloading .hud-weapon-reload { display: block; }
+
+/* WO8: Pack-a-Punch upgraded guns: gold name with a leading star (hud.js adds the star and the
+   .upgraded class). Desktop names are capped and ellipsised so "PORTER'S X2 RAY GUN" never grows
+   the readout toward the centre column. */
+.hud-weapon { max-width: 52cqh; }
+.hud-weapon-name, .hud-weapon-sec { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hud-weapon-name.upgraded {
+  color: var(--hud-gold);
+  text-shadow: 0 0 0.6cqh rgba(170, 90, 255, 0.75), var(--hud-shadow);
+}
+.hud-weapon-sec.upgraded { color: var(--hud-gold-dim); }
 .hud-weapon.reloading { animation: hud-reload-pulse 0.6s ease-in-out infinite alternate; }
 
 @keyframes hud-reload-pulse {
@@ -797,6 +810,12 @@ html, body {
 }
 .tbtn-action.pressed { background: rgba(255, 213, 74, 0.35); border-color: #ffe98a; color: #fff6d0; }
 .tbtn-action .tbtn-label { overflow: hidden; text-overflow: ellipsis; }
+/* WO8 Phase 4a: a blocked prompt ("already upgraded", "Machine busy", ...) is greyed and inert
+   (touch.js swallows the tap); an unaffordable one is greyed but still tappable. */
+.tbtn-action.blocked,
+.tbtn-action.blocked.pressed { background: rgba(40, 40, 44, 0.55); border-color: rgba(160, 160, 160, 0.45);
+  color: rgba(200, 200, 200, 0.7); transform: none; }
+.tbtn-action.cant-afford { border-color: rgba(255, 120, 120, 0.7); color: #ffb0b0; }
 
 /* ACTION is hidden with .hidden, or when its label (or the button itself) is empty. */
 .tbtn-action:empty,
@@ -821,6 +840,15 @@ html, body {
    in a smaller font instead of growing sideways. */
 #hud.mobile .hud-weapon { max-width: 26cqh; }
 #hud.mobile .hud-weapon-name { font-size: 2.6cqh; white-space: normal; text-wrap: balance; }
+/* WO8: at most two lines, so a long upgraded name ("★ PORTER'S X2 RAY GUN") ellipsises instead of
+   growing a third line up into RELOAD / KNIFE. */
+#hud.mobile .hud-weapon-name {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow-wrap: anywhere;
+}
 /* FIX-2 (playtest #2): holstered weapons on ONE compact line ("1 SHEIVA · 3 KN-44"), ellipsised
    at the readout width. Hidden while reloading so a 2-line name + RELOADING stays under 16cqh. */
 #hud.mobile .hud-weapon-secondary {
@@ -834,6 +862,30 @@ html, body {
 #hud.mobile .hud-weapon-sec + .hud-weapon-sec::before { content: " \00b7  "; }
 #hud.mobile .hud-weapon-sec-slot { display: none; }
 #hud.mobile .hud-weapon.reloading .hud-weapon-secondary { display: none; }
+/* WO8 FIX-B (playtest #2): short names are only used on mobile with two holstered guns
+   (.multi): "★ JUDGE & JURY · ★ SEKHMET'S IRE" becomes "JUDGE · SEKHMET" (gold = upgraded, no
+   star), in a 9px font, and the line may reach 3.5cqh left of the readout (still right of the
+   right stick's base and below KNIFE) so both names fit. */
+.hud-weapon-sec-short { display: none; }
+#hud.mobile .hud-weapon-secondary.multi .hud-weapon-sec-name { display: none; }
+#hud.mobile .hud-weapon-secondary.multi .hud-weapon-sec-short { display: inline; }
+/* Both names share the readout width: each shrinks in proportion to its length and ellipsises
+   on its own, so the start of both names always shows even for the longest pair. */
+#hud.mobile .hud-weapon-secondary.multi {
+  display: flex;
+  justify-content: flex-end;
+  letter-spacing: 0;
+  font-size: max(9px, 2.2cqh);
+  margin-left: -3.5cqh;
+}
+#hud.mobile .hud-weapon-secondary.multi .hud-weapon-sec {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
 
 /* ---------- WO6: "Rotate your phone" plate (hud.setRotateOverlay) ---------- */
 /* Appended to <body> (not #hud): the stage is only a 16:9 strip in portrait, and #hud's size

@@ -100,7 +100,7 @@ function applyPerkStats(p) {
 }
 
 // Removes every perk (Quick Revive self-revive, debug). Emits perk:lost per perk. Losing Mule
-// Kick drops the third weapon (switching to slot 0 if it was active); losing Juggernog clamps
+// Kick drops the third weapon (switching to the first filled slot if it was active); losing Juggernog clamps
 // maxHealth/health back to PLAYER.maxHealth.
 export function removeAllPerks(state, reason = 'debug') {
   const p = state && state.player;
@@ -110,10 +110,14 @@ export function removeAllPerks(state, reason = 'debug') {
   const slots = perkMods(p).weaponSlots;
   if (p.weapons.length > slots && p.activeSlot >= slots) {
     cancelReload(p.weapons[p.activeSlot]);
-    p.activeSlot = 0;
     p.weapons.length = slots;
-    const w = p.weapons[0];
-    if (w && !p.tempWeapon) emit('weapon:equipped', { weaponId: w.id, slot: 0 });
+    // WO8 FIX-A (QA review M1): slot 0 may be empty (its gun is inside the Pack-a-Punch), so
+    // switch to the first FILLED slot; none filled -> slot 0 with empty hands, no event.
+    let k = 0;
+    for (let i = 0; i < slots; i++) if (p.weapons[i]) { k = i; break; }
+    p.activeSlot = k;
+    const w = p.weapons[k];
+    if (w && !p.tempWeapon) emit('weapon:equipped', { weaponId: w.id, slot: k });
   }
   applyPerkStats(p);
   for (const perkId of lost) emit('perk:lost', { perkId, reason });

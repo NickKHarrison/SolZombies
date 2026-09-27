@@ -158,3 +158,42 @@
   emitted every new event plus lab start/change/restart via `__game.modules.events`, no console
   errors. `npm test`: 438/441; the 3 failures (WO7 exports for zombie sprites / meleeAttack / hud,
   weapon tables, WO5 wall prices) belong to agents still working on those files, not audio.
+
+## WO8 (Agent F): Pack-a-Punch
+- New SFX. They are subscribed in `initAudio`, so a re-init is safe, and without a context they
+  play nothing. New `playSfx` names: `papStart`, `papDone`. `PAP` is imported from config.js;
+  `PAP.workSeconds` falls back to 3 s if it is missing or invalid.
+  - `pap:start` -> `papStart`: a heavy mechanical clank as the gun goes in (world bus). It is a short
+    band-passed slide rattle, then at +0.18 s a low sine/triangle slam (120->42 Hz), inharmonic
+    square metal partials (~0.64/1.23/1.87/2.74 kHz), a noise hit and a high latch tick. It uses
+    +-4 % random pitch from the audio-local PRNG.
+    Then, from +0.35 s, the **working voice** plays for `PAP.workSeconds`:
+    - Hum (world bus, 0.05): two detuned 55 Hz saws, a 110 Hz sine and a quiet 165 Hz triangle
+      through a 480 Hz lowpass, a 7 Hz tremolo and a looped noise "servo whirr" band sweeping
+      700->1400 Hz. It fades in over 0.2 s and out over the last 0.3 s.
+    - Jingle on its own quiet sub-bus `papBus` (gain 0.35 -> ui bus). It is an ORIGINAL 8-note
+      motif in D harmonic minor with a lilting waltz feel:
+      A4 C#5 D5 F5 E5 Bb4 C#5 D5, beats 1/.5/.5/1.5/.5/1/1/2 at 0.3 s per beat (~2.4 s).
+      The lead is a calliope-ish triangle plus a quiet square an octave up, over an oom-pah bass
+      (D2 root on notes 1-4, A2 on 5-8, a fifth "pah" in the longer notes). Notes that would run
+      past `workSeconds` are cut or skipped.
+  - `pap:done` -> `papDone`: stops any working voice (0.08 s fade). It plays an eject thunk
+    (sine 150->55 Hz, dull noise, a small click) and a bright sparkle shimmer: a rising 6-note
+    sine/triangle bell run from E6 to A7 with slight detune, plus a high-passed noise shimmer
+    (ui bus).
+  - `purchase:made` with `kind === 'pap'` plays nothing, because the clank replaces the cash tick.
+- The working voice (hum + jingle) stops early with a short fade on `game:restart`, `game:over`,
+  `level:descend`, `pap:done`, every `initAudio()` re-init and any new `pap:start`. Only one can
+  run at a time.
+- Verification:
+  - `node --check src/audio.js` passes.
+  - In Node without `window`, importing the module and calling
+    `initAudio/playSfx('papStart'|'papDone')/setMuted` does nothing and does not throw.
+  - Fake-AudioContext smoke test: a PaP purchase builds 0 nodes, `pap:start` builds 96 and
+    `pap:done` builds 34. The working voice is stopped by game over, descend, restart and re-init;
+    a second game over stops nothing.
+  - Chrome (port 8257, `?debug=1`): emitting `purchase:made` kind pap, `pap:start`, `pap:done`,
+    game over, descend and restart through `__game.modules.events` gave no console errors.
+  - `npm test`: 513/518 pass. The 5 failures are in WO8 new exports, the three levels' PaP
+    placement tests and the WO7 tier-3 weapon defs. Those files belong to agents still working
+    (weapons/map/shop/levels), not audio.

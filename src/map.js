@@ -23,6 +23,9 @@ export const TILE_STAIRS = 9; // closed staircase ('T'): blocks like a wall; ope
 // WO7: perk machine (letters from config PERKS.list[*].letter: J Q C N U K). Blocks movers and
 // rays like a wall buy; pathfinding walks only 0/2/3/6, so it blocks zombies automatically.
 export const TILE_PERK = 10;
+// WO8: Pack-a-Punch machine ('A', at most one per map). Blocks movers and rays like a perk machine;
+// solid in the arena and active-spawn searches (both walk whitelists that exclude it).
+export const TILE_PAP = 11;
 
 // Perk machine letter -> perk id, built from config PERKS (namespace read: guarded).
 export const PERK_LETTERS = (() => {
@@ -57,9 +60,14 @@ const CHAR_CODE = {
   'O': TILE_OPEN_SPAWN, 'B': TILE_BOX,
   // WO5: mega door, boss spawn (floor), minion spawn (floor, see TILE_ARENA_SPAWN), staircase.
   'M': TILE_DOOR, 'Z': TILE_FLOOR, 'X': TILE_FLOOR, 'T': TILE_STAIRS,
+  // WO8: Pack-a-Punch machine.
+  'A': TILE_PAP,
 };
 
 function charToCode(ch, wallbuyMap) {
+  if (ch === 'A' && Object.prototype.hasOwnProperty.call(wallbuyMap, ch)) {
+    throw new Error("map: tile char 'A' is both the Pack-a-Punch machine and a wall buy");
+  }
   if (ch in CHAR_CODE) return CHAR_CODE[ch];
   if (Object.prototype.hasOwnProperty.call(PERK_LETTERS, ch)) {
     if (Object.prototype.hasOwnProperty.call(wallbuyMap, ch)) {
@@ -150,6 +158,7 @@ export function loadMap(levelOrAscii = LEVELS[0], opts = {}) {
     levelId: def ? def.id : LEVEL1.id, name: def ? def.name : LEVEL1.name, theme, wallbuyMap,
     megaDoor: null, bossSpawn: null, arenaSpawns: [], arenaTiles: new Set(), stairs: null,
     perkMachines: [], // WO7: { id, perkId, tx, ty, x, y, w, h, soldOut }
+    pap: null, // WO8: { tx, ty, x, y, w, h, cx, cy } or null
   };
 
   const windows = [];
@@ -179,6 +188,10 @@ export function loadMap(levelOrAscii = LEVELS[0], opts = {}) {
       else if (ch === 'O') opens.push({ tx, ty });
       else if (code === TILE_DOOR) (doorTiles[ch] ||= []).push({ tx, ty });
       else if (ch === 'B') map.box = { ...rect, tx, ty };
+      else if (code === TILE_PAP) {
+        if (map.pap) throw new Error('map: more than one Pack-a-Punch machine A');
+        map.pap = { tx, ty, ...rect, cx: rect.x + TILE / 2, cy: rect.y + TILE / 2 };
+      }
       else if (code === TILE_PERK) {
         map.perkMachines.push({ id: map.perkMachines.length + 1, perkId: PERK_LETTERS[ch], tx, ty, ...rect, soldOut: false });
       }
@@ -528,7 +541,7 @@ export function resolveCircle(map, x, y, r, forZombie = false) {
 
 function blocksRay(code) {
   return code === TILE_WALL || code === TILE_WINDOW || code === TILE_BOX || code === TILE_WALLBUY ||
-    code === TILE_DOOR || code === TILE_STAIRS || code === TILE_PERK;
+    code === TILE_DOOR || code === TILE_STAIRS || code === TILE_PERK || code === TILE_PAP;
 }
 
 // DDA grid march. dx,dy should be a unit vector (normalized defensively).
@@ -597,7 +610,8 @@ function distToRect(x, y, r) {
 // locked so the shop can show the blocked prompt), open stairs, or damaged barricade whose tile edge is within range of (x, y).
 // WO7: perk machines ({ kind: 'perk', ref: machine }, sold-out ones included so the shop can show
 // the blocked prompt). Ties (equal edge distance) go to the first kind considered: wall buy, box,
-// perk, door, mega door, stairs, barricade.
+// perk, pap, door, mega door, stairs, barricade.
+// WO8: the Pack-a-Punch machine ({ kind: 'pap', ref: map.pap }), always returned when in range.
 export function nearestInteractable(map, x, y, range) {
   let best = null;
   const consider = (kind, ref) => {
@@ -607,6 +621,7 @@ export function nearestInteractable(map, x, y, range) {
   for (const wb of map.wallBuys) consider('wallbuy', wb);
   if (map.box) consider('box', map.box);
   if (map.perkMachines) for (const pm of map.perkMachines) consider('perk', pm);
+  if (map.pap) consider('pap', map.pap);
   if (map.doors) for (const d of map.doors) if (!d.open) consider('door', d);
   if (map.megaDoor && !map.megaDoor.open && !map.megaDoor.sealed) consider('megadoor', map.megaDoor);
   if (map.stairs && map.stairs.open) consider('stairs', map.stairs);

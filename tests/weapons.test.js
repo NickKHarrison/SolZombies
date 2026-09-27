@@ -1007,3 +1007,258 @@ test('WO7 meleeAttack with the real zombie.damageZombie: normal 150, Insta-Kill 
   meleeAttack(state, p);
   assert.ok(Math.abs((1000 - small.hp) - BOSS_CFG.maxHitFrac * 1000) < 1e-9, 'capped');
 });
+
+import { UPGRADES, upgradeWeapon, isUpgraded, upgradedName, canUpgrade } from '../src/weapons.js';
+import { PAP } from '../src/config.js';
+
+// ---------------------------------------------------------------------------
+// WO8 (Agent A): Pack-a-Punch upgrades
+// ---------------------------------------------------------------------------
+
+const WO8_NAMES = {
+  mr6: 'Nightingale', rk5: 'Dominion', lcar9: 'Gravedigger', sheiva: 'Fallen Comrade', krm262: 'Krumhaar',
+  kuda: 'Scorpion Sting', vmp: 'Hydra', vesper: 'Ultraviolet', pharo: "Sekhmet's Ire", bootlegger: 'Moonshiner',
+  kn44: "Warden's Wrath", hvk30: 'Comet', icr1: 'Infinity Reaper', argus: 'Exodus', locus: 'Cauterizer',
+  drakon: 'Firestorm', haymaker12: 'Mainsail', dingo: 'Kraken', brm: 'Barrage', manowar: 'Dreadnought',
+  xr2: 'Nebula', weevil: 'Wyrm', marshal16: 'Judge & Jury', gorgon: "Medusa's Gaze", dredge48: 'Overflow',
+  hg40: 'Venom Drum', m8a7: 'Pulsar', peacekeeper: 'Peacemaker', raygun: "Porter's X2 Ray Gun", thundergun: 'Zeus Cannon',
+};
+
+test('WO8 UPGRADES: every weapon except the Death Machine, table names, frozen, PAP multipliers', () => {
+  const ids = Object.keys(WEAPONS).filter((id) => id !== 'deathmachine');
+  assert.deepEqual(Object.keys(UPGRADES).sort(), [...ids].sort());
+  assert.deepEqual(Object.keys(WO8_NAMES).sort(), [...ids].sort(), 'name table covers every weapon');
+  assert.equal(UPGRADES.deathmachine, undefined);
+  assert.ok(Object.isFrozen(UPGRADES));
+  for (const id of ids) {
+    const b = WEAPONS[id], u = UPGRADES[id];
+    assert.ok(Object.isFrozen(u), id);
+    assert.equal(u.id, id);
+    assert.equal(u.baseId, id);
+    assert.equal(u.upgraded, true);
+    assert.equal(u.name, WO8_NAMES[id], id);
+    assert.equal(upgradedName(id), WO8_NAMES[id]);
+    assert.equal(u.damage, b.damage * PAP.damageMult, id);
+    assert.equal(u.mag, Math.round(b.mag * PAP.magMult), id);
+    assert.equal(u.reserve, Math.round(b.reserve * PAP.reserveMult), id);
+    assert.ok(Math.abs(u.spread - b.spread * PAP.spreadMult) < 1e-12, id);
+    assert.equal(u.penetration, Math.min(PAP.maxPenetration, b.penetration + PAP.penetrationBonus), id);
+    assert.ok(u.penetration <= 4);
+    for (const k of ['rpm', 'reloadTime', 'auto', 'pellets', 'range', 'cls', 'cost', 'tier', 'sprite', 'noReload']) {
+      assert.equal(u[k], b[k], `${id}.${k} unchanged`);
+    }
+    assert.equal(b.upgraded, undefined, 'base def untouched');
+  }
+  assert.equal(UPGRADES.kn44.damage, 140);
+  assert.equal(UPGRADES.kn44.mag, 45);
+  assert.equal(UPGRADES.kn44.reserve, 360);
+  assert.equal(UPGRADES.kn44.penetration, 2);
+  assert.equal(UPGRADES.locus.penetration, 4, 'already at the cap');
+  assert.equal(UPGRADES.gorgon.penetration, 4);
+  assert.equal(UPGRADES.marshal16.mag, 3);
+  // Projectile / cone scaling.
+  const rp = UPGRADES.raygun.projectile, rb = WEAPONS.raygun.projectile;
+  assert.ok(Object.isFrozen(rp));
+  assert.equal(rp.splashDamage, rb.splashDamage * PAP.projectileMult);
+  assert.equal(rp.splashRadius, rb.splashRadius * PAP.projectileMult);
+  assert.equal(rp.speed, rb.speed);
+  const tc = UPGRADES.thundergun.cone, tb = WEAPONS.thundergun.cone;
+  assert.ok(Object.isFrozen(tc));
+  assert.ok(Math.abs(tc.killRange - tb.killRange * PAP.coneKillMult) < 1e-9);
+  assert.ok(Math.abs(tc.range - tb.range * PAP.coneRangeMult) < 1e-9);
+  assert.ok(Math.abs(tc.knockback - tb.knockback * PAP.knockMult) < 1e-9);
+  assert.equal(tc.halfAngle, tb.halfAngle);
+  assert.equal(tc.stun, tb.stun);
+  assert.equal(upgradedName('deathmachine'), 'Death Machine');
+  assert.equal(upgradedName('nope'), 'nope');
+});
+
+test('WO8 upgradeWeapon / isUpgraded / canUpgrade', () => {
+  const w = createWeapon('kn44');
+  assert.equal(isUpgraded(w), false);
+  assert.deepEqual(canUpgrade(w), { ok: true });
+  w.mag = 3; w.reserve = 10; w.reloading = true; w.reloadT = 1.1;
+  assert.equal(upgradeWeapon(w), w);
+  assert.equal(w.id, 'kn44');
+  assert.equal(w.def, UPGRADES.kn44);
+  assert.equal(w.upgraded, true);
+  assert.equal(isUpgraded(w), true);
+  assert.equal(w.mag, 45);
+  assert.equal(w.reserve, 360);
+  assert.equal(w.reloading, false);
+  assert.equal(w.reloadT, 0);
+  assert.deepEqual(canUpgrade(w), { ok: false, reason: 'upgraded' });
+  // Calling it again never compounds.
+  upgradeWeapon(w);
+  assert.equal(w.def.damage, 140);
+  assert.equal(w.mag, 45);
+  // Reload / Max Ammo use the new maxima.
+  w.mag = 0; w.reserve = 500;
+  startReload(w); updateWeapon(w, 10);
+  assert.equal(w.mag, 45);
+  refillAll(w);
+  assert.equal(w.reserve, 360);
+  // Refusals.
+  const dm = createDeathMachine();
+  assert.deepEqual(canUpgrade(dm), { ok: false, reason: 'powerup' });
+  assert.equal(upgradeWeapon(dm).def, WEAPONS.deathmachine, 'death machine unchanged');
+  assert.equal(dm.upgraded, undefined);
+  assert.deepEqual(canUpgrade(null), { ok: false, reason: 'unknown' });
+  assert.deepEqual(canUpgrade({ id: 'nope' }), { ok: false, reason: 'unknown' });
+  assert.equal(isUpgraded(null), false);
+  assert.equal(upgradeWeapon(null), null);
+  // isUpgraded also trusts the def flag (a weapon built from UPGRADES directly).
+  assert.equal(isUpgraded({ id: 'rk5', def: UPGRADES.rk5 }), true);
+});
+
+test('WO8 ammoCost: upgraded wall guns cost min(PAP.ammoCost, round(ammoCostMult x base)), non-wall guns stay Infinity', () => {
+  // WO8 Phase 4a (economy #5)
+  assert.equal(PAP.ammoCostMult, 3.75);
+  assert.equal(ammoCost('kn44'), 75);
+  assert.equal(ammoCost('kn44', false), 75);
+  assert.equal(ammoCost('kn44', true), 281);
+  assert.equal(ammoCost('manowar', true), 281);
+  assert.equal(ammoCost('peacekeeper', true), 450, 'capped at PAP.ammoCost');
+  assert.equal(ammoCost('kn44', 1), 75, 'only a literal true (ids.map(ammoCost) passes an index)');
+  for (const id of WALL_WEAPON_IDS) {
+    const want = Math.min(PAP.ammoCost, Math.round(PAP.ammoCostMult * ammoCost(id)));
+    assert.equal(ammoCost(id, true), want, id);
+    assert.ok(ammoCost(id, true) <= 450, id);
+  }
+  for (const id of ['mr6', 'raygun', 'thundergun', 'locus', 'deathmachine', 'nope']) assert.equal(ammoCost(id, true), Infinity, id);
+});
+
+test('WO8 upgraded hitscan: double damage and +1 penetration through tryFire; events keep the base id', () => {
+  const { state, calls } = setup();
+  state.zombies = [zombie(1, 100, 0), zombie(2, 150, 0), zombie(3, 200, 0)];
+  const w = upgradeWeapon(createWeapon('kn44'));
+  w.def = { ...w.def, spread: 0 };
+  const fired = [];
+  events.on('weapon:fired', (p) => fired.push(p));
+  assert.equal(tryFire(state, w, 0, 0, 1, 0), true);
+  assert.deepEqual(calls.zombie.map((c) => [c.z.id, c.amount]), [[1, 140], [2, 140]]);
+  assert.equal(w.mag, 44);
+  assert.equal(fired[0].weaponId, 'kn44');
+});
+
+test('WO8 upgraded + Double Tap: zombies x bulletDamageMult, boss base x capped dtap x BOSS.papDamageMult', { skip: !havePerkMods }, () => {
+  const { state, calls } = setup();
+  withPerks(state, ['dtap']);
+  const boss = { ...zombie(2, 150, 0, 100000), kind: 'boss' };
+  state.zombies = [zombie(1, 100, 0), boss];
+  const w = upgradeWeapon(createWeapon('kn44'));
+  w.def = { ...w.def, spread: 0 };
+  const mods = weaponPerkMods(state, w);
+  assert.ok(mods.bulletDamageMult > 1, 'double tap active');
+  tryFire(state, w, 0, 0, 1, 0);
+  const bossMult = Math.min(mods.bulletDamageMult, Number.isFinite(BOSS.dtapDamageMult) ? BOSS.dtapDamageMult : Infinity);
+  // WO8 Phase 4a (economy #2): the boss takes base 70 x min(dtap, cap) x BOSS.papDamageMult (1.25).
+  assert.equal(BOSS.papDamageMult, 1.25);
+  assert.deepEqual(calls.zombie.map((c) => [c.z.id, c.amount]), [[1, 140 * mods.bulletDamageMult], [2, 70 * bossMult * 1.25]]);
+  assert.ok(Math.abs(w.cooldown - 60 / (700 * mods.rpmMult)) < 1e-9, 'rpm x rpmMult unchanged');
+});
+
+test('WO8 upgraded Ray Gun: splash damage and radius x1.5 in updateBullets, direct hit x2', () => {
+  const run = (upgrade) => {
+    const { state, calls } = setup();
+    state.player = { x: -1000, y: 0, radius: 14, down: false };
+    const target = zombie(1, 60, 0, 1e6);
+    const mid = zombie(2, 60, 110, 1e6);   // 110 - 14 = 96 > 90 base radius, <= 135 upgraded
+    const far = zombie(3, 60, 200, 1e6);   // outside both
+    state.zombies = [target, mid, far];
+    const w = createWeapon('raygun');
+    if (upgrade) upgradeWeapon(w);
+    w.def = { ...w.def, spread: 0 };
+    tryFire(state, w, 0, 0, 1, 0);
+    for (let i = 0; i < 10 && state.bullets.length; i++) updateBullets(state, 1 / 60);
+    const ex = state.effects.find((e) => e.type === 'explosion');
+    return { byId: Object.fromEntries(calls.zombie.map((c) => [c.z.id, c.amount])), radius: ex && ex.radius };
+  };
+  const base = run(false), up = run(true);
+  assert.deepEqual(base.byId, { 1: 1000 });
+  assert.equal(base.radius, 90);
+  assert.deepEqual(up.byId, { 1: 2000, 2: 450 });
+  assert.equal(up.radius, 135);
+});
+
+test('WO8 Phase 4a: upgraded KN-44 deals 87.5 to the boss and 140 to a zombie / minion (no perks)', () => {
+  const { state, calls } = setup();
+  const boss = { ...zombie(2, 150, 0, 100000), kind: 'boss' };
+  const minion = { ...zombie(3, 200, 0, 100000), kind: 'minion' };
+  state.zombies = [zombie(1, 100, 0), boss, minion];
+  const w = upgradeWeapon(createWeapon('kn44'));
+  w.def = { ...w.def, spread: 0, penetration: 4 };
+  tryFire(state, w, 0, 0, 1, 0);
+  assert.deepEqual(calls.zombie.map((c) => [c.z.id, c.amount]), [[1, 140], [2, 87.5], [3, 140]]);
+  // base gun: unchanged 70 on the boss
+  const b = setup();
+  b.state.zombies = [{ ...zombie(2, 150, 0, 100000), kind: 'boss' }];
+  const g = createWeapon('kn44');
+  g.def = { ...g.def, spread: 0 };
+  tryFire(b.state, g, 0, 0, 1, 0);
+  assert.deepEqual(b.calls.zombie.map((c) => c.amount), [70]);
+});
+
+test('WO8 Phase 4a: upgraded Ray Gun vs the boss: direct and splash x papDamageMult of base, not x2 / x1.5', () => {
+  const run = (upgrade) => {
+    const { state, calls } = setup();
+    state.player = { x: -1000, y: 0, radius: 14, down: false };
+    const boss = { ...zombie(1, 60, 0, 1e6), kind: 'boss' };
+    const bossSplashed = { ...zombie(2, 60, 60, 1e6), kind: 'boss' }; // splash only (test double)
+    const z = zombie(3, 60, -60, 1e6);
+    state.zombies = [boss, bossSplashed, z];
+    const w = createWeapon('raygun');
+    if (upgrade) upgradeWeapon(w);
+    w.def = { ...w.def, spread: 0 };
+    tryFire(state, w, 0, 0, 1, 0);
+    for (let i = 0; i < 10 && state.bullets.length; i++) updateBullets(state, 1 / 60);
+    return Object.fromEntries(calls.zombie.map((c) => [c.z.id, c.amount]));
+  };
+  const base = run(false), up = run(true);
+  assert.deepEqual(base, { 1: 1000, 2: 300, 3: 300 });
+  assert.deepEqual(up, { 1: 1000 * BOSS.papDamageMult, 2: 300 * BOSS.papDamageMult, 3: 450 });
+});
+
+test('WO8 upgraded Thundergun: kill band 375, cone range 552, knockback 864', () => {
+  const { state, calls } = coneSetup();
+  const kill = zombie(1, 340, 0);   // base knock band, upgraded kill band
+  const knock = zombie(2, 520, 0);  // beyond base range (480), inside 552
+  const out = zombie(3, 560, 0);
+  state.zombies.push(kill, knock, out);
+  const w = upgradeWeapon(createWeapon('thundergun'));
+  assert.equal(w.mag, 6);
+  assert.equal(w.reserve, 18);
+  assert.equal(tryFire(state, w, 0, 0, 1, 0), true);
+  assert.deepEqual(calls.kill.map((c) => c.z.id), [1]);
+  assert.equal(calls.knock.length, 1);
+  assert.equal(calls.knock[0].z, knock);
+  assert.ok(Math.abs(calls.knock[0].vx - 864) < 1e-9);
+  const sw = state.effects.find((e) => e.type === 'shockwave');
+  assert.ok(Math.abs(sw.range - 552) < 1e-9);
+
+  const { state: s2, calls: c2 } = coneSetup();
+  s2.zombies.push(zombie(1, 340, 0), zombie(2, 520, 0));
+  tryFire(s2, createWeapon('thundergun'), 0, 0, 1, 0);
+  assert.equal(c2.kill.length, 0, 'base gun only knocks at 340');
+  assert.deepEqual(c2.knock.map((k) => k.z.id), [1]);
+});
+
+test('WO8 TTK: an upgraded KN-44 kills far faster than the base gun (model + simulated fire)', () => {
+  for (const [hp, label] of [[healthForRound(8, L2), 'L2 R8'], [healthForRound(10, L3), 'L3 R10']]) {
+    const base = ttkSeconds(WEAPONS.kn44, hp), up = ttkSeconds(UPGRADES.kn44, hp);
+    assert.ok(up <= base * 0.55, `${label}: ${up} vs ${base}`);
+  }
+  // Simulated: fire at 60 fps at one zombie until it dies, through tryFire / updateWeapon.
+  const sim = (w, hp) => {
+    const { state } = setup();
+    const z = zombie(1, 100, 0, hp);
+    state.zombies = [z];
+    w.def = { ...w.def, spread: 0 };
+    let t = 0;
+    while (z.hp > 0 && t < 30) { tryFire(state, w, 0, 0, 1, 0); updateWeapon(w, 1 / 60); t += 1 / 60; }
+    return t;
+  };
+  const hp = healthForRound(12, L2);
+  const tb = sim(createWeapon('kn44'), hp), tu = sim(upgradeWeapon(createWeapon('kn44')), hp);
+  assert.ok(tu < tb * 0.6, `simulated ${tu} vs ${tb}`);
+});

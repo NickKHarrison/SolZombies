@@ -1,7 +1,7 @@
 // weapons.js (Agent C) — weapon definitions, firing (hitscan + ray gun projectiles),
 // reload, ammo refills. Pure logic: no DOM access. See WORK_ORDER.md 5.4 and docs/notes/weapons.md.
 
-import { PRICES, COLORS, FIXED_DT_CAP, WEAPON_FX, SHOP, BOSS, ZOMBIE, PERKS, MELEE } from './config.js';
+import { PRICES, COLORS, FIXED_DT_CAP, WEAPON_FX, SHOP, BOSS, ZOMBIE, PERKS, MELEE, PAP as PAP_CFG } from './config.js';
 import { emit } from './events.js';
 import { rayCircle, dist, nextId } from './math.js';
 import { raycastWalls } from './map.js';
@@ -115,6 +115,105 @@ export const BOX_WEIGHTS = Object.freeze(Object.fromEntries(BOX_WEAPON_IDS.map((
 ])));
 
 // ---------------------------------------------------------------------------
+// WO8 1.2: Pack-a-Punch upgraded defs
+// ---------------------------------------------------------------------------
+
+const PAP_DEFAULTS = Object.freeze({ ammoCost: 450, damageMult: 2, magMult: 1.5, reserveMult: 1.5, spreadMult: 0.8,
+  penetrationBonus: 1, maxPenetration: 4, projectileMult: 1.5, coneKillMult: 1.25, coneRangeMult: 1.15, knockMult: 1.2 });
+const PAP = Object.freeze({ ...PAP_DEFAULTS, ...(PAP_CFG || {}) });
+
+// WO8 1.2 names table (three BO3 originals, the rest in the BO3 style). Death Machine excluded.
+export const UPGRADE_NAMES = Object.freeze({
+  mr6: 'Nightingale', rk5: 'Dominion', lcar9: 'Gravedigger', sheiva: 'Fallen Comrade',
+  krm262: 'Krumhaar', kuda: 'Scorpion Sting', vmp: 'Hydra', vesper: 'Ultraviolet',
+  pharo: "Sekhmet's Ire", bootlegger: 'Moonshiner', kn44: "Warden's Wrath", hvk30: 'Comet',
+  icr1: 'Infinity Reaper', argus: 'Exodus', locus: 'Cauterizer', drakon: 'Firestorm',
+  haymaker12: 'Mainsail', dingo: 'Kraken', brm: 'Barrage', manowar: 'Dreadnought',
+  xr2: 'Nebula', weevil: 'Wyrm', marshal16: 'Judge & Jury', gorgon: "Medusa's Gaze",
+  dredge48: 'Overflow', hg40: 'Venom Drum', m8a7: 'Pulsar', peacekeeper: 'Peacemaker',
+  raygun: "Porter's X2 Ray Gun", thundergun: 'Zeus Cannon',
+});
+
+// Derived upgraded def: same id (wall buy / box / stats keep working), damage x2, mag/reserve x1.5
+// (rounded), spread x0.8, penetration +1 (max 4), rpm/reload unchanged; Ray Gun splash damage and
+// radius x projectileMult; Thundergun killRange x coneKillMult, range x coneRangeMult, knockback x
+// knockMult. Everything in combat reads w.def, so an upgraded weapon needs no special casing.
+function upgradedDef(base, name) {
+  const o = {
+    ...base,
+    name,
+    damage: base.damage * PAP.damageMult,
+    mag: Math.round(base.mag * PAP.magMult),
+    reserve: Math.round(base.reserve * PAP.reserveMult),
+    spread: base.spread * PAP.spreadMult,
+    penetration: Math.max(base.penetration, Math.min(PAP.maxPenetration, base.penetration + PAP.penetrationBonus)),
+    upgraded: true,
+    baseId: base.id,
+  };
+  if (base.projectile) {
+    o.projectile = Object.freeze({ ...base.projectile,
+      splashDamage: base.projectile.splashDamage * PAP.projectileMult,
+      splashRadius: base.projectile.splashRadius * PAP.projectileMult });
+  }
+  if (base.cone) {
+    o.cone = Object.freeze({ ...base.cone,
+      killRange: base.cone.killRange * PAP.coneKillMult,
+      range: base.cone.range * PAP.coneRangeMult,
+      knockback: base.cone.knockback * PAP.knockMult });
+  }
+  return Object.freeze(o);
+}
+
+export const UPGRADES = Object.freeze(Object.fromEntries(
+  Object.keys(WEAPONS).filter((id) => UPGRADE_NAMES[id]).map((id) => [id, upgradedDef(WEAPONS[id], UPGRADE_NAMES[id])]),
+));
+
+// WO8 Phase 4a (economy #2): vs kind 'boss' an upgraded def deals base x BOSS.papDamageMult
+// (1.25) instead of base x the PaP multiplier `mult` it was built with (PAP.damageMult for bullet /
+// bolt damage, PAP.projectileMult for Ray Gun splash). Returns the factor applied on top of the
+// upgraded value (1 for base guns). The Thundergun's boss share stays BOSS.thunderNearFrac.
+function papBossFactor(def, mult) {
+  if (!def || def.upgraded !== true) return 1;
+  const want = BOSS && Number.isFinite(BOSS.papDamageMult) && BOSS.papDamageMult > 0 ? BOSS.papDamageMult : 1;
+  const m = Number.isFinite(mult) && mult > 0 ? mult : 1;
+  return want / m;
+}
+
+export function isUpgraded(w) {
+  return !!(w && (w.upgraded === true || (w.def && w.def.upgraded === true)));
+}
+
+// Upgraded display name for a weapon id (or a weapon object); falls back to the base name / id.
+export function upgradedName(id) {
+  const key = id && typeof id === 'object' ? id.id : id;
+  if (UPGRADES[key]) return UPGRADES[key].name;
+  return (WEAPONS[key] && WEAPONS[key].name) || String(key);
+}
+
+export function canUpgrade(w) {
+  if (!w || typeof w.id !== 'string' || !WEAPONS[w.id]) return { ok: false, reason: 'unknown' };
+  if (w.id === 'deathmachine' || !UPGRADES[w.id]) return { ok: false, reason: 'powerup' };
+  if (isUpgraded(w)) return { ok: false, reason: 'upgraded' };
+  return { ok: true };
+}
+
+// Mutates w into its upgraded form: def = UPGRADES[id], upgraded = true, mag/reserve filled to the
+// new maxima, any reload cancelled. Safe to call twice (the def is never compounded). Unknown ids
+// and the Death Machine are returned unchanged.
+export function upgradeWeapon(w) {
+  if (!w) return w;
+  const d = UPGRADES[w.id];
+  if (!d) return w;
+  w.def = d;
+  w.upgraded = true;
+  w.mag = d.mag;
+  w.reserve = d.reserve;
+  w.reloading = false;
+  w.reloadT = 0;
+  return w;
+}
+
+// ---------------------------------------------------------------------------
 // Injectable dependencies (extra export, used by tests; defaults call the real modules lazily
 // so import cycles are harmless).
 // ---------------------------------------------------------------------------
@@ -218,9 +317,17 @@ export function refillAll(w) {
 const TIER2_AMMO_MULT = 0.3;
 const TIER3_AMMO_MULT = 0.3;
 
-export function ammoCost(id) {
+// WO8: `upgraded` (shop passes isUpgraded(w)) -> PAP.ammoCost at the gun's own wall buy; a gun
+// without a wall price stays Infinity (Max Ammo only), upgraded or not. Only a literal true counts.
+export function ammoCost(id, upgraded = false) {
   const d = WEAPONS[id];
   if (!d || typeof d.cost !== 'number') return Infinity; // not sold on walls: never affordable
+  if (upgraded === true) { // strict: ids.map(ammoCost) passes the index
+    // WO8 Phase 4a (economy #5): min(PAP.ammoCost, round(PAP.ammoCostMult x base wall ammo price)).
+    const base = ammoCost(id);
+    const k = Number.isFinite(PAP.ammoCostMult) && PAP.ammoCostMult > 0 ? PAP.ammoCostMult : Infinity;
+    return Number.isFinite(base) && Number.isFinite(k) ? Math.min(PAP.ammoCost, Math.round(k * base)) : PAP.ammoCost;
+  }
   // WO5 balance #10: level-2 (tier 2) wall ammo is 0.3x the gun price (level-2 zombies have 1.5x
   // health but still pay 10 per kill); tier-1 guns keep PRICES.wallAmmoMult (0.5).
   // WO7: tier 3 (level-3 walls) uses PERKS.ammoMultTier3 (0.3).
@@ -404,7 +511,7 @@ export function tryFire(state, w, ox, oy, dx, dy) {
       // Ray Gun projectile and the Thundergun cone above are unchanged.
       // WO7 FIX-5 (balance #1): vs the boss the multiplier is capped at BOSS.dtapDamageMult.
       const res = hitscan(state, ox, oy, Math.cos(a), Math.sin(a), d.range, d.penetration,
-        d.damage * mods.bulletDamageMult, d.damage * bossMult);
+        d.damage * mods.bulletDamageMult, d.damage * bossMult * papBossFactor(d, PAP.damageMult));
       if (res.hits.length) anyHit = true;
     }
     if (anyHit && state.stats) state.stats.shotsHit++;
@@ -444,8 +551,11 @@ function splashVisible(state, ox, oy, tx, ty, r) {
 function detonate(state, b, x, y, direct) {
   const pr = b.def.projectile;
   let hitAny = false;
+  // WO8 Phase 4a (economy #2): an upgraded bolt/splash deals base x BOSS.papDamageMult to the boss.
+  const bossDirect = b.def.damage * papBossFactor(b.def, PAP.damageMult);
+  const bossSplash = pr.splashDamage * papBossFactor(b.def, PAP.projectileMult);
   if (direct && isAlive(direct)) {
-    deps.damageZombie(state, direct, b.def.damage, 'weapon', x, y);
+    deps.damageZombie(state, direct, direct.kind === 'boss' ? bossDirect : b.def.damage, 'weapon', x, y);
     hitAny = true;
   }
   const sp = Math.hypot(b.vx || 0, b.vy || 0);
@@ -455,7 +565,7 @@ function detonate(state, b, x, y, direct) {
     if (z === direct || !isAlive(z)) continue;
     if (dist(x, y, z.x, z.y) <= pr.splashRadius + z.radius &&
         splashVisible(state, ox, oy, z.x, z.y, z.radius)) {
-      deps.damageZombie(state, z, pr.splashDamage, 'weapon', z.x, z.y);
+      deps.damageZombie(state, z, z.kind === 'boss' ? bossSplash : pr.splashDamage, 'weapon', z.x, z.y);
       hitAny = true;
     }
   }

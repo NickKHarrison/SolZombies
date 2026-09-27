@@ -112,3 +112,12 @@
   order, no-revive game over, the full revive flow including damage immunity while down, perk
   stripping, invulnerability expiry and game over after, Stamin-Up speeds, knife timers, no fire
   mid-swing, knife kill bonus). The `meleeAttack` call test is skip-guarded until F exports it.
+
+## WO8 FIX-A (QA review M1)
+- `removeAllPerks`: when Mule Kick's third slot was active, the player now switches to the first
+  FILLED slot below the new slot count (slot 0 can be empty while its gun is inside the
+  Pack-a-Punch) and `weapon:equipped` fires for it (unless a temp weapon is out). With no filled
+  slot, `activeSlot` is 0 with empty hands and no event.
+- `PERKS.list.mule.color` is now `#ff4fd8` (magenta), so Mule Kick no longer shares the
+  Pack-a-Punch purple `#b44dff` (playtest #1). The perk machine and HUD bottle read the config
+  colour.

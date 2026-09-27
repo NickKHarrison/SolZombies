@@ -269,6 +269,7 @@ function buildScreen(state) {
     if (sum.level != null) rows.push(['Level reached', sum.level]);
     if (sum.bosses != null) rows.push(['Bosses', sum.bosses]);
     if (sum.perks) rows.push(['Perks used', sum.perks]);
+    if (sum.pap != null) rows.push(['Upgrades', sum.pap]); // WO8: Pack-a-Punch upgrades this run
     if (sum.weapon) rows.push(['Favourite weapon', sum.weapon]);
     for (const [k, v] of rows) {
       const row = el('div', 'stat');
@@ -319,6 +320,34 @@ function weaponName(id) {
     if (W && W[id] && W[id].name) return W[id].name;
   } catch { /* weapons.js not ready */ }
   return String(id).toUpperCase();
+}
+
+// WO8: Pack-a-Punch. weapons.isUpgraded (Agent A) when present, else the w.upgraded flag.
+function isUpgradedWeapon(w) {
+  if (!w || typeof w !== 'object') return false;
+  try {
+    if (typeof weaponsMod.isUpgraded === 'function') return !!weaponsMod.isUpgraded(w);
+  } catch { /* fall through */ }
+  return !!(w.upgraded || (w.def && w.def.upgraded));
+}
+
+// Display name of a held weapon (the upgraded def carries the Pack-a-Punch name).
+function heldName(w) {
+  return String((w.def && w.def.name) || w.id || '');
+}
+
+// Upgraded name for a weapon id: weapons.upgradedName, then UPGRADES[id].name, then the base name.
+function papName(id) {
+  if (!id) return '';
+  try {
+    if (typeof weaponsMod.upgradedName === 'function') {
+      const n = weaponsMod.upgradedName(id);
+      if (n) return String(n);
+    }
+    const U = weaponsMod.UPGRADES;
+    if (U && U[id] && U[id].name) return U[id].name;
+  } catch { /* weapons.js not ready */ }
+  return weaponName(id);
 }
 
 // Best run for the menu line: summary.best, else the first top entry. Null on an empty table.
@@ -378,6 +407,7 @@ function runSummary(state, g) {
   if (Array.isArray(perks)) perks = perks.filter((id, i, a) => typeof id === 'string' && a.indexOf(id) === i);
   perks = Array.isArray(perks) ? (perks.length ? perks.map(perkName).join(', ') : 'None') : null;
   const wid = pick(src.bestWeaponId, src.weapon, entry.weapon, st.bestWeaponId);
+  const pap = pick(src.papCount, src.pap, entry.pap, st.papCount);
   return {
     rounds,
     kills: numOr(pick(src.kills, entry.kills, st.kills), 0),
@@ -388,6 +418,7 @@ function runSummary(state, g) {
     bosses: bosses == null ? null : Math.floor(numOr(bosses)),
     perks,
     weapon: pick(src.weaponName, wid ? weaponName(wid) : null),
+    pap: pap == null ? null : Math.max(0, Math.floor(numOr(pap))),
   };
 }
 
@@ -478,6 +509,12 @@ function onPerkBought(p) {
   queueBanner(perkName(p.perkId).toUpperCase());
 }
 
+// WO8: "<UPGRADED NAME>" banner when an upgraded gun is taken from the Pack-a-Punch machine.
+function onPapDone(p) {
+  if (!p || !p.weaponId) return;
+  queueBanner(papName(p.weaponId).toUpperCase());
+}
+
 function onPlayerDamaged() {
   if (faceState) faceEvent(faceState, 'hurt');
 }
@@ -541,6 +578,7 @@ export function initHud(rootEl) {
     on('boss:defeated', onBossDefeated),
     on('level:start', onLevelStart),
     on('perk:bought', onPerkBought),
+    on('pap:done', onPapDone),
   );
 }
 
@@ -793,7 +831,10 @@ function updateWeapon(player) {
   if (!w) return;
   const def = w.def || {};
   const infinite = def.id === 'deathmachine' || w.id === 'deathmachine' || !Number.isFinite(w.mag);
-  setText(els.weaponName, def.name || w.id || '');
+  // WO8: upgraded guns show the Pack-a-Punch name in gold with a leading star.
+  const up = isUpgradedWeapon(w);
+  setText(els.weaponName, (up ? '★ ' : '') + heldName(w));
+  setClass(els.weaponName, 'upgraded', up);
 
   // FIX-2 (playtest #2 / review L5): every held weapon other than the active one, in slot order
   // (2 with Mule Kick). While a temp weapon (Death Machine) is out, every slot weapon is listed.
@@ -821,18 +862,37 @@ function updateWeaponSecondary(player) {
   const ws = Array.isArray(player.weapons) ? player.weapons : [];
   ws.forEach((w, i) => {
     if (!w || (!player.tempWeapon && i === player.activeSlot)) return;
-    list.push({ slot: i + 1, name: String((w.def && w.def.name) || w.id || '').toUpperCase() });
+    const up = isUpgradedWeapon(w);
+    const full = heldName(w).toUpperCase();
+    list.push({ slot: i + 1, up, name: (up ? '★ ' : '') + full, short: shortWeaponName(full) });
   });
-  const key = list.map((x) => x.slot + ':' + x.name).join('|');
+  const key = list.map((x) => x.slot + ':' + (x.up ? 'u:' : '') + x.name).join('|');
   const box = els.weaponSecondary;
   if (box.__key === key) return;
   box.__key = key;
   box.textContent = '';
+  // WO8 FIX-B (playtest #2): with two holstered guns the mobile line shows the short names
+  // ("WARDEN · SEKHMET", gold = upgraded, no star), styled by .multi in styles.css; desktop always
+  // shows the full names.
+  setClass(box, 'multi', list.length > 1);
   for (const x of list) {
-    const line = el('div', 'hud-weapon-sec');
-    line.append(el('span', 'hud-weapon-sec-slot', String(x.slot)), el('span', 'hud-weapon-sec-name', x.name));
+    const line = el('div', 'hud-weapon-sec' + (x.up ? ' upgraded' : ''));
+    line.append(el('span', 'hud-weapon-sec-slot', String(x.slot)), el('span', 'hud-weapon-sec-name', x.name),
+      el('span', 'hud-weapon-sec-short', x.short));
     box.append(line);
   }
+}
+
+// Compact holstered name: names of up to 7 chars stay whole ("KN-44", "L-CAR 9"); otherwise the
+// first distinctive word (no digit-only / 1-2 char words, no GUN / RAY / X2 / CANNON, "'S" dropped):
+// "WARDEN'S WRATH" -> "WARDEN", "PORTER'S X2 RAY GUN" -> "PORTER", "48 DREDGE" -> "DREDGE".
+const SHORT_SKIP = new Set(['GUN', 'RAY', 'X2', 'CANNON', '&']);
+function shortWeaponName(full) {
+  const s = String(full || '').trim();
+  if (s.length <= 7) return s;
+  const words = s.split(/\s+/).map((x) => x.replace(/['’]S$/, ''));
+  const pick = words.find((x) => x.length > 2 && !/^\d+$/.test(x) && !SHORT_SKIP.has(x));
+  return pick || words[0] || s;
 }
 
 function updatePowerups(state) {

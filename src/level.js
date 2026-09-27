@@ -5,13 +5,16 @@
 // progression index (0, 1, 2, ...). def = levelByIndex(index) (wraps), loop =
 // floor(index / LEVELS.length). nextLevelIndex(state) = index + 1, so the loop count
 // increments automatically when it wraps past LEVELS.length.
-import { LEVELS_CFG, ROUNDS } from './config.js';
+import { LEVELS_CFG, ROUNDS, DOORS } from './config.js';
 import * as events from './events.js';
 import { LEVELS, levelByIndex } from './levels/levels.js';
 // Siblings rewritten concurrently in WO5: namespace imports, called lazily and guarded.
 import * as mapMod from './map.js';
 import * as bossMod from './boss.js';
 import * as wavesMod from './waves.js';
+// WO8 (INT): Pack-a-Punch hand-back on a level swap.
+import * as weaponsMod from './weapons.js';
+import * as shopMod from './shop.js';
 
 // Test hook: replaces map.loadMap in startLevel (null restores the default).
 let loadMapImpl = null;
@@ -183,6 +186,14 @@ function resetRoundsForLevel(state) {
   r.suspended = false;
 }
 
+// WO8 Phase 4a (economy #1): DOORS.megaCost + DOORS.megaCostPerLevel x index (loop levels continue).
+export function megaDoorCost(index = 0) {
+  const i = Math.max(0, Math.floor(Number(index) || 0));
+  const base = DOORS && Number.isFinite(DOORS.megaCost) ? DOORS.megaCost : 250;
+  const step = DOORS && Number.isFinite(DOORS.megaCostPerLevel) ? DOORS.megaCostPerLevel : 0;
+  return base + step * i;
+}
+
 // Loads level `index` (absolute progression index) and resets everything that belongs to a
 // level: map (doors, barricades, mega door, stairs), zombies, bullets, effects, flow field,
 // power-up items + nuke queue, mystery box, boss state, rounds (fresh break, round kept).
@@ -199,6 +210,8 @@ export function startLevel(state, index = 0) {
     const m = load(lv.def);
     if (m) state.map = m;
   }
+  // WO8 Phase 4a (economy #1): the mega door price rises per level (250 / 500 / 750 / 1000 / ...).
+  if (state.map && state.map.megaDoor) state.map.megaDoor.cost = megaDoorCost(idx);
 
   state.zombies = [];
   state.bullets = [];
@@ -216,6 +229,7 @@ export function startLevel(state, index = 0) {
   if (!state.shop) state.shop = {};
   state.shop.prompt = null;
   state.shop.box = { state: 'idle', timer: 0, weaponId: null, cycleT: 0 };
+  const returned = returnPapWeapon(state); // WO8: a gun inside the machine comes back upgraded
 
   state.boss = typeof bossMod.createBossState === 'function' ? bossMod.createBossState() : null;
 
@@ -235,9 +249,53 @@ export function startLevel(state, index = 0) {
     if ('vy' in p) p.vy = 0;
     p.repairTimer = 0;
   }
+  // WO8 FIX-A (playtest #4): announce the hand-back with a gold floating text near the player
+  // (render draws effects of type 'text'; no new event). Pushed after the player is placed.
+  if (returned && p && Number.isFinite(p.x) && Number.isFinite(p.y)) {
+    const name = (returned.def && returned.def.name) || returned.id;
+    state.effects.push({
+      type: 'text', x: p.x, y: p.y - 28, text: `${String(name).toUpperCase()} RETURNED`,
+      color: PAP_RETURN_COLOR, ttl: PAP_RETURN_TTL, maxTtl: PAP_RETURN_TTL,
+    });
+  }
 
   events.emit('level:start', { index: lv.index, name: lv.name, loop: lv.loop });
   return lv;
+}
+
+// WO8 1.1 (INT): leaving the level with a gun inside the Pack-a-Punch machine loses nothing. A
+// 'working' or 'ready' gun is upgraded (weapons.upgradeWeapon, if not yet), put back per
+// shop.papReturnSlot (original slot if empty, a same-id slot, first empty slot, else the active
+// slot) and made active. It was paid for but never taken (takePap counts on take), so it is
+// counted in stats.papCount here. No pap:done (that event means "taken at the machine": render /
+// audio would play the tray sparkle on the new map). The machine is always reset to idle.
+// Restart / new game: shop.initShop (and createEmptyState) reset the machine, nothing returns.
+// Returns the returned weapon (or null) so startLevel can show "<NAME> RETURNED".
+const PAP_RETURN_COLOR = '#ffd36b';
+const PAP_RETURN_TTL = 2.5;
+function returnPapWeapon(state) {
+  const pap = state.shop.pap;
+  const w = pap && typeof pap === 'object' ? pap.weapon : null;
+  const p = state.player;
+  if (w && p) {
+    if (!(typeof weaponsMod.isUpgraded === 'function' ? weaponsMod.isUpgraded(w) : w.upgraded)
+      && typeof weaponsMod.upgradeWeapon === 'function') weaponsMod.upgradeWeapon(w);
+    if (!Array.isArray(p.weapons)) p.weapons = [null, null];
+    let slot;
+    if (typeof shopMod.papReturnSlot === 'function') slot = shopMod.papReturnSlot(p, pap.slot, w.id);
+    else {
+      slot = p.weapons.findIndex((x) => !x);
+      if (slot < 0) slot = p.activeSlot | 0;
+    }
+    const prev = p.weapons[p.activeSlot];
+    if (slot !== p.activeSlot && prev && prev.reloading) { prev.reloading = false; prev.reloadT = 0; }
+    p.weapons[slot] = w;
+    p.activeSlot = slot;
+    if (state.stats) state.stats.papCount = (state.stats.papCount || 0) + 1;
+    if (!p.tempWeapon) events.emit('weapon:equipped', { weaponId: w.id, slot });
+  }
+  state.shop.pap = { state: 'idle', timer: 0, weapon: null, slot: -1, baseId: null };
+  return w && p ? w : null;
 }
 
 // Starts the fade to the next level. Re-entrancy guarded: returns false (no event) while a

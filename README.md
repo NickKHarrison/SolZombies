@@ -22,7 +22,9 @@ unlocks a new zone with its own wall guns and zombie spawns; zombies only spawn 
 opened, and the mystery box is two doors deep.
 
 Mega door and boss: once all five doors on a level are open, the iron **mega door** in the deepest
-zone can be bought for 250 (before that its prompt reads "MEGA DOOR — open all doors first").
+zone can be bought (before that its prompt reads "MEGA DOOR — open all doors first").
+Its price rises by 250 per level: **250** on
+level 1, **500** on level 2, **750** on level 3, **1000** on level 4, and so on for later loops.
 It leads into the boss arena. Stepping inside seals the door behind you and starts the boss fight:
 normal rounds pause, a boss bar appears, and the boss (THE WARDEN on level 1, THE BONE PRIEST on
 level 2) hunts you, telegraphs a charge (it flashes white, then dashes; it is stunned if it hits a
@@ -59,6 +61,28 @@ and they carry over when you descend.
 | Double Tap II | 200 | Fire rate x1.33 and bullet damage x2 (hitscan guns only for the damage; the Death Machine is unaffected) |
 | Stamin-Up | 200 | Move speed x1.07, sprint x1.2 |
 | Mule Kick | 400 | Third weapon slot (key 3); losing the perk drops the third gun |
+
+Pack-a-Punch: every level has one **Pack-a-Punch** machine (purple cabinet with a gold marquee)
+in the deepest zone, behind the last door (H), near the mega door: the vault on level 1, the
+sanctum on level 2, the reactor room on level 3. Hold the gun you want upgraded and press F
+("Press F to Pack-a-Punch KN-44 [500]"): you pay **500**, the gun slides into the machine, it
+works for 3 s (sparks and a jingle), then the upgraded gun waits on the tray until you take it
+(F again, "Press F to take Warden's Wrath"). It returns to the slot it came from and is made
+active. An upgraded gun keeps its identity but gets a new name (shown in gold with a ★ in the HUD)
+and a purple-and-gold camo: **x2 damage**, **x1.5 magazine and reserve** (filled on upgrade),
+tighter spread and +1 penetration. Against the boss an upgraded gun deals only **x1.25** its base
+damage (not x2; minions and normal zombies take the full x2), and the Ray Gun / Thundergun boss
+rules are unchanged. Its wall ammo at its own wall buy costs 3.75 x the normal ammo price, capped
+at **450** (KN-44 281, Man-O-War 281, Peacekeeper 450); Max Ammo refills it as usual. Examples: MR6 -> Nightingale, KN-44 -> Warden's Wrath, Sheiva -> Fallen
+Comrade, ICR-1 -> Infinity Reaper, Peacekeeper MK2 -> Peacemaker. The wonder weapons become the
+**Porter's X2 Ray Gun** (x2 direct hit, splash damage and radius x1.5) and the **Zeus Cannon**
+(Thundergun: kill range x1.25, range x1.15, knockback x1.2, bigger mag and reserve). You cannot
+upgrade a gun twice, the Death Machine ("Cannot upgrade a power-up weapon"), or while another gun
+is inside ("Machine busy"). Descending with a gun inside returns it to you upgraded on the next
+level; a restart empties the machine. The game over summary shows "Upgrades: N", and a favourite
+weapon that scored kills while upgraded is shown by its upgraded name with a ★. On touch, a blocked
+prompt ("already upgraded", "Machine busy", mega door before all doors, ammo full, ...) greys the
+ACTION button and a tap does nothing; an unaffordable one is greyed but still tappable.
 
 Knife: press **V** (or the KNIFE touch button) for a quick melee swing: 150 damage to up to three
 zombies in a short arc in front of you, a small knockback, and a knife kill pays 15 (10 + 5 bonus).
@@ -109,6 +133,9 @@ side is under 900 css px) and switch to a twin-stick touch scheme. Desktop is un
 Open http://localhost:8080/?debug=1 to expose `window.__game` with helpers such as
 `__game.debug.spawnPowerup('nuke')`, `skipToRound(10)`, `addPoints(1000)`, `god(true)`,
 `doors()`, `openDoor(id)`, `openAllDoors()`, `step(seconds, frameDt, inputOverrides)`.
+Note: `addPoints(n)` adds to the balance only; it is not counted in the run's "Points earned"
+(`stats.pointsEarned`), so screenshots taken after `addPoints` show balances real play never
+reaches.
 
 Boss and levels: `openMegaDoor()` (opens every door, then the mega door, for free),
 `startBoss()` (teleports into the arena and starts the fight), `killBoss()` (kills the boss
@@ -122,6 +149,11 @@ Perks, knife and scores: `givePerk(id)` (free, through the normal cap/uniqueness
 `jugg`, `revive`, `speed`, `dtap`, `stamin`, `mule`), `perks()`, `removePerks()`, `knife()` (one
 swing, respects the cooldown), `scores()` (best + top 5), `clearScores()` (wipes the saved
 table).
+
+Pack-a-Punch: `pap()` (machine summary: state, timer, gun inside, upgrade count, machine
+position), `papStart()` / `papTake()` (the real shop paths with price, blocked cases and events,
+but no distance check), `upgrade()` (upgrades the active gun for free, not counted). To use the
+machine for real, stand next to it and call `step(dt, dt, { interact: true })`.
 
 ## Tests
 

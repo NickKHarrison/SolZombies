@@ -522,3 +522,27 @@ test('WO7 knife kill pays MELEE.bonusPoints on top of perKill and counts meleeKi
   assert.equal(s.stats.meleeKills, 1);
   assert.equal(s.stats.kills, 1);
 });
+
+test('WO8 FIX-A (M1): Mule Kick lost with slot 0 empty switches to the first filled slot', () => {
+  const s = makeState();
+  const sheiva = fakeWeapon('sheiva'), kn = fakeWeapon('kn44');
+  s.player.weapons = [null, sheiva];
+  addPerk(s, 'mule');
+  s.player.weapons[2] = kn;
+  s.player.activeSlot = 2; // slot 0's gun is inside the Pack-a-Punch
+  const eq = capture('weapon:equipped');
+  removeAllPerks(s, 'revive');
+  assert.deepEqual(s.player.weapons, [null, sheiva]);
+  assert.equal(s.player.activeSlot, 1);
+  assert.equal(getActiveWeapon(s.player), sheiva);
+  assert.deepEqual(eq, [{ weaponId: 'sheiva', slot: 1 }]);
+  // No filled slot below the new count: slot 0, empty hands, no event.
+  addPerk(s, 'mule');
+  s.player.weapons = [null, null, kn];
+  s.player.activeSlot = 2;
+  eq.length = 0;
+  removeAllPerks(s, 'revive');
+  assert.deepEqual(s.player.weapons, [null, null]);
+  assert.equal(s.player.activeSlot, 0);
+  assert.deepEqual(eq, []);
+});

@@ -172,7 +172,9 @@ export const SPRITES = {
 // WO5 3.8 (Phase 0) — mega door, boss arena, multi-level dungeon.
 // ---------------------------------------------------------------------------
 
-export const DOORS = { megaCost: 250 };
+// WO8 Phase 4a (economy #1): mega door price = megaCost + megaCostPerLevel x level index
+// (250 / 500 / 750 / 1000 / ... continuing for loop levels); level.startLevel sets map.megaDoor.cost.
+export const DOORS = { megaCost: 250, megaCostPerLevel: 250 };
 
 export const BOSS = {
   radius: 34, speed: 90, damage: 75, attackWindup: 0.5, attackCooldown: 1.4,
@@ -201,6 +203,9 @@ export const BOSS = {
   // WO7 FIX-5 (balance #1): Double Tap's bullet-damage multiplier is capped at this vs kind 'boss'
   // (the x1.33 rpm still applies; minions and normal zombies still take the full x2).
   dtapDamageMult: 1,
+  // WO8 Phase 4a (economy #2): an upgraded (Pack-a-Punched) gun's damage vs kind 'boss' uses this
+  // multiplier instead of PAP.damageMult (minions and normal zombies still take the full x2).
+  papDamageMult: 1.25,
 };
 
 export const LEVELS_CFG = {
@@ -240,7 +245,7 @@ export const PERKS = {
     speed:  { name: 'Speed Cola',    letter: 'C', cost: 300, color: '#6cf542', reloadMult: 0.5 },
     dtap:   { name: 'Double Tap II', letter: 'N', cost: 200, color: '#ff9f1c', rpmMult: 1.33, bulletDamageMult: 2 },
     stamin: { name: 'Stamin-Up',     letter: 'U', cost: 200, color: '#ffd54a', speedMult: 1.07, sprintMult: 1.2 },
-    mule:   { name: 'Mule Kick',     letter: 'K', cost: 400, color: '#b44dff', weaponSlots: 3 },
+    mule:   { name: 'Mule Kick',     letter: 'K', cost: 400, color: '#ff4fd8', weaponSlots: 3 }, // WO8 FIX-A (playtest #1): magenta, distinct from the PaP purple
   },
   ammoMultTier3: 0.3,
 };
@@ -248,3 +253,12 @@ export const PERKS = {
 export const MELEE = { damage: 150, cooldown: 0.5, reach: 44, halfAngle: 0.7, maxTargets: 3, knockback: 90, swingTime: 0.25, bonusPoints: 5, thrustAt: 0.4 }; // thrustAt: swing progress where the knife torso goes cocked -> thrust
 
 export const SCORES = { key: 'solzombies.scores.v1', max: 10 };
+
+// ---------------------------------------------------------------------------
+// WO8 3 (Phase 0) — Pack-a-Punch.
+// ---------------------------------------------------------------------------
+
+export const PAP = { letter: 'A', cost: 500, ammoCost: 450, workSeconds: 3, damageMult: 2, magMult: 1.5, reserveMult: 1.5,
+  spreadMult: 0.8, penetrationBonus: 1, maxPenetration: 4, projectileMult: 1.5, coneKillMult: 1.25, coneRangeMult: 1.15, knockMult: 1.2,
+  // WO8 Phase 4a (economy #5): upgraded wall ammo = min(ammoCost, round(ammoCostMult x base ammo price)).
+  ammoCostMult: 3.75 };

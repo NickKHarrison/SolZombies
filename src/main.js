@@ -42,6 +42,10 @@ let lastPrompt;           // last value sent to touch.setTouchPrompt (undefined 
 // WO7 run stats: kills per weapon id (bestWeaponId) and the id the last weapon kill went to.
 let weaponKills = new Map();
 let lastKillWeapon = null;
+// WO8 Phase 4a (integration note b): weapon kills made while the gun was Pack-a-Punched, per id,
+// so the game-over "Favourite weapon" shows "★ <upgraded name>" for an upgraded favourite.
+let upgradedKills = new Map();
+let lastKillUpgraded = false;
 // WO7 FIX-3 (playtest #6): every perk bought this run, in purchase order, no duplicates. Reset
 // with the run (initStats); a Quick Revive strip does not remove entries.
 let perksRun = [];
@@ -99,6 +103,8 @@ function initAll(s) {
 function initStats(s) {
   weaponKills = new Map();
   lastKillWeapon = null;
+  upgradedKills = new Map();
+  lastKillUpgraded = false;
   perksRun = [];
   const st = () => (state === s ? s.stats : null);
   events.on('purchase:made', (p) => { const t = st(); if (t && p && p.kind === 'door') t.doorsOpened++; });
@@ -118,12 +124,21 @@ function initStats(s) {
     lastKillWeapon = null;
     if (!p || p.cause !== 'weapon' || state !== s || !s.player) return;
     const w = player.getActiveWeapon(s.player);
-    if (w && w.id) { lastKillWeapon = w.id; tallyKill(s, w.id, 1); }
+    if (w && w.id) {
+      lastKillWeapon = w.id;
+      lastKillUpgraded = isUpgradedW(w);
+      tallyKill(s, w.id, 1);
+      if (lastKillUpgraded) tallyUpgraded(w.id, 1);
+    }
   });
   events.on('melee:hit', (p) => {
     if (!p || !p.killed || state !== s) return;
-    if (lastKillWeapon) tallyKill(s, lastKillWeapon, -1);
+    if (lastKillWeapon) {
+      tallyKill(s, lastKillWeapon, -1);
+      if (lastKillUpgraded) tallyUpgraded(lastKillWeapon, -1);
+    }
     lastKillWeapon = null;
+    lastKillUpgraded = false;
     tallyKill(s, 'knife', 1);
   });
 }
@@ -134,6 +149,27 @@ function tallyKill(s, id, d) {
   let best = null, bn = 0;
   for (const [k, v] of weaponKills) if (v > bn) { best = k; bn = v; }
   s.stats.bestWeaponId = best;
+}
+
+function isUpgradedW(w) {
+  try { return typeof weapons.isUpgraded === 'function' ? !!weapons.isUpgraded(w) : !!(w && w.upgraded); } catch { return false; }
+}
+
+function tallyUpgraded(id, d) {
+  const n = (upgradedKills.get(id) || 0) + d;
+  if (n > 0) upgradedKills.set(id, n); else upgradedKills.delete(id);
+}
+
+// WO8 Phase 4a: display name for the favourite weapon when it made kills while upgraded
+// ("★ Warden's Wrath"); undefined otherwise, so hud.js falls back to the base name. The stored
+// score entry keeps the plain id (stats.bestWeaponId).
+function favouriteWeaponName(s) {
+  const id = s && s.stats ? s.stats.bestWeaponId : null;
+  if (!id || !(upgradedKills.get(id) > 0)) return undefined;
+  try {
+    const n = typeof weapons.upgradedName === 'function' ? weapons.upgradedName(id) : null;
+    return n ? '★ ' + n : undefined;
+  } catch { return undefined; }
 }
 
 function scoresSummary() {
@@ -153,13 +189,15 @@ function recordGameOver(s) {
     if (!((s.stats.roundReached | 0) > 0)) {
       call(hud, 'setGameOverSummary', {
         ...s.stats, rank: null, isBestRound: false, isBestPoints: false, recorded: false,
-        rankText: 'Not ranked', top: scores.topScores(5), perks, perksRun: run,
+        rankText: 'Not ranked', top: scores.topScores(5), perks, perksRun: run, papCount: s.stats.papCount | 0,
+        weaponName: favouriteWeaponName(s),
       });
       return;
     }
-    const result = scores.recordRun(s.stats, { perks });
+    const result = scores.recordRun(s.stats, { perks, pap: s.stats.papCount | 0 }); // WO8: entry.pap
     events.emit('score:recorded', { rank: result.rank, entry: result.entry, isBestRound: result.isBestRound, isBestPoints: result.isBestPoints });
-    call(hud, 'setGameOverSummary', { ...s.stats, ...result, recorded: true, top: scores.topScores(5), perks, perksRun: run });
+    call(hud, 'setGameOverSummary', { ...s.stats, ...result, recorded: true, top: scores.topScores(5), perks, perksRun: run, papCount: s.stats.papCount | 0,
+      weaponName: favouriteWeaponName(s) });
     call(hud, 'setScores', scoresSummary());
   } catch (err) {
     console.error('[main] score record error', err);
@@ -191,10 +229,17 @@ function touchPromptText(text) {
 // Per-frame touch ACTION label (after the shop update, so it matches this frame's prompt).
 function updateTouchPrompt(s) {
   if (!mobile) return;
-  const prompt = s.phase === 'playing' && s.shop && s.shop.prompt ? touchPromptText(s.shop.prompt.text) : null;
-  if (prompt !== lastPrompt) {
-    lastPrompt = prompt;
-    call(touch, 'setTouchPrompt', prompt);
+  const sp = s.phase === 'playing' && s.shop && s.shop.prompt ? s.shop.prompt : null;
+  const text = sp ? touchPromptText(sp.text) : null;
+  // WO8 Phase 4a (integration note c): blocked prompts ("already upgraded", "Machine busy", mega
+  // door before all doors, ammo full, perk cap) are greyed and inert on the ACTION button;
+  // unaffordable ones are greyed like the desktop prompt but still tappable (denied feedback).
+  const blocked = !!(text && sp.blocked);
+  const cantAfford = !!(text && !blocked && sp.canAfford === false);
+  const key = text ? `${blocked ? 'B' : cantAfford ? 'C' : 'O'}|${text}` : null;
+  if (key !== lastPrompt) {
+    lastPrompt = key;
+    call(touch, 'setTouchPrompt', text, { blocked, cantAfford });
   }
 }
 
@@ -299,6 +344,7 @@ function update(s, inp, dt) {
   weapons.updateBullets(s, dt);
   powerups.updatePowerups(s, dt);
   shop.updateShop(s, inp, dt);
+  call(shop, 'updatePap', s, dt); // WO8: Pack-a-Punch working timer -> ready
   render.updateEffects(s, dt);
   updateCamera(s); // follow the post-move player position for this frame's render
 }
@@ -525,6 +571,28 @@ function installDebug() {
     scores() { return scoresSummary(); },
     // WO7 FIX-3: perks bought this run (purchase order, no duplicates; survives a revive strip).
     perksRun() { return perksRun.slice(); },
+    // WO8 Pack-a-Punch. pap(): machine summary. papStart()/papTake(): the real shop paths
+    // (shop.startPap / takePap: price, blocked cases and events apply; no distance check).
+    // upgrade(): upgrades the active weapon in place for free (weapons.upgradeWeapon, no event,
+    // not counted in stats.papCount).
+    pap() {
+      const m = state.shop && state.shop.pap;
+      if (!m) return null;
+      const w = m.weapon;
+      return {
+        state: m.state, timer: m.timer, slot: m.slot, baseId: m.baseId,
+        weaponId: w ? w.id : null, name: w && w.def ? w.def.name : null, upgraded: !!(w && w.upgraded),
+        papCount: state.stats.papCount | 0, machine: state.map && state.map.pap ? { ...state.map.pap } : null,
+      };
+    },
+    papStart() { return shop.startPap(state); },
+    papTake() { return shop.takePap(state); },
+    upgrade() {
+      const w = player.getActiveWeapon(state.player);
+      if (!w) return null;
+      weapons.upgradeWeapon(w);
+      return { id: w.id, name: w.def.name, upgraded: !!w.upgraded, mag: w.mag, reserve: w.reserve, damage: w.def.damage };
+    },
   };
   window.__game = {
     get state() { return state; },

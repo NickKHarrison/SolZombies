@@ -4,7 +4,7 @@
 
 import { on } from './events.js';
 import { WEAPONS } from './weapons.js';
-import { AUDIO } from './config.js';
+import { AUDIO, PAP } from './config.js';
 
 // Tunables live in config.js AUDIO (moved by integrator).
 const MASTER_GAIN = AUDIO.masterGain;
@@ -440,6 +440,142 @@ function stopLabHum() {
     for (const s of h.sources) { try { s.stop(now + 0.35); } catch (_) { /* already stopped */ } }
   } catch (_) { /* ignore */ }
 }
+// ---- WO8 (Agent F): Pack-a-Punch ----
+// pap:start -> clank (gun goes in), then a machine hum for PAP.workSeconds plus an original 8-note
+// carnival-style jingle on its own quiet sub-bus. Hum + jingle are one stoppable "working" voice:
+// stopped early on game:restart, game:over, level:descend, pap:done and every initAudio() re-init.
+const PAP_HUM_GAIN = 0.05;     // world-bus level of the working hum
+const PAP_JINGLE_GAIN = 0.35;  // sub-bus gain (into ui) for the jingle
+// Original motif (D harmonic minor, lilting waltz feel, a sly chromatic Bb->C# turn at the end).
+// [frequency Hz, beats]; one beat = PAP_JINGLE_BEAT seconds.
+const PAP_JINGLE = [
+  [440.00, 1], [554.37, 0.5], [587.33, 0.5], [698.46, 1.5],
+  [659.26, 0.5], [466.16, 1], [554.37, 1], [587.33, 2],
+];
+const PAP_JINGLE_BEAT = 0.3;
+let papBus = null;   // lazily created sub-bus: gain -> ui bus
+let papWork = null;  // { gains: [...], sources: [...] }
+function papWorkSeconds() {
+  const s = PAP && Number(PAP.workSeconds);
+  return s > 0 ? s : 3;
+}
+function getPapBus() {
+  if (papBus && papBus.context === ctx) return papBus;
+  papBus = ctx.createGain();
+  papBus.gain.value = PAP_JINGLE_GAIN;
+  papBus.connect(buses.ui || master);
+  return papBus;
+}
+function stopPapWork(fade = 0.25) {
+  const w = papWork;
+  papWork = null;
+  if (!w || !ctx) return;
+  try {
+    const now = ctx.currentTime;
+    for (const g of w.gains) {
+      try {
+        g.gain.cancelScheduledValues(now);
+        g.gain.setValueAtTime(g.gain.value, now);
+        g.gain.linearRampToValueAtTime(0, now + fade);
+      } catch (_) { /* ignore */ }
+    }
+    for (const s of w.sources) { try { s.stop(now + fade + 0.05); } catch (_) { /* already stopped */ } }
+  } catch (_) { /* ignore */ }
+}
+// Heavy mechanical clank: a short slide rattle, then a low slam with inharmonic metal partials.
+function papClank(b) {
+  const k = rrange(0.96, 1.04);
+  noise(b, { dur: 0.18, peak: 0.08, attack: 0.03, filter: 'bandpass', freq: 900 * k, freq1: 500 * k, q: 4 }); // slide in
+  const t = 0.18;
+  tone(b, { type: 'sine', f0: 120 * k, f1: 42, t, dur: 0.28, peak: 0.45, attack: 0.002 });
+  tone(b, { type: 'triangle', f0: 70 * k, f1: 38, t, dur: 0.22, peak: 0.2, attack: 0.002 });
+  for (const [f, pk, d] of [[1230, 0.05, 0.25], [1870, 0.035, 0.18], [2740, 0.025, 0.12], [640, 0.06, 0.35]]) {
+    tone(b, { type: 'square', f0: f * k, t, dur: d, peak: pk * 0.6, attack: 0.001 });
+  }
+  noise(b, { t, dur: 0.1, peak: 0.25, attack: 0.001, filter: 'lowpass', freq: 2200 });
+  noise(b, { t: t + 0.09, dur: 0.05, peak: 0.08, attack: 0.001, filter: 'highpass', freq: 3500 }); // latch
+}
+function startPapWork(t0) {
+  stopPapWork(0.05);
+  const dur = papWorkSeconds();
+  const now = ctx.currentTime;
+  const start = now + t0;
+  const end = start + dur;
+  const gains = [];
+  const sources = [];
+  // Machine hum: detuned low saws + a sine through a lowpass, 7 Hz tremolo, a faint servo whirr.
+  const hum = ctx.createGain();
+  hum.gain.setValueAtTime(0.0001, now);
+  hum.gain.setValueAtTime(0.0001, start);
+  hum.gain.linearRampToValueAtTime(PAP_HUM_GAIN, start + 0.2);
+  hum.gain.setValueAtTime(PAP_HUM_GAIN, Math.max(start + 0.2, end - 0.3));
+  hum.gain.linearRampToValueAtTime(0.0001, end);
+  hum.connect(buses.world || master);
+  gains.push(hum);
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.value = 480;
+  lp.Q.value = 1.2;
+  lp.connect(hum);
+  for (const [type, f, lvl] of [['sawtooth', 55, 0.45], ['sawtooth', 55.6, 0.35], ['sine', 110, 0.6], ['triangle', 165, 0.15]]) {
+    const o = ctx.createOscillator();
+    o.type = type;
+    o.frequency.value = f;
+    const g = ctx.createGain();
+    g.gain.value = lvl;
+    o.connect(g);
+    g.connect(lp);
+    o.start(start);
+    o.stop(end + 0.05);
+    sources.push(o);
+  }
+  const lfo = ctx.createOscillator();
+  lfo.type = 'sine';
+  lfo.frequency.value = 7;
+  const depth = ctx.createGain();
+  depth.gain.value = PAP_HUM_GAIN * 0.35;
+  lfo.connect(depth);
+  depth.connect(hum.gain);
+  lfo.start(start);
+  lfo.stop(end + 0.05);
+  sources.push(lfo);
+  const whirr = ctx.createBufferSource();
+  whirr.buffer = noiseBuf;
+  whirr.loop = true;
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.setValueAtTime(700, start);
+  bp.frequency.linearRampToValueAtTime(1400, end);
+  bp.Q.value = 5;
+  const wg = ctx.createGain();
+  wg.gain.value = 0.25;
+  whirr.connect(bp);
+  bp.connect(wg);
+  wg.connect(hum);
+  whirr.start(start);
+  whirr.stop(end + 0.05);
+  sources.push(whirr);
+  // Jingle: calliope-ish lead (triangle + quiet square octave) with an oom-pah bass, on papBus.
+  const jg = ctx.createGain();
+  jg.gain.value = 1;
+  jg.connect(getPapBus());
+  gains.push(jg);
+  let t = t0 + 0.1;
+  const tEnd = t0 + dur - 0.05;
+  PAP_JINGLE.forEach(([f, beats], i) => {
+    if (t >= tEnd) return;
+    const d = Math.min(beats * PAP_JINGLE_BEAT, tEnd - t);
+    sources.push(tone(jg, { type: 'triangle', f0: f, t, dur: d * 0.95, peak: 0.16, attack: 0.01 }));
+    sources.push(tone(jg, { type: 'square', f0: f * 2, t, dur: d * 0.6, peak: 0.025, attack: 0.01 }));
+    // oom (root) on each note, pah (fifth) halfway through the longer ones
+    const root = i < 4 ? 73.42 : 110.0;
+    sources.push(tone(jg, { type: 'triangle', f0: root, t, dur: 0.12, peak: 0.12, attack: 0.005 }));
+    if (d >= 0.3) sources.push(tone(jg, { type: 'triangle', f0: root * 1.5, t: t + d / 2, dur: 0.1, peak: 0.08, attack: 0.005 }));
+    t += beats * PAP_JINGLE_BEAT;
+  });
+  papWork = { gains, sources };
+}
+
 function onLevelStart(p) {
   stopLabHum();
   if (p && p.index > 0) playSfx('levelStart', p);
@@ -693,6 +829,28 @@ const SFX = {
     acidSizzle(buses.world, ACID_SIZZLE_DELAY);
   },
   acidSizzle() { acidSizzle(buses.world, 0); },
+  // ---- WO8 (Agent F): Pack-a-Punch ----
+  // pap:start: heavy clank as the gun goes in, then the working hum + jingle (stoppable).
+  papStart() {
+    papClank(buses.world);
+    startPapWork(0.35);
+  },
+  // pap:done: eject thunk + a bright rising sparkle shimmer.
+  papDone() {
+    stopPapWork(0.08);
+    const b = buses.world;
+    const k = rrange(0.95, 1.05);
+    tone(b, { type: 'sine', f0: 150 * k, f1: 55, dur: 0.16, peak: 0.4, attack: 0.002 });
+    noise(b, { dur: 0.08, peak: 0.2, attack: 0.001, filter: 'lowpass', freq: 1200, freq1: 300 });
+    tone(b, { type: 'square', f0: 980 * k, t: 0.03, dur: 0.06, peak: 0.03, attack: 0.001 });
+    const u = buses.ui;
+    [1318.5, 1760, 2093, 2637, 3136, 3520].forEach((f, i) => {
+      const fj = f * rrange(0.995, 1.005);
+      tone(u, { type: 'sine', f0: fj, t: 0.12 + i * 0.05, dur: 0.5, peak: 0.05 - i * 0.004, attack: 0.004 });
+      tone(u, { type: 'triangle', f0: fj * 1.004, t: 0.12 + i * 0.05, dur: 0.25, peak: 0.02, attack: 0.004 });
+    });
+    noise(u, { t: 0.1, dur: 0.7, peak: 0.06, attack: 0.08, filter: 'highpass', freq: 5000, freq1: 9000 });
+  },
   board(p) {
     const byZombie = p && p.by === 'zombie';
     const f = byZombie ? rrange(120, 160) : rrange(200, 260);
@@ -741,10 +899,11 @@ export function initAudio() {
   for (const u of unsubs) { try { u(); } catch (_) { /* ignore */ } }
   unsubs = [];
   stopLabHum(); // WO7: a re-init (restart path) never leaves the lab hum running
+  stopPapWork(0.05); // WO8: nor the Pack-a-Punch hum/jingle
   const sub = (event, fn) => { unsubs.push(on(event, fn)); };
 
   sub('game:start', () => createContext());
-  sub('game:restart', () => { tryResume(); gunVoices = []; thunderVoices = []; stopLabHum(); });
+  sub('game:restart', () => { tryResume(); gunVoices = []; thunderVoices = []; stopLabHum(); stopPapWork(); });
 
   sub('weapon:fired', p => playSfx('gunshot', p));
   sub('weapon:reload', () => playSfx('reload'));
@@ -760,6 +919,7 @@ export function initAudio() {
   sub('powerup:expired', () => playSfx('powerupExpired'));
   sub('purchase:made', p => {
     if (p && p.kind === 'perk') return; // WO7: the perk:bought jingle replaces the cash tick
+    if (p && p.kind === 'pap') return;  // WO8: the pap:start clank replaces the cash tick
     playSfx(p && p.kind === 'door' ? 'door' : p && p.kind === 'megadoor' ? 'megaDoor' : 'purchase', p);
   });
   // WO5 3.6
@@ -781,4 +941,9 @@ export function initAudio() {
   sub('boss:spit', () => playSfx('bossSpit'));
   sub('game:over', () => stopLabHum());
   sub('level:descend', () => stopLabHum());
+  // WO8
+  sub('pap:start', p => playSfx('papStart', p));
+  sub('pap:done', p => playSfx('papDone', p));
+  sub('game:over', () => stopPapWork());
+  sub('level:descend', () => stopPapWork());
 }

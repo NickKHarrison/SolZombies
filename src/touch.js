@@ -5,7 +5,9 @@
 // Contract (WORK_ORDER_6 section 3):
 //   initTouch(layerEl, canvas)  idempotent; builds the DOM inside layerEl and installs pointer listeners
 //   setTouchEnabled(on)         show / hide the layer (and release everything when hidden)
-//   setTouchPrompt(text|null)   ACTION button label; null / '' hides it
+//   setTouchPrompt(text|null[, opts])  ACTION button label; null / '' hides it. WO8 Phase 4a: optional
+//                               opts { blocked, cantAfford }: blocked -> greyed (.blocked) and a tap does
+//                               nothing (no interact edge); cantAfford -> greyed (.cant-afford), still tappable
 //   getTouchState()             fresh snapshot (see below); edge flags persist until endTouchFrame()
 //   endTouchFrame()             clear edge flags
 //   isTouchActive()             layer initialised and enabled
@@ -39,6 +41,8 @@ const sticks = { left: makeStick('left'), right: makeStick('right') };
 // Buttons: name -> { el, pointerId }
 const buttons = {};
 let promptText = null;
+let promptBlocked = false;   // WO8 Phase 4a: ACTION shows a blocked prompt (greyed, inert)
+let promptCantAfford = false; // greyed like the desktop prompt, still tappable (denied feedback)
 
 // Continuous touch values.
 let aimX = 0, aimY = 0;       // last non-zero aim direction (unit) or 0,0 before the first aim
@@ -136,7 +140,7 @@ function pressButton(name, e) {
   if (name === 'reload') edge.reload = true;
   else if (name === 'swap') edge.swap = true;
   else if (name === 'pause') edge.pause = true;
-  else if (name === 'action') edge.interact = true;
+  else if (name === 'action') { if (!promptBlocked) edge.interact = true; }
   else if (name === 'knife') edge.melee = true;
 }
 
@@ -198,6 +202,9 @@ function applyPrompt() {
   if (!b) return;
   const on = !!promptText;
   if (on) b.label.textContent = promptText;
+  b.el.classList.toggle('blocked', on && promptBlocked);
+  b.el.classList.toggle('cant-afford', on && !promptBlocked && promptCantAfford);
+  b.el.setAttribute('aria-disabled', on && promptBlocked ? 'true' : 'false');
   b.el.style.display = on ? '' : 'none';
   if (!on) releaseButton('action');
 }
@@ -312,10 +319,15 @@ export function setTouchEnabled(on) {
 }
 
 /** ACTION button label (e.g. "Buy Sheiva [50]"); null / '' hides the button. */
-export function setTouchPrompt(text) {
+export function setTouchPrompt(text, opts) {
   const t = text ? String(text) : null;
-  if (t === promptText) return; // called every frame: avoid DOM churn
+  const blk = !!(t && opts && opts.blocked);
+  const poor = !!(t && opts && opts.cantAfford);
+  // called every frame: avoid DOM churn
+  if (t === promptText && blk === promptBlocked && poor === promptCantAfford) return;
   promptText = t;
+  promptBlocked = blk;
+  promptCantAfford = poor;
   applyPrompt();
 }
 
@@ -337,7 +349,7 @@ export function getTouchState() {
     reload: edge.reload,
     swap: edge.swap,
     interact: edge.interact,
-    interactHeld: held('action'),
+    interactHeld: held('action') && !promptBlocked, // WO8 Phase 4a: inert while blocked
     pause: edge.pause,
     start: edge.start,
     melee: edge.melee,

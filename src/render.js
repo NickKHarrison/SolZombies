@@ -25,6 +25,7 @@ const T_FLOOR = 0, T_WALL = 1, T_WINDOW = 2, T_POCKET = 3, T_BOX = 4, T_WALLBUY 
 const T_DOOR = 7; // WO4 2.1: closed buyable door (opening sets its tiles to T_FLOOR)
 const T_ARENA = 8, T_STAIRS = 9; // WO5 3.1: arena minion spawn (floor), staircase (solid until opened)
 const T_PERK = 10; // WO7 T2: perk machine (blocking, like a wall buy)
+const T_PAP = 11;  // WO8: Pack-a-Punch machine (blocking, like a perk machine)
 const DOOR_FX_TTL = 0.6;
 const DOOR_SHAKE = { ttl: 0.35, magnitude: 3 };
 // WO5 3.6 tunables (config RENDER; local fallbacks keep older configs working)
@@ -68,11 +69,12 @@ export function initRender(c) {
   unsubs.push(events.on('points:changed', onPointsChanged));
   unsubs.push(events.on('player:damaged', onPlayerDamaged));
   unsubs.push(events.on('powerup:collected', onPowerupCollected));
-  unsubs.push(events.on('game:restart', () => { pending = []; resetAnim(); zTrack.clear(); }));
+  unsubs.push(events.on('game:restart', () => { pending = []; resetAnim(); zTrack.clear(); papAnim.weapon = null; papAnim.readyAt = -1; }));
   unsubs.push(events.on('weapon:fired', onWeaponFired));
   unsubs.push(events.on('purchase:made', onPurchaseMade));
   unsubs.push(events.on('boss:start', onBossStart));
   unsubs.push(events.on('zombie:killed', onZombieKilled));
+  unsubs.push(events.on('pap:done', onPapDone)); // WO8: sparkle burst at the machine
   resetAnim();
 }
 
@@ -142,10 +144,12 @@ export function render(state) {
   ctx.translate(-camX, -camY);
 
   const theme = themeOf(state);
+  papStateCode = papCodeOf(state);
   drawStaticLayer(map, view, theme);
   if (theme.torch) drawTorches(view, now);
   drawBarricades(map, view);
   drawBox(state, map, t);
+  drawPap(state, map, t, view);         // WO8: Pack-a-Punch glow, gun sliding in, sparks, tray gun
   drawEffectsOfType(state, 'blood', view);
   drawHazards(state, view, t);          // WO7 T5: acid pools on the floor
   // FIX-3 (playtest #1): power-ups above every blood decal so the boss's Max Ammo stays visible.
@@ -163,6 +167,7 @@ export function render(state) {
   drawEffectsOfType(state, 'shockwave', view);
   drawEffectsOfType(state, 'explosion', view);
   drawEffectsOfType(state, 'doorOpen', view);
+  drawEffectsOfType(state, 'papSparkle', view);
   sealedMegaBox = map.megaDoor && map.megaDoor.sealed ? doorBox(map.megaDoor) : null;
   drawEffectsOfType(state, 'text', view);
   if (state.debug) drawDebugWorld(state, view);
@@ -292,6 +297,7 @@ function flushPending(state) {
   const q = pending; pending = [];
   for (const e of q) {
     if (e.type === 'doorOpen' && !placeDoorEffect(state, e)) continue;
+    if (e.type === 'papSparkle' && !placePapEffect(state, e)) continue;
     if (e.type === 'text' && e.pts > 0 && mergePointsPopup(state, e)) continue;
     addEffect(state, e);
   }
@@ -317,6 +323,7 @@ function defaultTtl(type) {
     case 'explosion': return 0.35;
     case 'doorOpen': return DOOR_FX_TTL;
     case 'bossDeath': return BOSS_RING_TTL;
+    case 'papSparkle': return PAP_SPARKLE_TTL;
     case 'slash': return (CFG.MELEE && CFG.MELEE.swingTime) || 0.25;
     case 'shockwave': return (CFG.WEAPON_FX && CFG.WEAPON_FX.shockwaveTtl) || 0.45;
     default: return 0.3;
@@ -375,7 +382,7 @@ function tileAt(map, tx, ty) {
   return map.tiles[ty * map.cols + tx];
 }
 
-function isSolidCode(c) { return c === T_WALL || c === T_WALLBUY || c === T_BOX || c === T_WINDOW || c === T_PERK; }
+function isSolidCode(c) { return c === T_WALL || c === T_WALLBUY || c === T_BOX || c === T_WINDOW || c === T_PERK || c === T_PAP; }
 
 function roundRect(c, x, y, w, h, r) {
   c.beginPath();
@@ -463,18 +470,21 @@ function drawMenuBackground(W, H, now) {
 // WO5 3.6: the key also carries the level id + theme signature (a level swap or theme change
 // repaints) and a small integer of mega-door / stairs flags (a seal/unseal/open repaints even
 // without a version bump). The memo check compares identities and ints only: no per-frame allocs.
-let staticKeyMemo = { map: null, version: 0, theme: null, flags: -1, key: '' };
+let staticKeyMemo = { map: null, version: 0, theme: null, flags: -1, pap: -1, key: '' };
+// WO8: Pack-a-Punch state painted into the layer (0 none / 1 idle / 2 working / 3 ready), set by
+// render() from state.shop.pap.state before the static layer is fetched.
+let papStateCode = 0;
 function staticKey(map, theme) {
   const ver = Number.isFinite(map.version) ? map.version : 0;
   const flags = featureFlags(map);
   if (staticKeyMemo.map === map && staticKeyMemo.version === ver && staticKeyMemo.theme === theme &&
-      staticKeyMemo.flags === flags) return staticKeyMemo.key;
+      staticKeyMemo.flags === flags && staticKeyMemo.pap === papStateCode) return staticKeyMemo.key;
   const W = weaponsMod && weaponsMod.WEAPONS;
   const n = W ? Object.keys(W).length : 0;
   const art = gunArtKey();
   const key = n + ':' + (map.cols || 0) + 'x' + (map.rows || 0) + ':' + art + ':v' + ver +
-    ':L' + (map.levelId != null ? map.levelId : '') + ':T' + theme.sig + ':f' + flags;
-  if (n > 0 && art === 'gunart') staticKeyMemo = { map, version: ver, theme, flags, key };
+    ':L' + (map.levelId != null ? map.levelId : '') + ':T' + theme.sig + ':f' + flags + ':pap' + papStateCode;
+  if (n > 0 && art === 'gunart') staticKeyMemo = { map, version: ver, theme, flags, pap: papStateCode, key };
   return key;
 }
 
@@ -713,6 +723,8 @@ function paintStatic(c, map, width, height, theme) {
     }
     // WO7 T2: perk machines (vending box + label plate on the floor side)
     paintPerkMachines(c, map);
+    // WO8: Pack-a-Punch cabinet + "PACK-A-PUNCH" / cost plates (buy plates: 35 % over the player)
+    paintPapMachine(c, map);
   } finally { labelKind = 'door'; }
 
   // WO4: closed doors (planks + iron bands + labels on both sides). Open doors are floor.
@@ -1642,6 +1654,557 @@ function paintPerkMachine(c, map, m, plates) {
   const cost = Number.isFinite(m.price) ? m.price : (def && Number.isFinite(def.cost) ? def.cost : null);
   const price = sold ? 'SOLD OUT' : (cost != null ? String(cost) : '');
   for (const s of sides) plates.push({ b, side: s, name, price, sold });
+}
+
+// ---------------------------------------------------------------------------
+// Pack-a-Punch (WO8, Agent D): cabinet (static layer), dynamic glow / gun in-out / sparks,
+// pap:done sparkle burst, and the purple-and-gold camo on upgraded held guns.
+// ---------------------------------------------------------------------------
+
+const PAP_SPARKLE_TTL = 0.9;
+const PAP_SLIDE_TIME = 0.6;   // s for the gun to slide into the feed slot
+const PAP_PURPLE = '#b44dff', PAP_GOLD = '#ffd54a';
+// Camo ramps (dark -> light). Metals/greys/olive -> violet, wood/tan -> gold.
+const PAP_VIOLET = [[36, 12, 60], [68, 22, 114], [108, 42, 180], [156, 82, 234], [212, 168, 255]];
+const PAP_GOLDS = [[106, 70, 8], [168, 120, 24], [224, 176, 48], [255, 224, 120]];
+const PAP_SMALL_W = 14; // FIX-B: sprites narrower than this use the bright small-gun camo
+const papAnim = { weapon: null, state: '', start: 0, readyAt: -1 }; // tracks the gun currently inside (slide timing)
+const PAP_READY_FLASH = 0.35; // WO8 FIX-B: gold flash at working -> ready
+
+// 0 no machine, 1 idle, 2 working, 3 ready (part of the static-layer key).
+function papCodeOf(state) {
+  const map = state.map;
+  if (!map || !map.pap) return 0;
+  const st = state.shop && state.shop.pap && state.shop.pap.state;
+  return st === 'working' ? 2 : st === 'ready' ? 3 : 1;
+}
+
+// weapons.isUpgraded (Agent A) when present, else the w.upgraded / w.def.upgraded flags.
+function isUpgradedWeapon(w) {
+  if (!w) return false;
+  try { if (typeof weaponsMod.isUpgraded === 'function') return !!weaponsMod.isUpgraded(w); } catch (_) { /* sibling mid-rewrite */ }
+  return w.upgraded === true || !!(w.def && w.def.upgraded === true);
+}
+
+// The base (un-upgraded) def, so an upgraded def without sprite/id fields still finds its art.
+function baseDefOf(w, def) {
+  const id = (def && def.baseId) || (w && w.id);
+  return weaponDef(id) || def;
+}
+
+// Deterministic camo recolour of a gun sprite. 'k' outline (and any near-black) is kept; greys,
+// steel and olive become violet by brightness with 2-px diagonal stripes (+1 / 0 / -1 tone) and
+// sparse gold flecks; brown / tan / wood becomes gold; saturated energy colours (ray gun green,
+// thundergun cyan, blood red) stay, the purple accent turns gold. Cached per sprite (key 'pap').
+function papSprite(sp) {
+  let m = tintCache.get(sp);
+  if (!m) { m = new Map(); tintCache.set(sp, m); }
+  let out = m.get('pap');
+  if (out) return out;
+  // WO8 FIX-B (playtest #7): small sprites (pistols, w < PAP_SMALL_W) read dark with the full
+  // ramp, so they get a light violet base (ramp steps 2-4 only) with alternating gold stripes.
+  const small = sp.w < PAP_SMALL_W;
+  out = pixel.tint(sp, (r, g, b, a, x, y) => {
+    if (!a) return null;
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    if (mx < 24) return null; // outline
+    const lum = r * 0.3 + g * 0.59 + b * 0.11;
+    const sat = mx - mn;
+    const band = ((x + y) >> 1) % 3; // x, y >= 0
+    if (r > b + 40 && r >= g && g > b) { // brown / tan / wood / blond
+      let i = Math.min(3, Math.floor((lum / 256) * 4) + (band === 0 ? 1 : 0));
+      const c = PAP_GOLDS[i];
+      return [c[0], c[1], c[2], a];
+    }
+    if (sat >= 100) {
+      if (r > 150 && b > 200 && g < 110) { const c = PAP_GOLDS[3]; return [c[0], c[1], c[2], a]; } // 'p' -> gold
+      return null; // energy colours keep their identity
+    }
+    let i = Math.min(4, Math.floor((lum / 256) * 5));
+    if (small) {
+      if (band === 0) { const c = PAP_GOLDS[i >= 2 ? 3 : 2]; return [c[0], c[1], c[2], a]; }
+      i = Math.max(2, Math.min(4, i + (band === 1 ? 2 : 1)));
+      const c = PAP_VIOLET[i];
+      return [c[0], c[1], c[2], a];
+    }
+    if (band === 0) i = Math.min(4, i + 1);
+    else if (band === 2) i = Math.max(0, i - 1);
+    if (i >= 2 && (x * 5 + y * 3) % 13 === 0) { const c = PAP_GOLDS[2]; return [c[0], c[1], c[2], a]; }
+    const c = PAP_VIOLET[i];
+    return [c[0], c[1], c[2], a];
+  });
+  if (m.size > 8) m.clear();
+  m.set('pap', out);
+  return out;
+}
+
+// Gun entry (sprite + grip/muzzle/pose) with the camo sprite, one per base entry.
+const papGunCache = new WeakMap();
+function papGunEntry(gun) {
+  if (!gun || !gun.sprite || !gun.sprite.pixels) return gun;
+  let e = papGunCache.get(gun);
+  if (!e || e.base !== gun.sprite) {
+    e = Object.assign({}, gun, { sprite: papSprite(gun.sprite) });
+    e.base = gun.sprite;
+    papGunCache.set(gun, e);
+  }
+  return e;
+}
+
+// Pre-rendered soft glows (additive).
+const papGlows = {};
+function papGlow(kind) {
+  if (papGlows[kind] !== undefined || typeof document === 'undefined') return papGlows[kind] || null;
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  const rgb = kind === 'gold' ? '255,200,70' : '180,77,255';
+  grad.addColorStop(0, `rgba(${rgb},0.85)`);
+  grad.addColorStop(0.35, `rgba(${rgb},0.4)`);
+  grad.addColorStop(1, `rgba(${rgb},0)`);
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
+  papGlows[kind] = c;
+  return c;
+}
+function blitGlow(kind, x, y, r, alpha) {
+  const gl = papGlow(kind);
+  if (!gl || !(alpha > 0) || !(r > 0)) return;
+  ctx.globalAlpha = alpha > 1 ? 1 : alpha;
+  ctx.drawImage(gl, x - r, y - r, r * 2, r * 2);
+}
+
+// Faint pulsing purple glow around the held upgraded gun (between the hand and the muzzle).
+function drawPapGunGlow(ps, muzzle, t) {
+  if (!muzzle) return;
+  const cx = ps.x + (muzzle.x - ps.x) * 0.6, cy = ps.y + (muzzle.y - ps.y) * 0.6;
+  const len = Math.hypot(muzzle.x - ps.x, muzzle.y - ps.y);
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  blitGlow('purple', cx, cy, Math.max(16, len * 0.85), 0.3 + 0.08 * Math.sin(t * 4));
+  ctx.restore();
+}
+
+// Machine geometry: box, front side (first open floor side, like a perk machine), rotation of the
+// local frame (front = +y), and the world points of the feed slot and the tray. Memoized per
+// map / pap object / version (a door opening next to it can change the open sides).
+let papGeomMemo = { map: null, pap: null, ver: -1, g: null };
+function papGeom(map) {
+  const m = map && map.pap;
+  if (!m) return null;
+  const ver = Number.isFinite(map.version) ? map.version : 0;
+  if (papGeomMemo.map === map && papGeomMemo.pap === m && papGeomMemo.ver === ver) return papGeomMemo.g;
+  const b = perkBox(m);
+  const tx = Number.isFinite(m.tx) ? m.tx : Math.floor((b.x + b.w / 2) / TILE);
+  const ty = Number.isFinite(m.ty) ? m.ty : Math.floor((b.y + b.h / 2) / TILE);
+  const sides = [{ dx: 0, dy: 1 }, { dx: 0, dy: -1 }, { dx: 1, dy: 0 }, { dx: -1, dy: 0 }]
+    .filter((s) => isOpenFloorCode(tileAt(map, tx + s.dx, ty + s.dy)));
+  if (!sides.length) sides.push({ dx: 0, dy: 1 });
+  const front = sides[0];
+  const rot = Math.atan2(front.dy, front.dx) - Math.PI / 2;
+  const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+  const half = (front.dx ? b.w : b.h) / 2 - 1;   // local y of the front face
+  const across = (front.dx ? b.h : b.w) - 2;     // cabinet width along the front
+  const c = Math.cos(rot), s = Math.sin(rot);
+  const wx = (lx, ly) => cx + lx * c - ly * s, wy = (lx, ly) => cy + lx * s + ly * c;
+  const slotLy = half - 15, trayLy = half - 4;
+  const back = tileAt(map, tx - front.dx, ty - front.dy);
+  const g = {
+    b, tx, ty, sides, front, rot, cx, cy, half, across, ext: back === T_WALL ? 8 : 0,
+    slotLy, trayLy,
+    slotX: wx(0, slotLy), slotY: wy(0, slotLy),
+    trayX: wx(0, trayLy), trayY: wy(0, trayLy),
+  };
+  papGeomMemo = { map, pap: m, ver, g };
+  return g;
+}
+
+function papCost(map) {
+  const m = map && map.pap;
+  if (m && Number.isFinite(m.cost)) return m.cost;
+  return CFG.PAP && Number.isFinite(CFG.PAP.cost) ? CFG.PAP.cost : 500;
+}
+
+// Static layer: dark cabinet with purple neon trim and gold corners, a purple-and-gold emblem
+// (upright lightning bolt), the feed slot with gold rollers, a status lamp (dim gold idle,
+// purple working, bright gold ready), the steel tray on the front lip, purple/gold light on the
+// floor in front, and a "PACK-A-PUNCH" / cost plate on every open floor side.
+function paintPapMachine(c, map) {
+  let g = null;
+  try { g = papGeom(map); } catch (_) { g = null; }
+  if (!g) return;
+  const st = papStateCode;
+  const { b, rot, front, ext } = g;
+  c.save();
+  try {
+    c.fillStyle = '#0a0810';
+    c.fillRect(b.x, b.y, b.w, b.h);
+    c.translate(g.cx, g.cy);
+    c.rotate(rot);
+    const W = g.across, H = (front.dx ? b.w : b.h) - 2;
+    const x0 = -W / 2, y1 = H / 2, y0 = -H / 2 - ext, Ht = y1 - y0;
+    // Light on the floor in front: purple wash + a warm gold core under the tray.
+    let gr = c.createRadialGradient(0, y1 + 4, 2, 0, y1 + 4, W * 1.15);
+    gr.addColorStop(0, 'rgba(180,77,255,0.5)');
+    gr.addColorStop(1, 'rgba(180,77,255,0)');
+    c.fillStyle = gr;
+    c.fillRect(-W * 1.2, y1 - 2, W * 2.4, W * 1.2);
+    gr = c.createRadialGradient(0, y1 + 2, 1, 0, y1 + 2, W * 0.55);
+    gr.addColorStop(0, 'rgba(255,200,70,0.35)');
+    gr.addColorStop(1, 'rgba(255,200,70,0)');
+    c.fillStyle = gr;
+    c.fillRect(-W * 0.6, y1 - 2, W * 1.2, W * 0.6);
+    // Drop shadow, outer frame, body with a subtle top-lit gradient, darker side panels.
+    c.fillStyle = 'rgba(0,0,0,0.5)';
+    c.fillRect(x0 + 2, y0 + 2, W, Ht);
+    c.fillStyle = '#07050b';
+    c.fillRect(x0, y0, W, Ht);
+    gr = c.createLinearGradient(0, y0, 0, y1);
+    gr.addColorStop(0, '#2a1840');
+    gr.addColorStop(1, '#150b20');
+    c.fillStyle = gr;
+    c.fillRect(x0 + 2, y0 + 2, W - 4, Ht - 3);
+    c.fillStyle = '#100818';
+    c.fillRect(x0 + 2, y0 + 2, 3, Ht - 3);
+    c.fillRect(x0 + W - 5, y0 + 2, 3, Ht - 3);
+    // Purple neon trim (glowing) just inside the frame.
+    c.strokeStyle = PAP_PURPLE;
+    c.lineWidth = 1;
+    c.shadowColor = PAP_PURPLE;
+    c.shadowBlur = 8;
+    c.strokeRect(x0 + 5.5, y0 + 2.5, W - 11, Ht - 5);
+    c.shadowBlur = 0;
+    // Gold marquee strip on top with bulbs.
+    c.fillStyle = '#c99a2a';
+    c.fillRect(x0 + 6, y0 + 3, W - 12, 3);
+    c.fillStyle = '#fff1b0';
+    for (let bx = x0 + 8; bx < x0 + W - 8; bx += 4) c.fillRect(bx, y0 + 4, 1, 1);
+    // Gold corner caps.
+    c.fillStyle = '#e0b030';
+    c.fillRect(x0, y0, 3, 3); c.fillRect(x0 + W - 3, y0, 3, 3);
+    c.fillRect(x0, y1 - 3, 3, 3); c.fillRect(x0 + W - 3, y1 - 3, 3, 3);
+    // Emblem: purple disc, gold rim, upright gold lightning bolt.
+    const ey = (y0 + 7 + g.slotLy - 1) / 2;
+    const er = Math.max(5, Math.min(8, (g.slotLy - 1 - (y0 + 7)) / 2));
+    c.save();
+    c.translate(0, ey);
+    c.rotate(-rot);
+    c.shadowColor = PAP_PURPLE;
+    c.shadowBlur = 10;
+    c.fillStyle = '#5a1f98';
+    c.beginPath(); c.arc(0, 0, er, 0, Math.PI * 2); c.fill();
+    c.shadowBlur = 0;
+    c.strokeStyle = '#e0b030';
+    c.lineWidth = 1.5;
+    c.stroke();
+    c.fillStyle = PAP_GOLD;
+    const k = er / 8;
+    c.beginPath();
+    c.moveTo(1.5 * k, -6 * k); c.lineTo(-3.5 * k, 1 * k); c.lineTo(-0.2 * k, 1 * k);
+    c.lineTo(-1.5 * k, 6 * k); c.lineTo(3.5 * k, -1.2 * k); c.lineTo(0.2 * k, -1.2 * k);
+    c.closePath(); c.fill();
+    c.restore();
+    // Feed slot: dark opening, purple glow inside (brighter while working), gold rollers.
+    const sw = W - 14, sx = -sw / 2, sy = g.slotLy - 2;
+    c.fillStyle = '#030205';
+    c.fillRect(sx, sy, sw, 4);
+    c.fillStyle = st === 2 ? 'rgba(230,170,255,0.95)' : 'rgba(180,77,255,0.55)';
+    c.fillRect(sx + 1, sy + 2, sw - 2, 1);
+    c.fillStyle = '#a87818';
+    c.fillRect(sx - 2, sy, 2, 4); c.fillRect(sx + sw, sy, 2, 4);
+    // Status lamp right of the emblem row.
+    const lampC = st === 2 ? '#d9a0ff' : st === 3 ? '#ffe680' : '#7a5a14';
+    c.fillStyle = '#050307';
+    c.fillRect(x0 + W - 10, ey - 2, 4, 4);
+    if (st >= 2) { c.shadowColor = lampC; c.shadowBlur = 6; }
+    c.fillStyle = lampC;
+    c.fillRect(x0 + W - 9, ey - 1, 2, 2);
+    c.shadowBlur = 0;
+    // Tray: steel lip across the front, recessed bed, gold front edge.
+    const ty0 = g.trayLy - 4, tw = W - 4;
+    c.fillStyle = '#2c2636';
+    c.fillRect(-tw / 2, ty0, tw, y1 - ty0 + 2);
+    c.fillStyle = '#0d0a12';
+    c.fillRect(-tw / 2 + 2, ty0 + 1, tw - 4, y1 - ty0 - 2);
+    c.fillStyle = '#e0b030';
+    c.fillRect(-tw / 2, y1 + 1, tw, 1);
+    c.fillStyle = 'rgba(255,255,255,0.18)';
+    c.fillRect(-tw / 2, ty0, tw, 1);
+    // Outline
+    c.strokeStyle = '#040306';
+    c.strokeRect(x0 + 0.5, y0 + 0.5, W - 1, Ht - 1);
+  } finally { c.restore(); }
+  const price = String(papCost(map));
+  // WO8 FIX-B (playtest #5): ONE plate, placed where the player never stands to use the machine.
+  // Every open 4-neighbour is a use tile, so each side (and the same side one tile further out) is
+  // scored by the floor its plate rect covers: use tiles x100, diagonal tiles x10, other floor x1
+  // (+200 for the far offset, +0.5 for a non-back side). On L1/L2/L3 this picks a wall side next
+  // to the cabinet (L1 east, L2 west, L3 east), clear of the tray and of the soldier.
+  const pl = papPlatePlacement(c, map, g, 'PACK-A-PUNCH', price);
+  paintWallBuyLabel(c, pl.lb, pl.lb.w, pl.lb.h, pl.side, 'PACK-A-PUNCH', price, false);
+}
+
+// Plate rect for side s with the box pushed out by k px (mirrors paintWallBuyLabel's layout).
+function papPlateRect(b, s, k, pw, ph) {
+  const lb = {
+    x: b.x - (s.dx < 0 ? k : 0), y: b.y - (s.dy < 0 ? k : 0),
+    w: b.w + (s.dx ? k : 0), h: b.h + (s.dy ? k : 0),
+  };
+  let px, py;
+  if (s.dy === 1) { px = lb.x + lb.w / 2 - pw / 2; py = lb.y + lb.h + 3; }
+  else if (s.dy === -1) { px = lb.x + lb.w / 2 - pw / 2; py = lb.y - 3 - ph; }
+  else if (s.dx === 1) { px = lb.x + lb.w + 3; py = lb.y + lb.h / 2 - ph / 2; }
+  else { px = lb.x - 3 - pw; py = lb.y + lb.h / 2 - ph / 2; }
+  return { lb, px, py };
+}
+
+function papPlatePlacement(c, map, g, name, price) {
+  c.save();
+  c.font = 'bold 12px monospace';
+  const pw = Math.ceil(Math.max(c.measureText(name).width, c.measureText(price).width) + 10);
+  c.restore();
+  const ph = 32;
+  const b = g.b;
+  const walk = (code) => isOpenFloorCode(code) || code === T_DOOR;
+  const all = [{ dx: 0, dy: 1 }, { dx: 0, dy: -1 }, { dx: 1, dy: 0 }, { dx: -1, dy: 0 }];
+  let best = null;
+  for (const s of all) {
+    const isFront = s.dx === g.front.dx && s.dy === g.front.dy;
+    const isBack = s.dx === -g.front.dx && s.dy === -g.front.dy;
+    for (const extra of [0, TILE]) {
+      const k = (isFront ? PAP_TRAY_LABEL_CLEAR : 0) + (isBack ? g.ext : 0) + extra;
+      const r = papPlateRect(b, s, k, pw, ph);
+      let score = extra ? 200 : 0;
+      for (let y = r.py + 2; y < r.py + ph; y += 4) {
+        for (let x = r.px + 2; x < r.px + pw; x += 4) {
+          const tx = Math.floor(x / TILE), ty = Math.floor(y / TILE);
+          const ax = Math.abs(tx - g.tx), ay = Math.abs(ty - g.ty);
+          if (ax + ay === 0) { score += 100; continue; }          // over the cabinet / tray
+          if (!walk(tileAt(map, tx, ty))) continue;
+          score += ax + ay === 1 ? 100 : (ax <= 1 && ay <= 1) ? 10 : 1; // use tile / diagonal / far floor
+        }
+      }
+      score += isBack ? 0 : 0.5;
+      if (!best || score < best.score) best = { score, side: s, lb: r.lb };
+    }
+  }
+  return best;
+}
+const PAP_TRAY_LABEL_CLEAR = 12;
+
+// Gun entry for the weapon object inside the machine (base art; camo when `tinted`).
+function papWeaponGun(w, tinted) {
+  if (!w) return null;
+  const def = w.def || weaponDef(w.id) || (w.id != null ? { id: w.id } : null);
+  const gun = gunEntryFor(baseDefOf(w, def));
+  return tinted ? papGunEntry(gun) : gun;
+}
+
+// Dynamic overlays: breathing glow (all states), the gun sliding into the slot and then sparks
+// while working, the upgraded gun bobbing on the tray while ready.
+function drawPap(state, map, t, view) {
+  const pap = state.shop && state.shop.pap;
+  const inside = pap && (pap.state === 'working' || pap.state === 'ready') ? pap.weapon : null;
+  if (!inside) papAnim.weapon = null;
+  if (!map.pap) return;
+  let g;
+  try { g = papGeom(map); } catch (_) { return; }
+  if (!g || !inView(view, g.cx, g.cy, 110)) return;
+  const st = pap ? pap.state : 'idle';
+  const scale = spriteScale(), dirs = spriteDirections();
+  ctx.save();
+  try {
+    // Cabinet jitter first, so the glows below still light the shaken cabinet.
+    if (st === 'working' && inside && papAnim.weapon === inside && papAnim.state === 'working'
+        && t - papAnim.start >= PAP_SLIDE_TIME) drawPapShake(g, t);
+    ctx.globalCompositeOperation = 'lighter';
+    if (st === 'working') {
+      // WO8 FIX-B (playtest #6): a clearly busy machine. Bigger breathing purple halo, and the slot
+      // pulses purple <-> gold (3 Hz), plus the cabinet jitter and heavier sparks below.
+      const p = Math.abs(Math.sin(t * 9));
+      const q = 0.5 + 0.5 * Math.sin(t * 6 * Math.PI);
+      blitGlow('purple', g.cx, g.cy, 48 + 14 * p, 0.4 + 0.4 * p);
+      blitGlow('purple', g.slotX, g.slotY, 24 + 8 * (1 - q), 0.6 + 0.4 * (1 - q));
+      blitGlow('gold', g.slotX, g.slotY, 16 + 10 * q, 0.35 + 0.55 * q);
+    } else if (st === 'ready') {
+      blitGlow('purple', g.cx, g.cy, 38, 0.3 + 0.08 * Math.sin(t * 4));
+      blitGlow('gold', g.trayX, g.trayY, 26, 0.45 + 0.15 * Math.sin(t * 5));
+    } else {
+      blitGlow('purple', g.cx, g.cy, 32, 0.16 + 0.06 * Math.sin(t * 2));
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    if (st === 'working' && inside) {
+      if (papAnim.weapon !== inside || papAnim.state !== 'working') { papAnim.weapon = inside; papAnim.state = 'working'; papAnim.start = t; }
+      const el = Math.max(0, t - papAnim.start);
+      if (el < PAP_SLIDE_TIME) drawPapSlide(g, papWeaponGun(inside, false), el / PAP_SLIDE_TIME, scale, dirs);
+      else drawPapSparks(g, t);
+    } else if (st === 'ready' && inside) {
+      // Gold flash on the working -> ready switch (PAP_READY_FLASH s).
+      if (papAnim.state === 'working' && papAnim.weapon === inside) papAnim.readyAt = t;
+      papAnim.weapon = inside; papAnim.state = 'ready';
+      const fa = papAnim.readyAt >= 0 ? 1 - (t - papAnim.readyAt) / PAP_READY_FLASH : 0;
+      if (fa > 0 && fa <= 1) {
+        ctx.globalCompositeOperation = 'lighter';
+        blitGlow('gold', g.cx, g.cy, 30 + 40 * (1 - fa), fa);
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 1;
+      }
+      const gun = papWeaponGun(inside, true);
+      if (gun && gun.sprite && gun.sprite.pixels) {
+        const sp = gun.sprite;
+        const ang = g.front.dx ? -Math.PI / 2 : 0;
+        const bob = Math.round(Math.sin(t * 2.6)) * 2;
+        drawCrisp(sp, Math.round(g.trayX), Math.round(g.trayY) - 2, 0, bob, ang, sp.w / 2, sp.h / 2, scale, dirs);
+        // Twinkles on the tray
+        ctx.globalCompositeOperation = 'lighter';
+        for (let i = 0; i < 3; i++) {
+          const ph = (t * 1.3 + i / 3) % 1;
+          const a = Math.sin(ph * Math.PI);
+          const ox = (hash(i * 13.7 + Math.floor(t * 1.3 + i / 3)) - 0.5) * sp.w * scale;
+          const x = g.trayX + (g.front.dx ? 0 : ox), y = g.trayY + (g.front.dx ? ox : 0) - 4;
+          drawStar(x, y, 1 + 2.5 * a, i % 2 ? PAP_GOLD : '#e8c8ff', a * 0.9);
+        }
+      }
+    }
+  } finally { ctx.restore(); }
+}
+
+// The gun (muzzle first) slides from the floor in front of the tray into the slot, clipped at
+// the slot line so it disappears into the cabinet. k = 0..1 (eased in).
+function drawPapSlide(g, gun, k, scale, dirs) {
+  if (!gun || !gun.sprite || !gun.sprite.pixels) return;
+  const sp = gun.sprite;
+  const fx = g.front.dx, fy = g.front.dy;
+  const L = Math.max(sp.w, sp.h) * scale;
+  const e = k * k;
+  const sx = g.trayX + fx * L * 0.3, sy = g.trayY + fy * L * 0.3;
+  const ex = g.slotX - fx * (L * 0.5 + 4), ey = g.slotY - fy * (L * 0.5 + 4);
+  const x = sx + (ex - sx) * e, y = sy + (ey - sy) * e;
+  ctx.save();
+  ctx.translate(g.cx, g.cy);
+  ctx.rotate(g.rot);
+  ctx.beginPath();
+  ctx.rect(-120, g.slotLy, 240, 200);
+  ctx.rotate(-g.rot);
+  ctx.translate(-g.cx, -g.cy);
+  ctx.clip();
+  drawCrisp(sp, Math.round(x), Math.round(y), 0, 0, Math.atan2(-fy, -fx), sp.w / 2, sp.h / 2, scale, dirs);
+  ctx.restore();
+  // Slot flares as the gun goes in.
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  blitGlow('gold', g.slotX, g.slotY, 10 + 10 * k, 0.3 + 0.5 * k);
+  ctx.restore();
+}
+
+// WO8 FIX-B (playtest #6): while working, the cabinet (its static-layer pixels) is re-blitted with a
+// 1-2 px jitter (deterministic from time, ~30 Hz), along the front face mostly. Skipped under
+// prefers-reduced-motion. One drawImage of a ~40x48 px rect.
+function drawPapShake(g, t) {
+  if (!staticLayer || !staticLayer.canvas || prefersReducedMotion()) return;
+  const n = Math.floor(t * 30);
+  const a = Math.round((hash(n * 1.37 + 5) * 2 - 1) * 2);
+  const bb = Math.round((hash(n * 2.71 + 9) * 2 - 1));
+  if (!a && !bb) return;
+  const jx = g.front.dx ? bb : a, jy = g.front.dx ? a : bb;
+  const b = g.b, f = g.front, e = g.ext;
+  const x = b.x - (f.dx > 0 ? e : 0), y = b.y - (f.dy > 0 ? e : 0);
+  const w = b.w + (f.dx ? e : 0), h = b.h + (f.dy ? e : 0);
+  ctx.fillStyle = '#07050b';
+  ctx.fillRect(x, y, w, h);
+  ctx.drawImage(staticLayer.canvas, x, y, w, h, x + jx, y + jy, w, h);
+}
+
+// Gold / white / lilac sparks spraying out of the slot (deterministic from time). FIX-B
+// (playtest #6): 20 thicker, longer sparks, plus a burst of 6 stars from the slot every 0.5 s.
+function drawPapSparks(g, t) {
+  const fa = Math.atan2(g.front.dy, g.front.dx);
+  const ax = Math.cos(fa + Math.PI / 2), ay = Math.sin(fa + Math.PI / 2);
+  const cols = [PAP_GOLD, '#fff3c0', '#d9a0ff'];
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = 'round';
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < 20; i++) {
+    const cyc = t * 2.8 + hash(i * 7.31);
+    const ph = cyc % 1, n = Math.floor(cyc);
+    const off = (hash(i * 3.7 + n * 11.1) - 0.5) * (g.across - 12);
+    const ang = fa + (hash(i * 5.3 + n * 2.9) - 0.5) * 2.6;
+    const d = 3 + ph * (24 + 22 * hash(i + n * 1.7));
+    const ox = g.slotX + ax * off, oy = g.slotY + ay * off;
+    const x = ox + Math.cos(ang) * d, y = oy + Math.sin(ang) * d + ph * ph * 8;
+    ctx.globalAlpha = 1 - ph;
+    ctx.strokeStyle = cols[i % 3];
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x - Math.cos(ang) * 8, y - Math.sin(ang) * 8);
+    ctx.stroke();
+  }
+  const bc = t * 2, bn = Math.floor(bc), bp = bc - bn;
+  if (bp < 0.5) {
+    const k = bp / 0.5, fade = 1 - k;
+    for (let i = 0; i < 6; i++) {
+      const ang = fa + (hash(i * 4.1 + bn * 3.3) - 0.5) * 2.8;
+      const d = 6 + k * (22 + 14 * hash(i * 9.7 + bn));
+      drawStar(g.slotX + Math.cos(ang) * d, g.slotY + Math.sin(ang) * d, 1.5 + 3 * fade, i % 2 ? PAP_GOLD : '#f0d8ff', fade);
+    }
+  }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+// 4-point star (two thin diamonds) at (x, y).
+function drawStar(x, y, r, color, alpha) {
+  if (!(alpha > 0) || !(r > 0)) return;
+  ctx.globalAlpha = alpha > 1 ? 1 : alpha;
+  ctx.fillStyle = color;
+  const q = Math.max(0.6, r * 0.28);
+  ctx.beginPath();
+  ctx.moveTo(x, y - r); ctx.lineTo(x + q, y); ctx.lineTo(x, y + r); ctx.lineTo(x - q, y); ctx.closePath();
+  ctx.moveTo(x - r, y); ctx.lineTo(x, y - q); ctx.lineTo(x + r, y); ctx.lineTo(x, y + q); ctx.closePath();
+  ctx.fill();
+}
+
+// pap:done -> purple/gold sparkle burst at the machine's tray (placed when the queue is flushed).
+function onPapDone(p) {
+  pending.push({ type: 'papSparkle', weaponId: p && p.weaponId, ttl: PAP_SPARKLE_TTL, maxTtl: PAP_SPARKLE_TTL });
+}
+
+function placePapEffect(state, e) {
+  if (Number.isFinite(e.x) && Number.isFinite(e.y)) return true;
+  const map = state && state.map;
+  if (!map || !map.pap) return false;
+  let g = null;
+  try { g = papGeom(map); } catch (_) { g = null; }
+  e.x = g ? g.trayX : map.pap.cx;
+  e.y = g ? g.trayY : map.pap.cy;
+  return Number.isFinite(e.x) && Number.isFinite(e.y);
+}
+
+function drawPapSparkle(e, view) {
+  if (!Number.isFinite(e.x) || !Number.isFinite(e.y) || !inView(view, e.x, e.y, 90)) return;
+  const f = 1 - lifeFrac(e);            // 0 -> 1 over the life
+  const ease = 1 - (1 - f) * (1 - f);
+  const fade = 1 - f;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  blitGlow('purple', e.x, e.y, 22 + 40 * ease, fade * 0.8);
+  blitGlow('gold', e.x, e.y, 12 + 18 * ease, fade * fade * 0.9);
+  ctx.globalAlpha = fade * 0.6;
+  ctx.strokeStyle = PAP_PURPLE;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(e.x, e.y, 8 + 52 * ease, 0, Math.PI * 2);
+  ctx.stroke();
+  const n = 18;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2 + hash(i * 3.3) * 0.5;
+    const d = (12 + 46 * hash(i * 7.7 + 1)) * ease;
+    const tw = 0.6 + 0.4 * Math.sin(f * 30 + i * 1.7);
+    drawStar(e.x + Math.cos(a) * d, e.y + Math.sin(a) * d - 8 * f, 1.2 + 3.2 * fade, i % 2 ? PAP_GOLD : '#dcb4ff', fade * tw);
+  }
+  ctx.restore();
 }
 
 function isOpenFloorCode(code) { return code === T_FLOOR || code === T_OPEN || code === T_ARENA; }
@@ -2766,6 +3329,35 @@ function drawStunnedZombie(z, r, col, t) {
   ctx.restore();
 }
 
+// WO8 FIX-B (playtest #8): upgraded wonder-weapon effect colours. Porter's X2 Ray Gun: red-pink
+// bolt, muzzle and splash; Zeus Cannon: gold-white shockwave. Effects carry no weapon, so an
+// explosion / shockwave is latched as upgraded (e.pap) on its first draw when its radius / range
+// matches the upgraded def (weapons.UPGRADES, checked with isUpgraded) and not the base def.
+const RAY_FX = { trail: 'rgba(80,255,110,0.35)', glow: '#50ff6e', core: '#b8ffc4' };
+const PAP_FX = {
+  ray: { trail: 'rgba(255,70,120,0.4)', glow: '#ff3d7f', core: '#ffc4d8', splash: '#ff4d88' },
+  zeus: { arcs: [[1, 7, '#fffbe8', 0.9], [0.8, 5, '#ffcc33', 0.7], [0.58, 3, '#fff0b0', 0.45]], fill: '#ffe9a0', dust: '#e8c060' },
+};
+function upgradedFxDef(id) {
+  try {
+    const U = weaponsMod.UPGRADES;
+    const d = U && U[id];
+    return d && isUpgradedWeapon({ def: d }) ? d : null;
+  } catch (_) { return null; }
+}
+function latchPapFx(e, id, pick) {
+  if (e.pap !== undefined) return e.pap;
+  let up = false;
+  try {
+    const ud = upgradedFxDef(id), bd = weaponDef(id);
+    const uv = ud ? pick(ud) : NaN, bv = bd ? pick(bd) : NaN;
+    const v = pick(e);
+    up = Number.isFinite(v) && Number.isFinite(uv) && Math.abs(v - uv) < 0.5 && !(Math.abs(v - bv) < 0.5);
+  } catch (_) { up = false; }
+  e.pap = up;
+  return up;
+}
+
 function drawBullets(state) {
   const bs = state.bullets;
   if (!Array.isArray(bs) || !bs.length) return;
@@ -2775,15 +3367,17 @@ function drawBullets(state) {
     if (!b) continue;
     if (b.kind === 'acid' || (b.def && b.def.kind === 'acid')) { drawAcidGlob(b, b.x, b.y, 0); continue; }
     const vx = b.vx || 0, vy = b.vy || 0;
-    ctx.strokeStyle = 'rgba(80,255,110,0.35)';
+    // WO8 FIX-B (playtest #8): Porter's X2 Ray Gun bolts are red-pink.
+    const pc = isUpgradedWeapon(b) ? PAP_FX.ray : RAY_FX;
+    ctx.strokeStyle = pc.trail;
     ctx.lineWidth = 6;
     ctx.beginPath();
     ctx.moveTo(b.x - vx * 0.05, b.y - vy * 0.05);
     ctx.lineTo(b.x, b.y);
     ctx.stroke();
-    ctx.shadowColor = '#50ff6e';
+    ctx.shadowColor = pc.glow;
     ctx.shadowBlur = 14;
-    ctx.fillStyle = '#b8ffc4';
+    ctx.fillStyle = pc.core;
     ctx.beginPath();
     ctx.arc(b.x, b.y, 5, 0, Math.PI * 2);
     ctx.fill();
@@ -3066,16 +3660,21 @@ function getTorsoGun(torso, gun, pose, offX, offY) {
 // (a module scratch object, so no per-frame allocation). Returns null when nothing to draw.
 // x, y are snapped: the player origin to whole world px, the recoil/lean offset to whole
 // sprite px, which is exactly where drawCrisp puts the sprite (so the muzzle matches the art).
-const poseScratch = { entry: null, x: 0, y: 0, angle: 0, qa: 0, ox: 0, oy: 0, rx: 0, ry: 0 };
+const poseScratch = { entry: null, x: 0, y: 0, angle: 0, qa: 0, ox: 0, oy: 0, rx: 0, ry: 0, pap: false };
 function resolveTorsoPose(state, out) {
   const p = state && state.player;
   const S = soldierMod.SOLDIER;
   if (!p || p.down || p.downT > 0 || !S || !S.torso) return null;
   const w = activeWeapon(p);
   const def = activeWeaponDef(w);
-  const gun = gunEntryFor(def);
+  // WO8: an upgraded gun keeps its base art (looked up from the base def), recoloured with the
+  // Pack-a-Punch camo; the tinted entry is cached per base sprite (wall-buy chalk art untouched).
+  const up = isUpgradedWeapon(w);
+  // WO8 FIX-B (review L2): empty hands (the only gun is in the Pack-a-Punch) -> no gun layer and
+  // the free-hand 'onehand' torso, instead of gunSpriteFor(null)'s default gun art.
+  const gun = !w ? null : up ? papGunEntry(gunEntryFor(baseDefOf(w, def))) : gunEntryFor(def);
   const animPose = anim && (anim.gunPose || (anim.pose !== 'knife' ? anim.pose : null)); // WO7: 'knife' is not a gun pose
-  const pose = (gun && gun.pose) || animPose || 'twohand';
+  const pose = !w ? 'onehand' : (gun && gun.pose) || animPose || 'twohand';
   const T = S.torso;
   let torso = null;
   let offX = 0, offY = 0;
@@ -3130,6 +3729,7 @@ function resolveTorsoPose(state, out) {
   out.y = Math.round(p.y) + out.oy;
   out.angle = aim;
   out.qa = pixel.quantizeAngle(aim, spriteDirections());
+  out.pap = up && !kf;
   return out;
 }
 
@@ -3224,8 +3824,10 @@ function drawPlayer(state) {
     const ps = resolveTorsoPose(state, poseScratch);
     if (!ps) return;
     const e = ps.entry;
-    drawCrisp(e.sprite, p.x, p.y, ps.ox, ps.oy, ps.angle, e.ax, e.ay, scale, dirs);
     frameMuzzle = muzzleFromPose(ps, muzzleScratch);
+    // WO8: faint purple glow around an upgraded gun (under the sprite, between hand and muzzle).
+    if (ps.pap) drawPapGunGlow(ps, frameMuzzle, state.time || 0);
+    drawCrisp(e.sprite, p.x, p.y, ps.ox, ps.oy, ps.angle, e.ax, e.ay, scale, dirs);
     frameMuzzleRest.x = frameMuzzle.x - ps.rx;
     frameMuzzleRest.y = frameMuzzle.y - ps.ry;
   } catch (_) {
@@ -3364,7 +3966,9 @@ function nearPlayer(x, y) {
 // Effects
 // ---------------------------------------------------------------------------
 
+let fxState = null; // the state whose effects are being drawn (drawMuzzle reads the held gun)
 function drawEffectsOfType(state, type, view) {
+  fxState = state;
   const list = state.effects;
   if (!Array.isArray(list) || !list.length) return;
   for (let i = 0; i < list.length; i++) {
@@ -3377,6 +3981,7 @@ function drawEffectsOfType(state, type, view) {
       case 'explosion': drawExplosion(e, view); break;
       case 'shockwave': drawShockwave(e, view); break;
       case 'doorOpen': drawDoorOpen(e, view); break;
+      case 'papSparkle': drawPapSparkle(e, view); break;
       case 'bossDeath': drawBossDeath(e, view); break;
       case 'slash': drawSlash(e, view); break;
       case 'text': drawText(e, view); break;
@@ -3454,7 +4059,16 @@ function drawMuzzle(e, view) {
   ctx.lineTo(0, 4);
   ctx.closePath();
   ctx.fill();
-  ctx.fillStyle = e.color || 'rgba(255,200,80,0.6)';
+  let mc = e.color || 'rgba(255,200,80,0.6)';
+  if (snap && e.color && e.pap === undefined) {
+    // FIX-B (#8): a wonder-weapon flash at the player's muzzle takes the held gun's upgrade state.
+    const w = activeWeapon(fxState && fxState.player);
+    const d = w && (w.def || weaponDef(w.id));
+    e.pap = !!(d && (d.projectile || d.cone) && isUpgradedWeapon(w)) ? (d.cone ? 'zeus' : 'ray') : false;
+  }
+  if (e.pap === 'ray') mc = PAP_FX.ray.splash;
+  else if (e.pap === 'zeus') mc = '#ffd54a';
+  ctx.fillStyle = mc;
   ctx.globalAlpha = f * 0.6;
   ctx.beginPath();
   ctx.arc(2, 0, (e.size || 9) * 0.66, 0, Math.PI * 2);
@@ -3467,7 +4081,9 @@ function drawExplosion(e, view) {
   const R = Number.isFinite(e.radius) && e.radius > 0 ? e.radius : 90;
   if (!inView(view, e.x, e.y, R)) return;
   const f = lifeFrac(e);
-  const col = e.color || COLORS.powerupGlow;
+  const isRay = e.color && CFG.WEAPON_FX && e.color === CFG.WEAPON_FX.raygunColor;
+  const up = isRay && latchPapFx(e, 'raygun', (o) => (o.projectile ? o.projectile.splashRadius : o.radius));
+  const col = up ? PAP_FX.ray.splash : (e.color || COLORS.powerupGlow);
   ctx.save();
   ctx.globalAlpha = f * 0.45;
   ctx.fillStyle = col;
@@ -3509,6 +4125,8 @@ function drawShockwave(e, view) {
   const prog = 1 - f;               // 0 -> 1
   const R = reach * (1 - (1 - prog) * (1 - prog)); // ease-out, exactly the range at ttl 0
   if (R <= 1) return;
+  const up = latchPapFx(e, 'thundergun', (o) => (o.cone ? o.cone.range : o.range));
+  const arcs = up ? PAP_FX.zeus.arcs : SHOCK_ARCS;
   ctx.save();
   // Clip to the cone
   ctx.beginPath();
@@ -3518,7 +4136,7 @@ function drawShockwave(e, view) {
   ctx.clip();
   // Faint pressure fill behind the front
   ctx.globalAlpha = 0.18 * f;
-  ctx.fillStyle = '#bfefff';
+  ctx.fillStyle = up ? PAP_FX.zeus.fill : '#bfefff';
   ctx.beginPath();
   ctx.moveTo(x, y);
   ctx.arc(x, y, R, ang - half, ang + half);
@@ -3526,8 +4144,8 @@ function drawShockwave(e, view) {
   ctx.fill();
   // Expanding arcs (front is brightest)
   ctx.lineCap = 'round';
-  for (let i = 0; i < SHOCK_ARCS.length; i++) {
-    const arc = SHOCK_ARCS[i];
+  for (let i = 0; i < arcs.length; i++) {
+    const arc = arcs[i];
     const k = arc[0], lw = arc[1], col = arc[2], al = arc[3];
     const r = R * k;
     if (r <= 2) continue;
@@ -3540,7 +4158,7 @@ function drawShockwave(e, view) {
   }
   // Dust specks carried by the front
   const seed = Math.floor(e.x * 3.7 + e.y * 1.3);
-  ctx.fillStyle = '#b8a888';
+  ctx.fillStyle = up ? PAP_FX.zeus.dust : '#b8a888';
   for (let k = 0; k < 14; k++) {
     const a = ang + (hash(seed + k * 7) * 2 - 1) * half;
     const d = R * (0.35 + hash(seed + k * 11) * 0.65);

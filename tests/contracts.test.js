@@ -180,6 +180,9 @@ const CANONICAL_EVENTS = [
   'melee:hit',       // { zombieId, killed }                            weapons.js
   'boss:spit',       // { x, y }                                        zombie.js (acid telegraph start)
   'score:recorded',  // { rank, entry, isBestRound, isBestPoints }      main.js
+  // WO8 3 (purchase:made / purchase:denied also gain kind 'pap')
+  'pap:start',       // { weaponId, slot }                              shop.js
+  'pap:done',        // { weaponId }  (when the upgraded gun is taken)  shop.js
 ];
 
 test('3.2 events.js: exports', () => {
@@ -777,4 +780,48 @@ test('WO7 new exports', async () => {
   need(hud, 'hud', 'setScores', F);
   need(hud, 'hud', 'setGameOverSummary', F);
   assert.deepEqual(missing, [], `missing WO7 exports:\n  ${missing.join('\n  ')}`);
+});
+
+// ---------------------------------------------------------------------------------------------
+// WO8 (Pack-a-Punch)
+// ---------------------------------------------------------------------------------------------
+
+test('WO8 config: PAP block (Section 3)', () => {
+  assert.deepEqual(config.PAP, {
+    letter: 'A', cost: 500, ammoCost: 450, workSeconds: 3, damageMult: 2, magMult: 1.5, reserveMult: 1.5,
+    spreadMult: 0.8, penetrationBonus: 1, maxPenetration: 4, projectileMult: 1.5, coneKillMult: 1.25, coneRangeMult: 1.15, knockMult: 1.2,
+    ammoCostMult: 3.75, // WO8 Phase 4a (economy #5)
+  });
+});
+
+test('WO8 state.js: shop.pap and stats.papCount', () => {
+  const s = stateMod.createEmptyState(1);
+  assert.deepEqual(s.shop.pap, { state: 'idle', timer: 0, weapon: null, slot: -1, baseId: null });
+  assert.equal(s.stats.papCount, 0);
+  assert.deepEqual(s.shop.box, { state: 'idle', timer: 0, weaponId: null }, 'box unchanged');
+  assert.notEqual(stateMod.createEmptyState(1).shop.pap, s.shop.pap, 'fresh pap object per state');
+});
+
+// Exports added by Agents A and B in WO8 Phase 1 (Section 3). EXPECTED TO FAIL until they land.
+// Every import is guarded, so a module that fails to load is reported instead of thrown.
+test('WO8 new exports', async () => {
+  const missing = [];
+  const load = async (name) => {
+    try { return await import(`../src/${name}.js`); } catch (err) { missing.push(`${name}.js failed to import: ${err && err.message}`); return {}; }
+  };
+  const weapons = await load('weapons');
+  const map = await load('map');
+  const shop = await load('shop');
+  const need = (mod, label, name, kind) => {
+    if (kindOf(mod[name]) !== kind) missing.push(`${label}.${name} (${kind})`);
+  };
+  // weapons.js (A)
+  need(weapons, 'weapons', 'UPGRADES', OBJ);
+  for (const f of ['upgradeWeapon', 'isUpgraded', 'upgradedName', 'canUpgrade']) need(weapons, 'weapons', f, F);
+  // map.js (B)
+  need(map, 'map', 'TILE_PAP', 'number');
+  if (map.TILE_PAP !== undefined && map.TILE_PAP !== 11) missing.push('map.TILE_PAP === 11');
+  // shop.js (B)
+  for (const f of ['startPap', 'takePap', 'updatePap']) need(shop, 'shop', f, F);
+  assert.deepEqual(missing, [], `missing WO8 exports:\n  ${missing.join('\n  ')}`);
 });

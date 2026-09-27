@@ -428,3 +428,110 @@ Tunables are in `RENDER` in `src/config.js`: `flicker`, `buyPlateOverPlayerAlpha
   - Popup merge: +10/+5/+10/+5 shows as "+30".
   - `render()` took 0.23 ms per call with the boss, minions and 41 zombies (22 in view).
   - No console errors. `npm test` 511/511. `node --check` is clean.
+
+## WO8 (Agent D): Pack-a-Punch machine, camo on upgraded guns, sparkle
+- **Machine** (`paintPapMachine`, static layer, after the perk machines; guarded on `map.pap`, so a
+  map without one draws nothing). `T_PAP = 11` counts as solid (`isSolidCode`). The geometry is in
+  `papGeom(map)`, memoized per map, `map.pap` object and `map.version`. The front faces the first
+  open floor side (the same rule as perk machines), and the local frame has the front at +y.
+  - Layers: a purple wash plus a gold core on the floor in front, a drop shadow, a dark violet
+    cabinet with side panels, purple neon trim (shadowBlur), a gold marquee strip with bulbs, gold
+    corner caps, and an upright emblem (purple disc, gold rim, gold lightning bolt).
+  - Also: the feed slot (dark, with a purple inner line that is brighter while working, and gold
+    rollers), a status lamp (dim gold idle, lilac working, bright gold ready), and the steel tray
+    with a gold front edge.
+  - Plates: `paintWallBuyLabel` "PACK-A-PUNCH" / cost on every open floor side. The cost is
+    `map.pap.cost` if finite, else `PAP.cost`, else 500. They are painted with
+    `labelKind = 'buy'`, so the over-player re-blit uses the 35 % buy alpha.
+  - **Static key:** `papStateCode` (0 none, 1 idle, 2 working, 3 ready) comes from
+    `state.shop.pap.state` in `render()`. It is in the memo check and in the key (`:papN`), so
+    each state change repaints the layer once.
+- **Dynamic** (`drawPap`, after `drawBox`, only when the machine is within 110 px of the view):
+  - Additive glow sprites (pre-rendered 64 px radial canvases in purple and gold). Idle is a slow
+    breathing glow. Working is a strong 9 Hz pulse on the cabinet and slot. Ready adds a gold glow
+    on the tray.
+  - **Working:** the gun inside (`shop.pap.weapon`, base art) slides muzzle-first from the tray
+    into the slot over `PAP_SLIDE_TIME` 0.6 s (ease-in). It is clipped at the slot line so it
+    vanishes into the cabinet, and the slot flares gold as it goes in. After that, 12
+    deterministic gold, white and lilac sparks spray from the slot (additive, from time).
+  - Slide timing is tracked by render (`papAnim`: the weapon object plus `state.time` at the first
+    working frame), so it does not depend on the direction of `pap.timer`. It resets on
+    `game:restart`.
+  - **Ready:** the camo gun lies on the tray. It is horizontal for machines facing up or down and
+    points up for machines facing sideways, so it is never upside down. It bobs by ±1 sprite px,
+    with 3 twinkle stars. All drawing goes through `drawCrisp`, at the player's scale.
+- **`pap:done`** → a `papSparkle` effect (subscribed in `initRender`, so re-init is safe). It is
+  queued and placed at the tray point on flush (`placePapEffect`), and dropped when there is no
+  `map.pap`. It lasts 0.9 s: purple and gold glows, an expanding purple ring and 18 purple/gold
+  4-point stars flying out with ease-out and twinkle. It is drawn after `doorOpen`.
+- **Upgraded held gun.** `isUpgradedWeapon(w)` uses `weapons.isUpgraded` (guarded), else the
+  `w.upgraded` or `w.def.upgraded` flag.
+  - `resolveTorsoPose` looks the gun art up from the **base** def (`def.baseId` or `w.id`), then
+    swaps in `papGunEntry(gun)`: the same grip, muzzle and pose with the camo sprite. That goes into
+    the normal torso+gun composition cache, which is keyed by sprite identity.
+  - Wall-buy chalk art and the box are untouched.
+  - The knife torso has no gun, so no glow.
+  - **Camo** (`papSprite`, `pixel.tint`, cached in `tintCache` per sprite under key `'pap'`):
+    - Near-black `k` outlines are kept.
+    - Greys, steel and olive become a 5-step violet ramp by luminance, with 2-px diagonal stripes
+      (+1 / 0 / −1 tone) and sparse gold flecks (`(5x+3y) % 13 == 0`).
+    - Brown, tan and wood become a 4-step gold ramp, with a +1 stripe.
+    - Saturated energy colours stay (ray gun green, thundergun cyan, red, eye blue). The purple
+      accent `p` becomes gold.
+  - **Glow:** `drawPapGunGlow` draws one additive purple glow blit (radius ≈ 0.85 × hand-to-muzzle
+    distance, alpha 0.3 ± 0.08) centred 60 % of the way to the muzzle, before the torso sprite.
+- Render-local tunables: `PAP_SLIDE_TIME`, `PAP_SPARKLE_TTL`, and the `PAP_VIOLET` / `PAP_GOLDS`
+  ramps.
+- **Verified** on `localhost:8255/?debug=1`, L1 (machine at 51,32, facing up) with B's real
+  shop/map and A's real weapons. `updatePap` is not wired in main.js yet (INT), so I drove it by
+  hand with `modules.shop.startPap/updatePap/takePap`.
+  - Idle cabinet with plates. Working: the KN-44 half-way into the slot (clipped), then sparks.
+    Ready: "Warden's Wrath" camo on the tray.
+  - Take: the sparkle burst at (2060, 1285), and the held gun with camo and glow.
+  - Side-by-side base vs upgraded for MR6 (Nightingale), KN-44, KRM-262, Ray Gun (Porter's X2) and
+    Thundergun (Zeus Cannon). The outlines stay intact and the energy parts stay green and cyan.
+  - Cost with the boss + minions + 27 zombies crowded in view, the machine working and an upgraded
+    gun held: `render()` 0.25-0.9 ms per call (noisy while RAF runs), and `step(1/60)` 1.1 ms. No
+    console errors.
+  - `npm test` 538/538, and `node --check` is clean.
+
+### WO8 FIX-B (review L2, playtest #5-#8)
+- **Empty hands (L2).** `resolveTorsoPose` has no gun layer and uses pose `onehand` when
+  `activeWeapon(p)` is null. Before, `gunSpriteFor(null)` gave the default gun art. `getTorsoGun`
+  already handled a null gun, and the muzzle point falls back to the hand.
+- **One PaP plate (#5).** `paintPapMachine` draws one "PACK-A-PUNCH / cost" plate.
+  `papPlatePlacement` scores the 4 sides at 0 and +1 tile offset by what the plate rect covers,
+  sampled every 4 px:
+  - use tile (walkable 4-neighbour) or the cabinet ×100;
+  - diagonal walkable tile ×10;
+  - other walkable floor ×1;
+  - +200 for the far offset, +0.5 for a non-back side.
+
+  Result: L1 east, L2 west, L3 east, all on walls. `papPlateRect` mirrors `paintWallBuyLabel`'s layout.
+- **Working phase (#6).**
+  - `drawPapShake`: after the slide, the cabinet rect (plus the back extension) is re-blitted from
+    the static layer with a 1-2 px jitter from `hash(floor(t*30))`, drawn before the glows. It is
+    skipped under prefers-reduced-motion.
+  - Glows: a bigger breathing purple halo (48-62 px), and the slot alternates purple and gold at 3 Hz.
+  - Sparks: 20 thicker, longer sparks (lineWidth 2.5, 8 px), plus a 6-star burst every 0.5 s.
+  - A gold flash (`PAP_READY_FLASH` 0.35 s) marks the working->ready switch (`papAnim.readyAt`).
+- **Small-gun camo (#7).** `papSprite` treats sprites narrower than `PAP_SMALL_W` (14) as small:
+  the pistol art (8x6) and the default art (13x5). Band 0 of the 2-px diagonal stripes becomes gold
+  (`PAP_GOLDS[3]`, or `[2]` on dark pixels), and the other bands use violet ramp steps 2-4 only.
+- **Upgraded wonder-weapon FX (#8)** use the `PAP_FX` palette:
+  - Bullets: `isUpgradedWeapon(b)` (the bolt's def) selects the red-pink trail, glow and core.
+  - Explosion and shockwave effects carry no weapon, so `latchPapFx` sets `e.pap` on the first
+    draw. It is true when `e.radius` (or `e.range`) matches `weapons.UPGRADES.raygun.projectile.splashRadius`
+    (or `UPGRADES.thundergun.cone.range`), checked with `isUpgraded`, and not the base def's value.
+  - The explosion check applies only to ray-gun-coloured explosions.
+  - Porter's X2: splash `#ff4d88`. Zeus Cannon: gold-white arcs, fill and dust.
+  - The muzzle flash at the player takes the held gun's state: pink for Porter's, gold for Zeus.
+    `fxState` is set in `drawEffectsOfType`.
+- **Verified** in Chrome on port 8281:
+  - L1/L2/L3 plates are clear of the use tiles.
+  - L1 with only the MR6 in the machine: the soldier is empty-handed.
+  - The working machine visibly jitters and sparks.
+  - The MR6/RK5 camo is bright on the tray and in hand.
+  - A pink bolt and splash, and a gold cone. A base Ray Gun splash latches `pap: false`.
+  - `render()` with the machine working and 25 zombies: median 0.1 ms, max 0.9 ms. No console errors.
+  - `npm test` 552/552; `node --check` is clean.

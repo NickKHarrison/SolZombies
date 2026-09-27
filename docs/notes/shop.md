@@ -84,7 +84,9 @@ The text for each case:
 |------|--------|--------|
 | Wall gun not owned | `wallbuy` | `Press F to buy <Name> [cost]` |
 | Wall gun owned | `ammo` | `Press F to buy ammo [ammoCost]` |
-| Wall gun owned, reserve full | `ammo` | `<Name> ammo full`, with `blocked: true` |
+| Wall gun owned, reserve full | `ammo` | `<Name> ammo full`, with `blocked: true` (upgraded: `<Upgraded name> ammo full`) |
+| Wall gun owned and upgraded | `ammo` | `Press F to buy upgraded ammo [cost]` |
+| Wall gun inside the Pack-a-Punch | `wallbuy` | `<Name> is in the Pack-a-Punch`, `blocked: true`, `reason: 'inPap'` |
 | Box idle | `box` | `Press F for Mystery Box [95]`, or `[10] FIRE SALE` |
 | Box offering | `boxOffer` | `Press F to take <Name>` |
 | Box spinning | none | the prompt is `null` |
@@ -233,3 +235,61 @@ taken, and the barricade hold repairs and pays. The skip is based on
   - `perkPrompt` text and cost, `buyPerk` charge, `purchase:made`, `perk:bought` and `purchase:denied` all use it.
   - `syncPerkMachines` also sets `machine.price` to the next price and bumps `map.version` when it changes.
   - **Open item for render:** the machine plate still paints `def.cost`. It should use `m.price` when that is finite.
+
+
+## WO8 (Agent B): Pack-a-Punch state machine
+
+State: `state.shop.pap = { state: 'idle'|'working'|'ready', timer, weapon, slot, baseId }`
+(`initShop` resets it to idle, so new game / restart empties the machine; `level.js` (INT) owns the
+descent hand-back). Config read through the namespace with defaults (`PAP.cost` 500,
+`ammoCost` 450, `workSeconds` 3). weapons' WO8 exports are read through `weaponsMod` and guarded
+(`canUpgrade`, `upgradeWeapon`, `isUpgraded`, `upgradedName` all have local fallbacks).
+
+- `papBlockReason(state)` -> `'busy'` (not idle) | `'powerup'` (tempWeapon in hand, or
+  `canUpgrade` says so, e.g. Death Machine / no UPGRADES entry) | `'upgraded'` | `'none'` (active
+  slot empty) | `null`.
+- `papPrompt(state)` (also via `buildPrompt` for hit kind `'pap'`):
+  - idle: `{ kind: 'pap', weaponId, cost, canAfford, blocked, reason?, text }`, text
+    `Press F to Pack-a-Punch KN-44 [500]`, or blocked `<name> is already upgraded`,
+    `Cannot upgrade a power-up weapon`, `No weapon to upgrade`.
+  - working: kind `'pap'`, blocked, reason `'busy'`, `Machine busy`.
+  - ready: `{ kind: 'papTake', weaponId, cost: 0, canAfford: true, blocked: false,
+    text: 'Press F to take <upgraded name>' }`.
+- `startPap(state)`: refused (false, no charge, no event) when blocked, during a transition or while
+  down. Cannot afford -> `purchase:denied { kind: 'pap', id, cost, have }`. Otherwise spends, cancels
+  the gun's reload, empties its slot, `working` with `timer = workSeconds`, switches the player to
+  the next filled slot (`weapon:equipped`); with none left the player holds nothing
+  (`player.getActiveWeapon` -> null, `updatePlayer` returns before firing: no player.js change
+  needed, covered by a test). Emits `pap:start { weaponId, slot }` then
+  `purchase:made { kind: 'pap', id, cost }`.
+- `updatePap(state, dt)`: counts `timer` down while working; at <= 0 calls
+  `weapons.upgradeWeapon(w)` and goes `ready`. `ready` never times out. main.js should call it
+  every playing frame after `updateShop`.
+- `takePap(state)`: ready only, not while down / transition. Slot (`papReturnSlot`, exported):
+  original slot if it still exists and is empty; a slot holding the same id (bought again
+  meanwhile) is replaced so no duplicate exists; else first empty slot; else the active slot
+  (replacing that gun; also covers a lost Mule Kick slot). The gun becomes active
+  (`weapon:equipped` unless a tempWeapon is in hand), `stats.papCount++`, machine idle,
+  `pap:done { weaponId }`. Upgrades defensively if it was somehow not upgraded yet.
+- `updateShop`: F at a `'pap'` hit -> `takePap` when ready, `startPap` when idle, nothing while
+  working.
+- Wall ammo: `ammoPrice(w)` (exported) = `ammoCost(id, isUpgraded(w))`, so an upgraded held gun's
+  prompt is `Press F to buy ammo [450]` and `buyAmmo` charges 450.
+- Box: the roll excludes the gun inside the machine as well as the held ones.
+- Tests (`tests/shop.test.js`, "WO8 ..."): full flow + events, empty-hands (no fire), slot rules
+  (refilled slot, all full, duplicate, Mule Kick slot lost), blocked cases (Death Machine, none,
+  cannot afford, down, transition), box exclusion, updateShop routing + 450 ammo.
+
+## WO8 Phase 4a (fixer)
+- Mega door: the prompt and `buyMegaDoor` use the door's own `megaDoor.cost` (set per level by
+  `level.startLevel`: 250 / 500 / 750 / 1000 / ...), falling back to `DOORS.megaCost`.
+- Upgraded wall ammo now costs `weapons.ammoCost(id, true)` = `min(450, round(3.75 x base))`
+  (KN-44 281, Peacekeeper 450); the prompt shows it. Tests updated / added.
+
+## WO8 FIX-A (QA review L1 / L3, playtest #3)
+- L1: a gun inside the Pack-a-Punch (working or ready) counts as owned at its wall. The prompt is
+  blocked ("<Name> is in the Pack-a-Punch", `reason: 'inPap'`) and `buyWallWeapon` refuses with
+  no charge and no event. Once taken, the wall sells (upgraded) ammo as usual.
+- L3 / playtest #3: for an upgraded gun the ammo prompts read "Press F to buy upgraded ammo [281]"
+  and "<Upgraded name> ammo full" (`owned.def.name`). The touch label follows (main.js strips
+  "Press F to").

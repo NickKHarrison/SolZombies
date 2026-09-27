@@ -11,7 +11,8 @@
 // WO7 3.4 (Agent I): six perk machines replace wall tiles (letters J Q C N U K, see map.js TILE_PERK):
 //   Q hub (24,27), J corridor (41,10), C courtyard (8,16), N bunker (5,13), U armory (31,29),
 //   K vault (57,34); each faces one zone's floor, >= 6 tiles (Manhattan) from every wall buy.
-// Apart from those perk tiles, everything outside cols 38-58 / rows 16-37 is byte-identical to WO4. See docs/notes/levels.md.
+// WO8 1.1 (Agent C): Pack-a-Punch machine A (map.js TILE_PAP) on the vault pillar's NW corner (51,32).
+// Apart from those perk tiles and A, everything outside cols 38-58 / rows 16-37 is byte-identical to WO4. See docs/notes/levels.md.
 // This file must NOT import anything (map.js imports the level registry; avoid a load-time cycle).
 
 export const LEVEL1 = {
@@ -50,7 +51,7 @@ export const LEVEL1 = {
     '###..............##############U######9#########.........###', // 29
     '###...##....##...###.........................###.........WS#', // 30
     '###...##....##...###.........................###.........###', // 31
-    '###................G.......##.......##.........H...###...###', // 32
+    '###................G.......##.......##.........H...A##...###', // 32
     '###................G.......##.......##.........H...###...###', // 33
     '##4................G...........................H.........K##', // 34
     '###..............###.........................###.........###', // 35

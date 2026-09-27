@@ -131,6 +131,7 @@ export function normalizeEntry(e) {
     level: Math.max(1, count(o.level, 1)),
     bosses: count(o.bosses),
     timeSec: count(o.timeSec),
+    pap: count(o.pap), // WO8: Pack-a-Punch upgrades this run (old records without it -> 0)
     perks: Array.isArray(o.perks)
       ? o.perks.filter((p) => typeof p === 'string' && p.length > 0).slice(0, MAX_PERKS).map((p) => p.slice(0, MAX_STR))
       : [],
@@ -230,7 +231,7 @@ export function recordRun(stats, extra = {}, storage = defaultStorage) {
   const x = extra && typeof extra === 'object' ? extra : {};
   const entry = normalizeEntry({
     round: s.roundReached, points: s.pointsEarned, kills: s.kills, level: s.levelReached,
-    bosses: s.bossesKilled, timeSec: s.timeSurvived, weapon: s.bestWeaponId,
+    bosses: s.bossesKilled, timeSec: s.timeSurvived, pap: s.papCount, weapon: s.bestWeaponId,
     date: new Date().toISOString(),
     ...x,
   });

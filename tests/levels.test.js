@@ -3,6 +3,8 @@
 // (as in tests/map.test.js) plus the WO5 arena rules on every level in the registry.
 // WO7 3.4 (Agent I): perk machines (J Q C N U K, wall tiles) parsed here independently of map.js;
 // perk placement rules checked on every level; level 3 LABORATORY layout checks.
+// WO8 1.1 (Agent C): one Pack-a-Punch machine 'A' (wall tile) per level; placement rules checked
+// on every level (deepest zone behind H, clear of the arena, >= 6 from wall buys / perks).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -17,7 +19,8 @@ const COLS = 60, ROWS = 40;
 const DOOR_LETTERS = ['D', 'E', 'F', 'G', 'H'];
 // WO7 1.2: perk machine letters -> perk ids (config PERKS.list letters).
 const PERK_LETTERS = { J: 'jugg', Q: 'revive', C: 'speed', N: 'dtap', U: 'stamin', K: 'mule' };
-const LEGEND = new Set(['#', '.', 'P', 'W', 'S', 'O', 'B', 'M', 'Z', 'X', 'T', ...DOOR_LETTERS, ...Object.keys(PERK_LETTERS)]);
+const PAP_LETTER = 'A'; // WO8 1.1: Pack-a-Punch machine (map.js TILE_PAP)
+const LEGEND = new Set(['#', '.', 'P', 'W', 'S', 'O', 'B', 'M', 'Z', 'X', 'T', PAP_LETTER, ...DOOR_LETTERS, ...Object.keys(PERK_LETTERS)]);
 const N4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 // Every weapon id a level may put on a wall (WO4 guns + WO5 3.4 new guns).
 const KNOWN_WEAPONS = new Set(['sheiva', 'rk5', 'krm262', 'kuda', 'vmp', 'vesper', 'kn44', 'hvk30',
@@ -97,6 +100,7 @@ function parseLevel(def) {
     boss: find((c) => c === 'Z'),
     minions: find((c) => c === 'X'),
     perks: find((c) => c in PERK_LETTERS).map((t) => ({ ...t, perkId: PERK_LETTERS[t.ch] })),
+    paps: find((c) => c === PAP_LETTER), // WO8
   };
 }
 
@@ -380,8 +384,8 @@ function validateArena(def) {
   // FIX-1 (QA review L1): no interactable (wall buy, box, window/barricade, door D..H) within
   // 2 tiles (Chebyshev) of any arena tile, so none can be used through the arena wall
   // (PLAYER.interactRange 64 < 2 tiles of wall at TILE 40).
-  // WO7 3.4: perk machines are interactables too.
-  const inter = [...L.buys, ...L.boxes, ...L.windows, ...L.perks, ...L.doors.flatMap((dr) => dr.tiles)];
+  // WO7 3.4: perk machines are interactables too. WO8: so is the Pack-a-Punch machine.
+  const inter = [...L.buys, ...L.boxes, ...L.windows, ...L.perks, ...L.paps, ...L.doors.flatMap((dr) => dr.tiles)];
   for (const it of inter) {
     let dmin = Infinity;
     for (const t of tiles) dmin = Math.min(dmin, Math.max(Math.abs(t.x - it.x), Math.abs(t.y - it.y)));
@@ -438,6 +442,52 @@ function validatePerks(def, expected) {
   if (expected) assert.deepEqual(step, expected, `${id}: perk zones per 3.4`);
   return L;
 }
+
+// ---- WO8 1.1 Pack-a-Punch machine ---------------------------------------------------------
+
+// Exactly one 'A' per level: a wall tile facing floor of the deepest zone only (behind H, the zone
+// that also holds the mega door), reachable with all doors open, not reachable before H, > 2 tiles
+// (Chebyshev, as the FIX-1 interactable rule) from every arena tile, >= 6 (Manhattan) from every
+// wall buy and perk machine.
+function validatePap(def) {
+  const L = parseLevel(def);
+  const id = def.id;
+  assert.ok(!L.buyKeys.has(PAP_LETTER), `${id}: 'A' used as a wall-buy key`);
+  assert.equal(L.paps.length, 1, `${id}: exactly one Pack-a-Punch machine`);
+  const p = L.paps[0];
+  const tag = `${id}: Pack-a-Punch at ${p.x},${p.y}`;
+  const Z = zones(L);
+  const nb = N4.map(([dx, dy]) => ({ x: p.x + dx, y: p.y + dy, c: L.at(p.x + dx, p.y + dy) }));
+  const floor = nb.filter((n) => FLOORISH.has(n.c));
+  assert.ok(floor.length >= 1, `${tag}: faces floor`);
+  for (const n of nb) assert.ok(FLOORISH.has(n.c) || n.c === '#', `${tag}: next to '${n.c}'`);
+  const fz = new Set(floor.map((n) => Z.comp[key(n.x, n.y)]));
+  assert.equal(fz.size, 1, `${tag}: faces one zone only`);
+  const [zone] = fz;
+  // the deepest zone: the one M joins to (besides the arena) and that needs H
+  const arenaZone = Z.comp[key(L.boss[0].x, L.boss[0].y)];
+  assert.notEqual(zone, arenaZone, `${tag}: inside the arena`);
+  assert.ok(neighbourZones(Z, L.mega).has(zone), `${tag}: not in the mega door's zone (deepest)`);
+  assert.ok(touches(playerBfs(L, DOOR_LETTERS), p), `${tag}: reachable with all doors open`);
+  assert.equal(openingStep(L, p), DOOR_LETTERS.length, `${tag}: not behind door H (deepest zone)`);
+  const dA = bfs([L.boss[0]], walkFn(L, new Set()));
+  for (let k = 0; k < dA.length; k++) if (dA[k] >= 0) {
+    const ax = k % COLS, ay = Math.floor(k / COLS);
+    assert.ok(Math.max(Math.abs(ax - p.x), Math.abs(ay - p.y)) > 2, `${tag}: within 2 tiles of the arena`);
+  }
+  for (const b of L.buys) {
+    const md = Math.abs(b.x - p.x) + Math.abs(b.y - p.y);
+    assert.ok(md >= 6, `${tag}: only ${md} tiles from wall buy ${b.weaponId}`);
+  }
+  for (const q of L.perks) {
+    const md = Math.abs(q.x - p.x) + Math.abs(q.y - p.y);
+    assert.ok(md >= 6, `${tag}: only ${md} tiles from perk machine ${q.perkId}`);
+  }
+  return p;
+}
+
+// WO8 placements (docs/notes/levels.md): vault pillar, sanctum altar, reactor room NE corner.
+const PAP_PLAN = { bunker: [51, 32], catacombs: [38, 31], lab: [56, 11] };
 
 // ---- tests ----------------------------------------------------------------------------------
 
@@ -498,7 +548,8 @@ test('bunker: WO4 wall buys unchanged; edit confined to the arena/vault block (+
   for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
     if (LEVEL1.ascii[y][x] in PERK_LETTERS) assert.equal(WO4_ASCII[y][x], '#', `perk at ${x},${y} replaced a wall`);
   }
-  const plain = LEVEL1.ascii.map((r) => r.replace(/[JQCNUK]/g, '#'));
+  // WO8: the Pack-a-Punch machine (a vault pillar tile) is turned back into wall too
+  const plain = LEVEL1.ascii.map((r) => r.replace(/[JQCNUKA]/g, '#'));
   const changed = [];
   for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
     if (plain[y][x] !== WO4_ASCII[y][x]) changed.push([x, y]);
@@ -550,6 +601,38 @@ test('the perk checks catch broken placements', () => {
   assert.throws(() => validatePerks(swap(LEVEL2, (r, y) => (y === 11 ? put(r, 22, '#') : y === 20 ? put(r, 19, 'Q') : r))), /one zone only/);
   // named zones: L1 Stamin-Up and Double Tap swapped
   assert.throws(() => validatePerks(swap(LEVEL1, (r) => r.replace(/[NU]/g, (c) => (c === 'N' ? 'U' : 'N'))), PERK_PLAN.bunker), /perk zones/);
+});
+
+for (const def of LEVELS) {
+  test(`${def.id}: WO8 Pack-a-Punch machine (one A, deepest zone, clear of arena, wall buys and perks)`, () => {
+    const p = validatePap(def);
+    assert.deepEqual([p.x, p.y], PAP_PLAN[def.id], `${def.id}: PaP position per docs/notes/levels.md`);
+  });
+}
+
+test('the Pack-a-Punch checks catch broken placements', () => {
+  const swap = (def, fn) => ({ ...def, ascii: def.ascii.map((r, y) => fn(r, y)) });
+  const put = (r, x, ch) => r.slice(0, x) + ch + r.slice(x + 1);
+  // missing
+  assert.throws(() => validatePap(swap(LEVEL1, (r) => r.replace('A', '#'))), /exactly one/);
+  // two machines (second on the L1 vault's west wall, 47,30)
+  assert.throws(() => validatePap(swap(LEVEL1, (r, y) => (y === 30 ? put(r, 47, 'A') : r))), /exactly one/);
+  // in the start zone: L1 hub south wall (27,27) instead of the vault
+  assert.throws(() => validatePap(swap(LEVEL1, (r, y) => (y === 27 ? put(r, 27, 'A') : r.replace('A', '#')))), /mega door|door H/);
+  // behind G, not H: L1 armory south wall (28,37)
+  assert.throws(() => validatePap(swap(LEVEL1, (r, y) => (y === 37 ? put(r, 28, 'A') : r.replace('A', '#')))), /mega door|door H/);
+  // too close to a wall buy: L1 vault south wall (50,37), 2 from ICR-1 (52,37)
+  assert.throws(() => validatePap(swap(LEVEL1, (r, y) => (y === 37 ? put(r, 50, 'A') : r.replace('A', '#')))), /wall buy/);
+  // too close to a perk: L1 vault east wall (57,36), 2 from Mule Kick (57,34), 6 from ICR-1
+  assert.throws(() => validatePap(swap(LEVEL1, (r, y) => (y === 36 ? put(r, 57, 'A') : r.replace('A', '#')))), /perk machine/);
+  // next to the arena: L1 vault west wall (47,29), 2 rows below the arena floor (47,27)
+  assert.throws(() => validatePap(swap(LEVEL1, (r, y) => (y === 29 ? put(r, 47, 'A') : r.replace('A', '#')))), /arena/);
+  // in a wall between two zones: L2 chapel octagon (19,20), crypts one side, chapel the other
+  assert.throws(() => validatePap(swap(LEVEL2, (r, y) => (y === 20 ? put(r, 19, 'A') : r.replace('A', '#')))), /one zone only/);
+  // not facing floor at all (buried in rock)
+  assert.throws(() => validatePap(swap(LEVEL3, (r, y) => (y === 38 ? put(r, 50, 'A') : r.replace('A', '#')))), /faces floor/);
+  // 'A' as a wall-buy key
+  assert.throws(() => validatePap({ ...LEVEL2, wallbuys: { ...LEVEL2.wallbuys, A: 'kn44' } }), /wall-buy key/);
 });
 
 test('lab: new layout; tier-3 guns on the walls, Gorgon + Drakon deepest, cheap gun in the lobby', () => {

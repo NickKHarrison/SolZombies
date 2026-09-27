@@ -887,3 +887,80 @@ test('WO7 nearestInteractable: perk kind, range edge, sold-out still reported, t
   hit = nearestInteractable(tie2, (tie2.doors[0].x + TILE + pm2.x) / 2, pm2.y + TILE / 2, PLAYER.interactRange);
   assert.equal(hit.kind, 'perk');
 });
+
+// ---------------- WO8: Pack-a-Punch machine ----------------
+
+const PAP_FIXTURE = [
+  '#########',
+  '#P......#',
+  '#...A...#',
+  '#.......#',
+  '#########',
+];
+
+test('WO8 TILE_PAP = 11; A parses to map.pap (rect + centre), null without one', () => {
+  assert.equal(mapNs.TILE_PAP, 11);
+  const m = loadMap(PAP_FIXTURE);
+  const p = m.pap;
+  assert.ok(p);
+  assert.deepEqual([p.tx, p.ty, p.x, p.y, p.w, p.h], [4, 2, 4 * TILE, 2 * TILE, TILE, TILE]);
+  assert.deepEqual([p.cx, p.cy], [4.5 * TILE, 2.5 * TILE]);
+  assert.equal(code(m, 4, 2), mapNs.TILE_PAP);
+  assert.equal(m.wallBuys.length, 0); assert.equal(m.perkMachines.length, 0);
+  assert.equal(loadMap(['###', '#P#', '###']).pap, null);
+  for (const def of LEVELS) assert.ok(loadMap(def).pap === null || typeof loadMap(def).pap === 'object');
+});
+
+test('WO8 more than one A throws; A as a wall-buy key throws', () => {
+  assert.throws(() => loadMap(['######', '#PA.A#', '######']), /more than one Pack-a-Punch/);
+  assert.throws(() => loadMap({ id: 'z', ascii: ['####', '#PA#', '####'], wallbuys: { A: 'sheiva' } }), /Pack-a-Punch machine and a wall buy/);
+});
+
+test('WO8 Pack-a-Punch blocks movers, rays and zombie pathing', () => {
+  const m = loadMap(PAP_FIXTURE);
+  const p = m.pap;
+  assert.equal(isWalkable(m, p.tx, p.ty, false), false);
+  assert.equal(isWalkable(m, p.tx, p.ty, true), false);
+  const c = tileToWorld(1, 2);
+  const d = raycastWalls(m, c.x, c.y, 1, 0);
+  assert.ok(Math.abs(d - (p.x - c.x)) < 1e-6, `ray distance ${d}`);
+  for (const fz of [false, true]) {
+    const r = resolveCircle(m, p.x - 5, p.y + TILE / 2, 14, fz);
+    assert.ok(r.x <= p.x - 14 + 1e-6, `pushed x ${r.x}`);
+  }
+  const t = tileToWorld(1, 1);
+  const flow = buildFlowField(m, t.x, t.y);
+  const mc = tileToWorld(p.tx, p.ty);
+  assert.ok(!(distanceAt(flow, mc.x, mc.y) >= 0) || distanceAt(flow, mc.x, mc.y) === Infinity);
+});
+
+test('WO8 Pack-a-Punch is solid for the active-spawn search and the arena flood', () => {
+  // the only way to the open spawn O runs through A
+  const m = loadMap(['#######', '#P.A.O#', '#######']);
+  assert.equal(m.spawnPoints.length, 1);
+  assert.equal(isSpawnActive(m, m.spawnPoints[0].id), false);
+  const m2 = loadMap(['#######', '#P...O#', '#######']);
+  assert.equal(isSpawnActive(m2, m2.spawnPoints[0].id), true);
+  // arena: floor behind A is not part of Z's arena
+  const a = loadMap(['########', '#P#Z.A.#', '########']);
+  assert.equal(inArena(a, tileToWorld(4, 1).x, tileToWorld(4, 1).y), true);
+  assert.equal(inArena(a, tileToWorld(6, 1).x, tileToWorld(6, 1).y), false);
+  assert.equal(inArena(a, tileToWorld(5, 1).x, tileToWorld(5, 1).y), false);
+});
+
+test('WO8 nearestInteractable: pap kind, range edge, tie order (after perk, before door)', () => {
+  const m = loadMap(PAP_FIXTURE);
+  const p = m.pap;
+  let hit = nearestInteractable(m, p.x + TILE / 2, p.y + TILE + 10, PLAYER.interactRange);
+  assert.equal(hit.kind, 'pap'); assert.equal(hit.ref, p);
+  assert.ok(Math.abs(hit.dist - 10) < 1e-9);
+  assert.equal(nearestInteractable(m, p.x + TILE / 2, p.y + TILE + 15, 15).kind, 'pap');
+  assert.equal(nearestInteractable(m, p.x + TILE / 2, p.y + TILE + 15.01, 15), null);
+  // perk beats pap on a tie; pap beats a door on a tie
+  const t1 = loadMap(['#####', '#J.A#', '#.P.#', '#####']);
+  hit = nearestInteractable(t1, (t1.perkMachines[0].x + TILE + t1.pap.x) / 2, t1.pap.y + TILE / 2, PLAYER.interactRange);
+  assert.equal(hit.kind, 'perk');
+  const t2 = loadMap(['#####', '#D.A#', '#.P.#', '#####']);
+  hit = nearestInteractable(t2, (t2.doors[0].x + TILE + t2.pap.x) / 2, t2.pap.y + TILE / 2, PLAYER.interactRange);
+  assert.equal(hit.kind, 'pap');
+});

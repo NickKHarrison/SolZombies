@@ -116,7 +116,7 @@ export function tickBox(state, dt, weights = DEFAULT_BOX_WEIGHTS) {
       box.state = 'offering';
       box.timer = MYSTERY_BOX.offerSeconds;
       box.cycleT = 0;
-      box.weaponId = pickBoxWeapon(state.rng, heldWeaponIds(state.player), weights);
+      box.weaponId = pickBoxWeapon(state.rng, heldIdsWithPap(state), weights);
       events.emit('box:opened', { weaponId: box.weaponId });
     } else if (box.cycleT >= BOX_CYCLE_INTERVAL) {
       box.cycleT = 0;
@@ -140,11 +140,22 @@ export function buildPrompt(state, hit) {
     const id = hit.ref.weaponId;
     const owned = ownedWeapon(state.player, id);
     if (owned) {
-      const cost = ammoCost(id);
+      const cost = ammoPrice(owned); // WO8: PAP.ammoCost for an upgraded gun
       const full = reserveFull(owned);
+      // WO8 FIX-A (QA review L3, playtest #3): an upgraded gun shows its own name and says the
+      // price is for upgraded ammo.
+      const up = isUpgradedW(owned);
+      const name = (up && owned.def && owned.def.name) || weaponName(id);
       return {
         kind: 'ammo', weaponId: id, cost, canAfford: pts >= cost, blocked: full,
-        text: full ? `${weaponName(id)} ammo full` : `Press F to buy ammo [${cost}]`,
+        text: full ? `${name} ammo full` : `Press F to buy ${up ? 'upgraded ' : ''}ammo [${cost}]`,
+      };
+    }
+    // WO8 FIX-A (QA review L1): the gun inside the Pack-a-Punch counts as owned -> blocked.
+    if (inPap(state, id)) {
+      return {
+        kind: 'wallbuy', weaponId: id, cost: weaponCost(id), canAfford: false, blocked: true,
+        reason: 'inPap', text: `${weaponName(id)} is in the Pack-a-Punch`,
       };
     }
     const cost = weaponCost(id);
@@ -182,7 +193,7 @@ export function buildPrompt(state, hit) {
   if (hit.kind === 'megadoor') {
     const d = hit.ref;
     if (!d || d.open || d.sealed) return null;
-    const cost = DOORS.megaCost;
+    const cost = megaCostOf(d); // WO8 Phase 4a (economy #1): the door's own per-level price
     const blocked = !allDoorsOpenFor(state.map);
     return {
       kind: 'megadoor', weaponId: null, doorId: d.id != null ? d.id : 'mega', cost,
@@ -200,6 +211,9 @@ export function buildPrompt(state, hit) {
   }
   if (hit.kind === 'perk') {
     return perkPrompt(state, hit.ref);
+  }
+  if (hit.kind === 'pap') {
+    return papPrompt(state);
   }
   if (hit.kind === 'barricade') {
     const b = hit.ref;
@@ -221,6 +235,7 @@ export function initShop(state) {
   if (!state.shop) state.shop = {};
   state.shop.prompt = null;
   state.shop.box = { state: 'idle', timer: 0, weaponId: null, cycleT: 0 };
+  state.shop.pap = idlePap(); // WO8: new game / restart empties the machine
   if (state.player) state.player.repairTimer = 0;
 }
 
@@ -233,6 +248,7 @@ export function buyWallWeapon(state, wallBuy) {
   if (!player || !wallBuy) return false;
   const id = wallBuy.weaponId;
   if (ownedWeapon(player, id)) return buyAmmo(state, id);
+  if (inPap(state, id)) return false; // WO8 FIX-A (L1): refused, no charge, no event
   const cost = weaponCost(id);
   if (cost == null) return false;
   const have = player.points;
@@ -250,7 +266,7 @@ export function buyAmmo(state, weaponId) {
   const w = ownedWeapon(player, weaponId);
   if (!w) return false;
   if (reserveFull(w)) return false; // refused, no charge, no event
-  const cost = ammoCost(weaponId);
+  const cost = ammoPrice(w); // WO8: PAP.ammoCost for an upgraded gun
   const have = player.points;
   if (have < cost || !spendPoints(state, cost)) {
     events.emit('purchase:denied', { kind: 'ammo', cost, have });
@@ -365,10 +381,15 @@ function openMegaDoorFn(map) {
 
 /**
  * Buys the mega door: requires every normal door open and the mega door neither open nor sealed.
- * spendPoints(DOORS.megaCost), then map.openMegaDoor(state.map). Emits purchase:made
+ * spendPoints(megaDoor.cost, fallback DOORS.megaCost), then map.openMegaDoor(state.map). Emits purchase:made
  * {kind:'megadoor', id:'mega', cost} or purchase:denied {kind:'megadoor', cost, have}.
  * While blocked (a normal door still closed) it returns false with no charge and no event.
  */
+// WO8 Phase 4a (economy #1): level.startLevel sets megaDoor.cost per level; fallback DOORS.megaCost.
+function megaCostOf(d) {
+  return d && Number.isFinite(d.cost) ? d.cost : DOORS.megaCost;
+}
+
 export function buyMegaDoor(state) {
   const player = state && state.player;
   const map = state && state.map;
@@ -377,7 +398,7 @@ export function buyMegaDoor(state) {
   if (!allDoorsOpenFor(map)) return false;
   const open = openMegaDoorFn(map);
   if (!open) return false;
-  const cost = DOORS.megaCost;
+  const cost = megaCostOf(d); // WO8 Phase 4a (economy #1)
   const have = player.points;
   if (have < cost || !spendPoints(state, cost)) {
     events.emit('purchase:denied', { kind: 'megadoor', cost, have });
@@ -462,6 +483,10 @@ export function updateShop(state, input, dt) {
     if (state.transition) { shop.prompt = null; return; }
   } else if (hit.kind === 'perk') {
     buyPerk(state, hit.ref);
+  } else if (hit.kind === 'pap') {
+    const ps = papOf(state).state;
+    if (ps === 'ready') takePap(state);
+    else if (ps === 'idle') startPap(state);
   } else if (hit.kind === 'box') {
     if (shop.box.state === 'idle') spinBox(state);
     else if (shop.box.state === 'offering') takeBoxWeapon(state);
@@ -620,5 +645,245 @@ export function buyPerk(state, machine) {
   }
   events.emit('purchase:made', { kind: 'perk', id: perkId, cost });
   events.emit('perk:bought', { perkId, cost });
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// WO8 1.1 / 3: Pack-a-Punch machine (state.shop.pap)
+// ---------------------------------------------------------------------------
+
+export const PAP_BUSY_TEXT = 'Machine busy';
+export const PAP_POWERUP_TEXT = 'Cannot upgrade a power-up weapon';
+export const PAP_NO_WEAPON_TEXT = 'No weapon to upgrade';
+
+function papCfg() {
+  const c = config.PAP || {};
+  return {
+    cost: Number.isFinite(c.cost) ? c.cost : 500,
+    ammoCost: Number.isFinite(c.ammoCost) ? c.ammoCost : 450,
+    workSeconds: Number.isFinite(c.workSeconds) ? c.workSeconds : 3,
+  };
+}
+
+function idlePap() {
+  return { state: 'idle', timer: 0, weapon: null, slot: -1, baseId: null };
+}
+
+// state.shop.pap, created (idle) when missing.
+function papOf(state) {
+  if (!state.shop) state.shop = {};
+  const p = state.shop.pap;
+  if (!p || typeof p !== 'object' || !p.state) state.shop.pap = idlePap();
+  return state.shop.pap;
+}
+
+function resetPap(pap) {
+  pap.state = 'idle';
+  pap.timer = 0;
+  pap.weapon = null;
+  pap.slot = -1;
+  pap.baseId = null;
+}
+
+// True when the gun with this id is inside the Pack-a-Punch machine (working or ready).
+function inPap(state, id) {
+  const pap = state && state.shop && state.shop.pap;
+  return !!(pap && pap.weapon && pap.weapon.id === id);
+}
+
+// Held ids plus the gun inside the machine, so the box never offers a gun the player owns (1.2).
+function heldIdsWithPap(state) {
+  const ids = heldWeaponIds(state.player);
+  const pap = state.shop && state.shop.pap;
+  if (pap && pap.weapon && pap.weapon.id && !ids.includes(pap.weapon.id)) ids.push(pap.weapon.id);
+  return ids;
+}
+
+function isUpgradedW(w) {
+  if (typeof weaponsMod.isUpgraded === 'function') return !!weaponsMod.isUpgraded(w);
+  return !!(w && (w.upgraded === true || (w.def && w.def.upgraded === true)));
+}
+
+function upgradedNameOf(id) {
+  if (typeof weaponsMod.upgradedName === 'function') return weaponsMod.upgradedName(id);
+  return weaponName(id);
+}
+
+/** Wall ammo price for a held weapon: ammoCost(id, isUpgraded(w)) (upgraded -> PAP.ammoCost). */
+export function ammoPrice(w) {
+  const id = w && w.id;
+  if (!isUpgradedW(w)) return ammoCost(id);
+  // Guard: a weapons.js without the WO8 exports ignores the second argument.
+  if (typeof weaponsMod.upgradeWeapon === 'function') return ammoCost(id, true);
+  return papCfg().ammoCost;
+}
+
+// weapons.canUpgrade with a local fallback: { ok, reason?: 'upgraded' | 'powerup' | 'unknown' }.
+function canUpgradeW(w) {
+  if (!w) return { ok: false, reason: 'unknown' };
+  if (typeof weaponsMod.canUpgrade === 'function') return weaponsMod.canUpgrade(w) || { ok: false, reason: 'unknown' };
+  if (w.id === 'deathmachine') return { ok: false, reason: 'powerup' };
+  if (isUpgradedW(w)) return { ok: false, reason: 'upgraded' };
+  if (!WEAPONS[w.id]) return { ok: false, reason: 'unknown' };
+  return { ok: true };
+}
+
+/**
+ * Why the player cannot start an upgrade right now: 'busy' | 'powerup' | 'upgraded' | 'none' |
+ * 'unknown' | null. A temporary weapon (Death Machine) in hand counts as 'powerup'.
+ */
+export function papBlockReason(state) {
+  const pap = papOf(state);
+  if (pap.state !== 'idle') return 'busy';
+  const p = state.player;
+  if (!p) return 'none';
+  if (p.tempWeapon) return 'powerup';
+  const w = Array.isArray(p.weapons) ? p.weapons[p.activeSlot] : null;
+  if (!w) return 'none';
+  const r = canUpgradeW(w);
+  return r.ok ? null : (r.reason || 'unknown');
+}
+
+/**
+ * Prompt at the machine (1.1). idle: "Press F to Pack-a-Punch KN-44 [500]" or a blocked text
+ * (already upgraded / power-up weapon / nothing held); working: "Machine busy" (blocked);
+ * ready: kind 'papTake', "Press F to take <upgraded name>".
+ */
+export function papPrompt(state) {
+  const player = state && state.player;
+  if (!player) return null;
+  const pap = papOf(state);
+  const pts = player.points || 0;
+  if (pap.state === 'ready' && pap.weapon) {
+    const id = pap.weapon.id;
+    const name = (pap.weapon.def && pap.weapon.def.upgraded && pap.weapon.def.name) || upgradedNameOf(id);
+    return {
+      kind: 'papTake', weaponId: id, cost: 0, canAfford: true, blocked: false,
+      text: `Press F to take ${name}`,
+    };
+  }
+  const { cost } = papCfg();
+  const reason = papBlockReason(state);
+  const w = !player.tempWeapon && Array.isArray(player.weapons) ? player.weapons[player.activeSlot] : null;
+  const name = w ? ((w.def && w.def.name) || weaponName(w.id)) : '';
+  let text = `Press F to Pack-a-Punch ${name} [${cost}]`;
+  if (reason === 'busy') text = PAP_BUSY_TEXT;
+  else if (reason === 'upgraded') text = `${name} is already upgraded`;
+  else if (reason === 'none') text = PAP_NO_WEAPON_TEXT;
+  else if (reason) text = PAP_POWERUP_TEXT; // 'powerup', or 'unknown' (no UPGRADES entry)
+  const out = {
+    kind: 'pap', weaponId: w ? w.id : null, cost, canAfford: pts >= cost, blocked: !!reason, text,
+  };
+  if (reason) out.reason = reason;
+  return out;
+}
+
+function cancelReloadW(w) {
+  if (w && w.reloading) { w.reloading = false; w.reloadT = 0; }
+}
+
+/**
+ * Pays PAP.cost and puts the active weapon into the machine (1.1). Refused (false, no charge, no
+ * event) when blocked (busy / power-up / upgraded / nothing held), during a transition or while
+ * down. Cannot afford -> purchase:denied {kind:'pap', id, cost, have}. Otherwise the weapon leaves
+ * its slot; the player switches to the next filled slot (weapon:equipped) or, with none, holds
+ * nothing (player.getActiveWeapon -> null, cannot fire) until the gun is taken back.
+ * Emits pap:start {weaponId, slot} and purchase:made {kind:'pap', id, cost}.
+ */
+export function startPap(state) {
+  const player = state && state.player;
+  if (!player || state.transition || player.down || player.downT > 0) return false;
+  if (!Array.isArray(player.weapons)) return false;
+  const pap = papOf(state);
+  if (papBlockReason(state)) return false;
+  const slot = player.activeSlot;
+  const w = player.weapons[slot];
+  const { cost, workSeconds } = papCfg();
+  const have = player.points;
+  if (have < cost || !spendPoints(state, cost)) {
+    events.emit('purchase:denied', { kind: 'pap', id: w.id, cost, have });
+    return false;
+  }
+  cancelReloadW(w);
+  w.triggerHeld = false;
+  player.weapons[slot] = null;
+  pap.state = 'working';
+  pap.timer = workSeconds;
+  pap.weapon = w;
+  pap.slot = slot;
+  pap.baseId = w.id;
+  // Switch to the next filled slot, if any; otherwise the player holds nothing.
+  const n = player.weapons.length;
+  for (let i = 1; i < n; i++) {
+    const k = (slot + i) % n;
+    if (player.weapons[k]) {
+      player.activeSlot = k;
+      events.emit('weapon:equipped', { weaponId: player.weapons[k].id, slot: k });
+      break;
+    }
+  }
+  events.emit('pap:start', { weaponId: w.id, slot });
+  events.emit('purchase:made', { kind: 'pap', id: w.id, cost });
+  return true;
+}
+
+// Upgrades a weapon object in place (weapons.upgradeWeapon, or a minimal flag fallback).
+function applyUpgrade(w) {
+  if (!w || isUpgradedW(w)) return w;
+  if (typeof weaponsMod.upgradeWeapon === 'function') return weaponsMod.upgradeWeapon(w) || w;
+  w.upgraded = true;
+  return w;
+}
+
+/** working -> ready after PAP.workSeconds; the weapon is upgraded on entering ready. */
+export function updatePap(state, dt) {
+  const pap = state && state.shop && state.shop.pap;
+  if (!pap || pap.state !== 'working') return;
+  if (!pap.weapon) { resetPap(pap); return; }
+  pap.timer -= Number.isFinite(dt) ? dt : 0;
+  if (pap.timer <= 0) {
+    pap.timer = 0;
+    applyUpgrade(pap.weapon);
+    pap.state = 'ready';
+  }
+}
+
+/**
+ * Slot the upgraded gun goes back to (1.1): the slot it came from if it still exists and is
+ * empty; else a slot holding the same weapon id (bought again meanwhile: replaced, no duplicate);
+ * else the first empty slot; else the active slot (replacing that gun).
+ */
+export function papReturnSlot(player, slot, weaponId) {
+  const ws = player.weapons;
+  if (slot >= 0 && slot < ws.length && !ws[slot]) {
+    const dup = ws.findIndex((x) => x && x.id === weaponId);
+    return dup !== -1 ? dup : slot;
+  }
+  const dup = ws.findIndex((x) => x && x.id === weaponId);
+  if (dup !== -1) return dup;
+  for (let i = 0; i < ws.length; i++) if (!ws[i]) return i;
+  return player.activeSlot >= 0 && player.activeSlot < ws.length ? player.activeSlot : 0;
+}
+
+/**
+ * Takes the upgraded gun off the tray (state 'ready' only; not while down or during a
+ * transition): back into a slot per papReturnSlot and made active (weapon:equipped unless a
+ * power-up weapon is in hand), then pap:done {weaponId}, stats.papCount++, machine idle.
+ */
+export function takePap(state) {
+  const player = state && state.player;
+  if (!player || state.transition || player.down || player.downT > 0) return false;
+  const pap = papOf(state);
+  if (pap.state !== 'ready' || !pap.weapon) return false;
+  const w = applyUpgrade(pap.weapon);
+  if (!Array.isArray(player.weapons)) player.weapons = [null, null];
+  const slot = papReturnSlot(player, pap.slot, w.id);
+  if (slot !== player.activeSlot) cancelReloadW(player.weapons[player.activeSlot]);
+  player.weapons[slot] = w;
+  player.activeSlot = slot;
+  if (!player.tempWeapon) events.emit('weapon:equipped', { weaponId: w.id, slot });
+  resetPap(pap);
+  if (state.stats) state.stats.papCount = (state.stats.papCount || 0) + 1;
+  events.emit('pap:done', { weaponId: w.id });
   return true;
 }

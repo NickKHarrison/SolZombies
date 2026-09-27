@@ -240,3 +240,19 @@ in `WALLBUY_MAP` but not placed (box-only in practice).
   prompt). Tie order (first considered wins on equal distance): wall buy, box, perk, door, mega
   door, stairs, barricade.
 - `soldOut` is written by `shop.syncPerkMachines` (which bumps `map.version`), not by map.js.
+
+
+## WO8 (Agent B): Pack-a-Punch tile
+
+- `TILE_PAP = 11`, legend char `'A'` (in `CHAR_CODE`, checked before perk / wall-buy letters). A
+  level whose `wallbuys` uses `A` throws (`is both the Pack-a-Punch machine and a wall buy`).
+- `map.pap = { tx, ty, x, y, w, h, cx, cy }` (one-tile rect + centre) or `null`. At most one `A`
+  per map; a second throws `map: more than one Pack-a-Punch machine A`.
+- Blocks movers (`isWalkable` default false) and rays (`blocksRay`); pathfinding walks only
+  0/2/3/6 so zombies never path through it. Solid in `computeArena` and `recomputeActiveSpawns`
+  (both use passable whitelists that exclude 11). Not merged into `map.walls` (like perks).
+- `nearestInteractable` adds `{ kind: 'pap', ref: map.pap }`; tie order is now wall buy, box,
+  perk, **pap**, door, mega door, stairs, barricade. Always reported in range (the shop decides
+  blocked / busy / take).
+- Tests (`tests/map.test.js`, "WO8 ..."): parse + null, duplicates / wall-buy clash, movers / rays /
+  flow field, active-spawn and arena floods, nearestInteractable range edge and tie order.

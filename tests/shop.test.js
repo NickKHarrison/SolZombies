@@ -458,6 +458,28 @@ test('WO5: buyMegaDoor spends, opens, emits purchase:made', () => {
   assert.equal(made.length, 1);
 });
 
+test('WO8 Phase 4a (economy #1): prompt and purchase use the door own per-level cost (750 on L3)', () => {
+  const { s } = megaState(1000);
+  s.map.megaDoor.cost = 750;
+  const p = buildPrompt(s, { kind: 'megadoor', ref: s.map.megaDoor, dist: 5 });
+  assert.equal(p.cost, 750);
+  assert.equal(p.text, 'Press F to open MEGA DOOR [750]');
+  const made = recordEv('purchase:made');
+  assert.equal(buyMegaDoor(s), true);
+  assert.equal(s.player.points, 250);
+  assert.deepEqual(made, [{ kind: 'megadoor', id: 'mega', cost: 750 }]);
+  // broke at 700: denied with the per-level cost
+  const b = megaState(700);
+  b.s.map.megaDoor.cost = 750;
+  const denied = recordEv('purchase:denied');
+  assert.equal(buyMegaDoor(b.s), false);
+  assert.deepEqual(denied.slice(-1), [{ kind: 'megadoor', cost: 750, have: 700 }]);
+  // no cost on the door: falls back to DOORS.megaCost
+  const c = megaState(1000);
+  delete c.s.map.megaDoor.cost;
+  assert.equal(buildPrompt(c.s, { kind: 'megadoor', ref: c.s.map.megaDoor }).cost, DOORS.megaCost);
+});
+
 test('WO5: buyMegaDoor denied when broke, refused (no charge, no event) when blocked', () => {
   const { s, calls } = megaState(100);
   const denied = recordEv('purchase:denied');
@@ -721,4 +743,292 @@ test('WO7 buyPerk guards: null machine, unknown perk, no player', () => {
   assert.equal(buildPrompt(s, { kind: 'perk', ref: { id: 99, perkId: 'nope' } }), null);
   assert.equal(shopNs.buyPerk({ player: null }, machine(s, 'jugg')), false);
   assert.equal(s.player.points, 1000);
+});
+
+// ---------------- WO8: Pack-a-Punch ----------------
+
+import { PAP } from '../src/config.js';
+
+// '7' = kn44 wall buy (level-1 wall-buy table), 'A' = Pack-a-Punch.
+const PAP_ASCII = [
+  '###########',
+  '#P........#',
+  '#.A.....7.#',
+  '#.........#',
+  '###########',
+];
+
+function papState(points = 2000, guns = ['kn44']) {
+  events.clearAll();
+  const s = createEmptyState(9);
+  s.phase = 'playing';
+  s.player = player.createPlayer(60, 60);
+  s.player.points = points;
+  s.map = map.loadMap(PAP_ASCII);
+  initShop(s);
+  for (const g of guns) player.giveWeapon(s, g);
+  return s;
+}
+const standBelow = (s, r) => { s.player.x = r.x + TILE / 2; s.player.y = r.y + TILE + 15; };
+
+test('WO8 shop exports and initShop resets shop.pap', () => {
+  for (const f of ['startPap', 'takePap', 'updatePap', 'papPrompt']) assert.equal(typeof shopNs[f], 'function', f);
+  const s = papState();
+  s.shop.pap.state = 'ready';
+  initShop(s);
+  assert.deepEqual(s.shop.pap, { state: 'idle', timer: 0, weapon: null, slot: -1, baseId: null });
+});
+
+test('WO8 full flow: startPap -> working -> ready (upgraded) -> takePap back into the same slot', () => {
+  const s = papState(2000, ['sheiva', 'kn44']); // kn44 in slot 1, active
+  const log = record(['pap:start', 'pap:done', 'purchase:made', 'weapon:equipped']);
+  const kn = s.player.weapons[1];
+  assert.equal(s.player.activeSlot, 1);
+  let pr = shopNs.papPrompt(s);
+  assert.equal(pr.kind, 'pap'); assert.equal(pr.blocked, false); assert.equal(pr.canAfford, true);
+  assert.equal(pr.text, `Press F to Pack-a-Punch ${weapons.WEAPONS.kn44.name} [${PAP.cost}]`);
+  assert.equal(shopNs.startPap(s), true);
+  assert.equal(s.player.points, 2000 - PAP.cost);
+  assert.equal(s.player.weapons[1], null);
+  assert.equal(s.player.activeSlot, 0); // switched to the other filled slot
+  assert.deepEqual({ ...s.shop.pap, weapon: s.shop.pap.weapon.id },
+    { state: 'working', timer: PAP.workSeconds, weapon: 'kn44', slot: 1, baseId: 'kn44' });
+  assert.deepEqual(log.filter(([n]) => n !== 'weapon:equipped'), [
+    ['pap:start', { weaponId: 'kn44', slot: 1 }],
+    ['purchase:made', { kind: 'pap', id: 'kn44', cost: PAP.cost }],
+  ]);
+  pr = shopNs.papPrompt(s);
+  assert.equal(pr.text, 'Machine busy'); assert.equal(pr.blocked, true);
+  assert.equal(shopNs.startPap(s), false); // busy
+  assert.equal(shopNs.takePap(s), false); // not ready yet
+  shopNs.updatePap(s, PAP.workSeconds - 0.01);
+  assert.equal(s.shop.pap.state, 'working');
+  shopNs.updatePap(s, 0.02);
+  assert.equal(s.shop.pap.state, 'ready');
+  assert.equal(weapons.isUpgraded(kn), true);
+  pr = shopNs.papPrompt(s);
+  assert.equal(pr.kind, 'papTake');
+  assert.equal(pr.text, `Press F to take ${weapons.upgradedName('kn44')}`);
+  shopNs.updatePap(s, 100); // stays until taken
+  assert.equal(s.shop.pap.state, 'ready');
+  assert.equal(shopNs.takePap(s), true);
+  assert.equal(s.player.weapons[1], kn); assert.equal(s.player.activeSlot, 1);
+  assert.equal(s.stats.papCount, 1);
+  assert.equal(s.shop.pap.state, 'idle'); assert.equal(s.shop.pap.weapon, null);
+  assert.deepEqual(log.find(([n]) => n === 'pap:done'), ['pap:done', { weaponId: 'kn44' }]);
+  // already upgraded now
+  pr = shopNs.papPrompt(s);
+  assert.equal(pr.blocked, true); assert.equal(pr.reason, 'upgraded');
+  assert.equal(pr.text, `${weapons.upgradedName('kn44')} is already upgraded`);
+  const pts = s.player.points;
+  assert.equal(shopNs.startPap(s), false); assert.equal(s.player.points, pts);
+});
+
+test('WO8 only gun inside: player holds nothing, cannot fire, and gets it back', () => {
+  const s = papState(2000, ['kn44']);
+  assert.equal(shopNs.startPap(s), true);
+  assert.deepEqual(s.player.weapons, [null, null]);
+  assert.equal(player.getActiveWeapon(s.player), null);
+  const log = record(['weapon:fired']);
+  // updatePlayer with fire / reload / swap held does not throw and fires nothing
+  player.updatePlayer(s, { fire: true, reload: true, swap: true }, { x: 200, y: 60 }, 0.1);
+  player.updatePlayer(s, { fire: true, slot: 2 }, { x: 200, y: 60 }, 0.1);
+  assert.equal(log.length, 0);
+  assert.equal(shopNs.papPrompt(s).text, 'Machine busy');
+  shopNs.updatePap(s, PAP.workSeconds);
+  assert.equal(shopNs.takePap(s), true);
+  assert.equal(s.player.weapons[0].id, 'kn44'); assert.equal(s.player.activeSlot, 0);
+  assert.equal(player.getActiveWeapon(s.player).upgraded, true);
+});
+
+test('WO8 return slot rules: filled meanwhile -> first empty; none empty -> replaces active; duplicate replaced', () => {
+  // slot filled meanwhile -> first empty slot
+  let s = papState(5000, ['kn44']);
+  shopNs.startPap(s);
+  player.giveWeapon(s, 'sheiva'); // lands in slot 0 (the vacated slot)
+  shopNs.updatePap(s, PAP.workSeconds);
+  shopNs.takePap(s);
+  assert.deepEqual(s.player.weapons.map((w) => w && w.id), ['sheiva', 'kn44']);
+  assert.equal(s.player.activeSlot, 1);
+  // no empty slot -> replaces the active gun
+  s = papState(5000, ['kn44', 'sheiva']);
+  s.player.activeSlot = 0;
+  shopNs.startPap(s); // kn44 out of slot 0, active -> 1
+  player.giveWeapon(s, 'rk5'); // fills slot 0 and makes it active
+  assert.equal(s.player.activeSlot, 0);
+  shopNs.updatePap(s, PAP.workSeconds);
+  shopNs.takePap(s);
+  assert.deepEqual(s.player.weapons.map((w) => w && w.id), ['kn44', 'sheiva']);
+  assert.equal(s.player.weapons[0].upgraded, true);
+  // same gun held again meanwhile -> that copy is replaced, no duplicate
+  s = papState(5000, ['kn44', 'sheiva']);
+  shopNs.startPap(s); // slot 1 = sheiva goes in
+  assert.equal(s.shop.pap.weapon.id, 'sheiva');
+  s.player.weapons[1] = weapons.createWeapon('rk5');
+  s.player.weapons[0] = weapons.createWeapon('sheiva');
+  shopNs.updatePap(s, PAP.workSeconds);
+  shopNs.takePap(s);
+  assert.deepEqual(s.player.weapons.map((w) => w && w.id), ['sheiva', 'rk5']);
+  assert.equal(s.player.weapons[0].upgraded, true);
+  // Mule Kick slot lost while the gun is inside -> goes to the active slot (no empty slot)
+  s = papState(5000, ['kn44', 'sheiva']);
+  s.player.weapons.push(weapons.createWeapon('rk5'));
+  s.player.activeSlot = 2;
+  shopNs.startPap(s);
+  assert.equal(s.shop.pap.slot, 2);
+  s.player.weapons.length = 2;
+  shopNs.updatePap(s, PAP.workSeconds);
+  shopNs.takePap(s);
+  assert.equal(s.player.weapons.length, 2);
+  assert.equal(s.player.weapons[s.player.activeSlot].id, 'rk5');
+  assert.equal(s.player.weapons[s.player.activeSlot].upgraded, true);
+});
+
+test('WO8 blocked cases: Death Machine, nothing held, cannot afford, down, transition', () => {
+  let s = papState(2000, ['kn44']);
+  player.equipTemporary(s, weapons.createDeathMachine());
+  let pr = shopNs.papPrompt(s);
+  assert.equal(pr.blocked, true); assert.equal(pr.reason, 'powerup');
+  assert.equal(pr.text, 'Cannot upgrade a power-up weapon');
+  assert.equal(shopNs.startPap(s), false); assert.equal(s.player.points, 2000);
+  // nothing held
+  s = papState(2000, []);
+  pr = shopNs.papPrompt(s);
+  assert.equal(pr.blocked, true); assert.equal(pr.reason, 'none');
+  assert.equal(shopNs.startPap(s), false);
+  // cannot afford
+  s = papState(PAP.cost - 1, ['kn44']);
+  const log = record(['purchase:denied', 'pap:start']);
+  pr = shopNs.papPrompt(s);
+  assert.equal(pr.canAfford, false); assert.equal(pr.blocked, false);
+  assert.equal(shopNs.startPap(s), false);
+  assert.deepEqual(log, [['purchase:denied', { kind: 'pap', id: 'kn44', cost: PAP.cost, have: PAP.cost - 1 }]]);
+  assert.equal(s.player.weapons[0].id, 'kn44');
+  // down / transition
+  s = papState(2000, ['kn44']);
+  s.player.downT = 1;
+  assert.equal(shopNs.startPap(s), false);
+  s.player.downT = 0; s.transition = { t: 0 };
+  assert.equal(shopNs.startPap(s), false);
+  s.transition = null;
+  assert.equal(shopNs.startPap(s), true);
+  shopNs.updatePap(s, PAP.workSeconds);
+  s.player.downT = 1;
+  assert.equal(shopNs.takePap(s), false);
+});
+
+test('WO8 box never offers the gun inside the machine', () => {
+  const s = papState(5000, ['kn44']);
+  shopNs.startPap(s);
+  s.shop.box.state = 'spinning'; s.shop.box.timer = 0.01;
+  tickBox(s, 0.1, { kn44: 1, sheiva: 1 });
+  assert.equal(s.shop.box.weaponId, 'sheiva');
+});
+
+test('WO8 updateShop: F at the machine starts, then takes; wall ammo for an upgraded gun costs the scaled PaP price', () => {
+  const s = papState(5000, ['kn44']);
+  standBelow(s, s.map.pap);
+  updateShop(s, {}, 0.016);
+  assert.equal(s.shop.prompt.kind, 'pap');
+  updateShop(s, { interact: true }, 0.016);
+  assert.equal(s.shop.pap.state, 'working');
+  assert.equal(s.shop.prompt.text, 'Machine busy');
+  updateShop(s, { interact: true }, 0.016); // busy: nothing happens
+  assert.equal(s.player.points, 5000 - PAP.cost);
+  shopNs.updatePap(s, PAP.workSeconds);
+  updateShop(s, {}, 0.016);
+  assert.equal(s.shop.prompt.kind, 'papTake');
+  updateShop(s, { interact: true }, 0.016);
+  assert.equal(s.shop.pap.state, 'idle');
+  assert.equal(s.player.weapons[0].upgraded, true);
+  assert.equal(s.shop.prompt.reason, 'upgraded');
+  // wall ammo at the kn44 wall buy
+  const wb = s.map.wallBuys[0];
+  assert.equal(wb.weaponId, 'kn44');
+  const kn = s.player.weapons[0];
+  kn.reserve = 0;
+  standBelow(s, wb);
+  updateShop(s, {}, 0.016);
+  assert.equal(s.shop.prompt.kind, 'ammo');
+  // WO8 Phase 4a (economy #5): min(PAP.ammoCost, round(PAP.ammoCostMult x 75)) = 281.
+  const upAmmo = Math.min(PAP.ammoCost, Math.round(PAP.ammoCostMult * weapons.ammoCost('kn44')));
+  assert.equal(upAmmo, 281);
+  assert.equal(s.shop.prompt.cost, upAmmo);
+  assert.equal(s.shop.prompt.text, `Press F to buy upgraded ammo [${upAmmo}]`);
+  const before = s.player.points;
+  assert.equal(buyAmmo(s, 'kn44'), true);
+  assert.equal(s.player.points, before - upAmmo);
+  assert.equal(kn.reserve, kn.def.reserve);
+  // the base gun still pays the normal price
+  const s2 = papState(5000, ['kn44']);
+  s2.player.weapons[0].reserve = 0;
+  standBelow(s2, s2.map.wallBuys[0]);
+  updateShop(s2, {}, 0.016);
+  assert.equal(s2.shop.prompt.cost, weapons.ammoCost('kn44'));
+});
+
+// ---------------------------------------------------------------------------
+// WO8 FIX-A: QA review M1 / L1 / L3 and playtest #3.
+// ---------------------------------------------------------------------------
+
+test('WO8 FIX-A (M1): revive dropping Mule Kick with slot 0 in the machine equips the first filled slot', () => {
+  const s = papState(5000, ['mr6', 'sheiva']);
+  player.addPerk(s, 'mule');
+  player.addPerk(s, 'revive');
+  player.giveWeapon(s, 'kn44');
+  s.player.activeSlot = 0;
+  assert.equal(shopNs.startPap(s), true); // MR6 goes in, player switched to Sheiva
+  assert.equal(s.player.weapons[0], null);
+  s.player.activeSlot = 2; // press 3: KN-44
+  const eq = record(['weapon:equipped']);
+  player.removeAllPerks(s, 'revive');
+  assert.deepEqual(s.player.weapons.map((w) => w && w.id), [null, 'sheiva']);
+  assert.equal(s.player.activeSlot, 1);
+  assert.equal(player.getActiveWeapon(s.player).id, 'sheiva');
+  assert.deepEqual(eq, [['weapon:equipped', { weaponId: 'sheiva', slot: 1 }]]);
+  assert.notEqual(shopNs.papPrompt(s).reason, 'none');
+});
+
+test('WO8 FIX-A (L1): the gun inside the machine cannot be bought at its wall (blocked, no charge)', () => {
+  const s = papState(5000, ['mr6', 'kn44']);
+  assert.equal(shopNs.startPap(s), true); // KN-44 (slot 1, active) goes in
+  const pts = s.player.points;
+  const wb = s.map.wallBuys[0];
+  assert.equal(wb.weaponId, 'kn44');
+  const pr = buildPrompt(s, { kind: 'wallbuy', ref: wb, dist: 0 });
+  assert.equal(pr.blocked, true);
+  assert.equal(pr.text, `${weapons.WEAPONS.kn44.name} is in the Pack-a-Punch`);
+  const log = record(['purchase:made', 'purchase:denied']);
+  assert.equal(buyWallWeapon(s, wb), false);
+  assert.equal(s.player.points, pts);
+  assert.deepEqual(log, []);
+  assert.deepEqual(s.player.weapons.map((w) => w && w.id), ['mr6', null]);
+  // ready state too; after taking it the wall sells ammo again
+  shopNs.updatePap(s, PAP.workSeconds);
+  assert.equal(buildPrompt(s, { kind: 'wallbuy', ref: wb, dist: 0 }).blocked, true);
+  shopNs.takePap(s);
+  assert.equal(buildPrompt(s, { kind: 'wallbuy', ref: wb, dist: 0 }).kind, 'ammo');
+});
+
+test('WO8 FIX-A (L3, playtest #3): ammo prompts for an upgraded gun use the upgraded name', () => {
+  const s = papState(5000, ['kn44']);
+  shopNs.startPap(s);
+  shopNs.updatePap(s, PAP.workSeconds);
+  shopNs.takePap(s);
+  const kn = s.player.weapons[0];
+  const wb = s.map.wallBuys[0];
+  const hit = { kind: 'wallbuy', ref: wb, dist: 0 };
+  kn.reserve = 0;
+  let pr = buildPrompt(s, hit);
+  assert.equal(pr.text, `Press F to buy upgraded ammo [${pr.cost}]`);
+  assert.equal(pr.cost, 281);
+  kn.reserve = kn.def.reserve;
+  pr = buildPrompt(s, hit);
+  assert.equal(pr.blocked, true);
+  assert.equal(pr.text, `${weapons.UPGRADES.kn44.name} ammo full`);
+  // base gun keeps the plain texts
+  const s2 = papState(5000, ['kn44']);
+  assert.equal(buildPrompt(s2, hit).text, `${weapons.WEAPONS.kn44.name} ammo full`);
+  s2.player.weapons[0].reserve = 0;
+  assert.equal(buildPrompt(s2, hit).text, `Press F to buy ammo [${weapons.ammoCost('kn44')}]`);
 });

@@ -67,3 +67,10 @@ the sticks, and mobile banners moved up to 36cqh so they clear the sticks.
   finger 11 while finger 12 taps KNIFE -> `melee` true for one frame (false after `endFrame()`),
   moveX kept at 0.26 (stick unaffected), right stick not grabbed, `.pressed` cleared on
   pointerup. No console errors from the game.
+
+## WO8 Phase 4a (fixer)
+- `setTouchPrompt(text, opts)`: optional `{ blocked, cantAfford }` (one-arg calls unchanged).
+  Blocked prompts (already upgraded, Machine busy, mega door before all doors, ammo full, perk
+  blocked) grey the ACTION button (`.blocked`) and a tap sets neither `interact` nor
+  `interactHeld`. Unaffordable prompts get `.cant-afford` (red tint) and stay tappable so the
+  denied feedback plays. `main.js` passes both flags from `state.shop.prompt`.

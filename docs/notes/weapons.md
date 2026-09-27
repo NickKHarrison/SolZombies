@@ -299,3 +299,53 @@ Constants that could move to config: `SLASH_TTL` 0.18, `TIER3_AMMO_MULT` fallbac
 - Tests: tier-3 defs pin hg40 `damage: 130, penetration: 2`, m8a7 `penetration: 3`; the fire test
   expects pen 2/3/3; new "FIX-5 Double Tap vs boss" test (boss x1 between x2 zombies on one ray,
   rpm bonus kept, shotgun pellets, no-perk unchanged, hitscan default).
+
+## WO8 (Agent A): Pack-a-Punch
+
+New exports: `UPGRADES`, `upgradeWeapon`, `isUpgraded`, `upgradedName`, `canUpgrade`, plus the
+extra `UPGRADE_NAMES` (the 1.2 table). `PAP` comes from config.js (merged over local defaults).
+
+- `UPGRADES[id]` (every weapon except `deathmachine`, frozen): `{ ...WEAPONS[id], name, damage x2,
+  mag/reserve x1.5 rounded, spread x0.8, penetration min(4, pen + 1), upgraded: true, baseId: id }`;
+  `id`, rpm, reload, pellets, range, cls, cost, tier, sprite unchanged. Ray Gun `projectile`
+  splashDamage 300 -> 450, splashRadius 90 -> 135 (speed unchanged; direct hit 1000 -> 2000 via
+  damage x2). Thundergun `cone` killRange 300 -> 375, range 480 -> 552, knockback 720 -> 864
+  (halfAngle/stun unchanged); mag 4 -> 6, reserve 12 -> 18. KN-44: 140 dmg, 45/360, pen 2.
+  Marshal 16 mag 2 -> 3. Locus stays at pen 4.
+- `upgradeWeapon(w)`: `def = UPGRADES[id]`, `upgraded = true`, mag/reserve = new maxima, reload
+  cancelled; returns w. Calling it twice is harmless (never compounds). Unknown id / Death Machine
+  -> returned unchanged.
+- `isUpgraded(w)`: `w.upgraded === true` or `w.def.upgraded === true`.
+- `upgradedName(id)` (also accepts a weapon object): table name, else base name, else the id.
+- `canUpgrade(w)`: `unknown` (no/unknown id) -> `powerup` (deathmachine) -> `upgraded` -> `{ ok: true }`.
+- `ammoCost(id, upgraded = false)`: `upgraded === true` and the gun has a wall price -> `PAP.ammoCost`
+  (450); no wall price -> Infinity regardless. **Strict `=== true`** on purpose: existing code/tests
+  call `ids.map(ammoCost)`, which passes the array index as the second argument.
+
+**Audit.** All combat code already reads from `w.def`: `tryFire` (rpm, auto, spread, pellets,
+range, penetration, damage, cone, projectile, cls), `fireCone` (the cone object passed from
+`d.cone`), projectiles store `def: d` on the bullet and `detonate` reads `b.def.projectile` /
+`b.def.damage`, reload/refill use `w.def.mag/reserve/reloadTime/noReload`. Nothing in weapons.js
+looks up `WEAPONS[w.id]` for combat, so no fix was needed. Outside my files, `shop.js`
+(`weaponName`, `weaponCost`) and `audio.js` (`gunKindFor`) read `WEAPONS[id]` for name / price /
+sound class only; the HUD/shop should use `upgradedName` or `w.def.name` for display names.
+Perks unchanged: `weaponPerkMods` keys the Death Machine exemption on `def.id` (kept by upgrades),
+Double Tap x2 applies on the upgraded damage with the boss cap (`BOSS.dtapDamageMult`), Speed Cola
+on `def.reloadTime`; the 3 % boss per-hit cap lives in damageZombie. `weapon:fired` etc. still carry
+the base id.
+
+Tests (`tests/weapons.test.js` WO8 block): table names/coverage/frozen/multipliers/pen cap,
+projectile and cone fields; upgradeWeapon fill + reload cancel + no compounding + reload/refill to
+new maxima; canUpgrade reasons; ammoCost upgraded / non-wall / index-safe; upgraded hitscan x2 and
+pen 2 via tryFire; upgraded + Double Tap (zombie x2, boss capped, rpm x1.33); Ray Gun splash hits a
+zombie at 96 px only when upgraded (450) and explosion radius 135 via updateBullets; Thundergun kills
+at 340 px and knocks at 520 px (864) only when upgraded; TTK: upgraded KN-44 <= 0.55x base (model,
+L2 R8 and L3 R10) and < 0.6x in a simulated tryFire loop (L2 R12). `npm test`: 526/526 green at hand-off.
+
+## WO8 Phase 4a (fixer)
+- `ammoCost(id, true)` = `min(PAP.ammoCost, round(PAP.ammoCostMult x ammoCost(id)))` (3.75; KN-44 /
+  Man-O-War 281, Sheiva 94, Peacekeeper 450). Non-wall guns stay Infinity.
+- Boss damage of upgraded defs (`papBossFactor`): vs kind `'boss'` an upgraded gun deals base x
+  `BOSS.papDamageMult` (1.25) instead of x2, times min(dtap, `BOSS.dtapDamageMult`) for hitscan.
+  Ray Gun★ direct hit and splash on the boss are base x 1.25 (1250 / 375). The Thundergun boss share
+  stays `thunderNearFrac`. Zombies and minions keep the full upgrade.

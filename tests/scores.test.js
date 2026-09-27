@@ -42,7 +42,7 @@ test('recordRun: entry fields come from stats (+extra), per WO7 1.4', () => {
   assert.deepEqual(e.perks, ['jugg', 'speed']);
   assert.ok(!Number.isNaN(Date.parse(e.date)), 'ISO date');
   assert.equal(new Date(e.date).toISOString(), e.date);
-  assert.deepEqual(Object.keys(e).sort(), ['bosses', 'date', 'kills', 'level', 'perks', 'points', 'round', 'timeSec', 'weapon']);
+  assert.deepEqual(Object.keys(e).sort(), ['bosses', 'date', 'kills', 'level', 'pap', 'perks', 'points', 'round', 'timeSec', 'weapon']);
   assert.equal(r.rank, 1);
   assert.equal(r.isBestRound, true);
   assert.equal(r.isBestPoints, true);
@@ -57,7 +57,7 @@ test('recordRun: extra overrides stats fields; missing / garbage stats give a sa
   assert.equal(r.entry.weapon, 'knife');
   assert.equal(r.entry.date, '2026-01-01T00:00:00.000Z');
   const g = recordRun(null, null, createMemoryStorage()).entry;
-  assert.deepEqual({ ...g, date: '' }, { round: 0, points: 0, kills: 0, level: 1, bosses: 0, timeSec: 0, perks: [], weapon: null, date: '' });
+  assert.deepEqual({ ...g, date: '' }, { round: 0, points: 0, kills: 0, level: 1, bosses: 0, timeSec: 0, pap: 0, perks: [], weapon: null, date: '' });
   const n = recordRun({ roundReached: NaN, pointsEarned: Infinity, kills: -4, timeSurvived: 'x', levelReached: 0 }, {}, createMemoryStorage()).entry;
   assert.equal(n.round, 0);
   assert.equal(n.points, 0);
@@ -178,7 +178,7 @@ test('corrupt storage: bad JSON / wrong shapes / wrong version / NaN read as emp
   }));
   const list = loadScores(st);
   assert.deepEqual(list.map((e) => e.round), [9, 4]);
-  assert.deepEqual(list[1], { round: 4, points: 40, kills: 0, level: 1, bosses: 0, timeSec: 0, perks: ['jugg'], weapon: null, date: '' });
+  assert.deepEqual(list[1], { round: 4, points: 40, kills: 0, level: 1, bosses: 0, timeSec: 0, pap: 0, perks: ['jugg'], weapon: null, date: '' });
   // legacy bare array (Phase 0 stub format) still loads
   const legacy = createMemoryStorage();
   legacy.setItem(KEY, JSON.stringify([{ round: 2, points: 5 }, { round: 6, points: 1 }]));
@@ -190,7 +190,7 @@ test('corrupt storage: bad JSON / wrong shapes / wrong version / NaN read as emp
 test('normalizeEntry never throws and always yields the full shape', () => {
   for (const v of [undefined, null, 0, 'x', [], { round: Infinity }, { perks: 'jugg' }, Object.create(null)]) {
     const e = normalizeEntry(v);
-    assert.deepEqual(Object.keys(e).sort(), ['bosses', 'date', 'kills', 'level', 'perks', 'points', 'round', 'timeSec', 'weapon']);
+    assert.deepEqual(Object.keys(e).sort(), ['bosses', 'date', 'kills', 'level', 'pap', 'perks', 'points', 'round', 'timeSec', 'weapon']);
     for (const k of ['round', 'points', 'kills', 'level', 'bosses', 'timeSec']) assert.ok(Number.isFinite(e[k]), k);
   }
 });
@@ -355,4 +355,18 @@ test('formatTime: m:ss', () => {
   assert.equal(formatTime(null), '0:00');
   assert.equal(formatTime(Infinity), '0:00');
   assert.equal(formatTime('90'), '1:30');
+});
+
+test('WO8: entry stores pap (stats.papCount); old records without it load as 0', () => {
+  const st = createMemoryStorage();
+  const r = recordRun({ roundReached: 9, pointsEarned: 900, papCount: 2 }, {}, st);
+  assert.equal(r.entry.pap, 2);
+  assert.equal(loadScores(st)[0].pap, 2);
+  const x = recordRun({ roundReached: 8, pointsEarned: 800, papCount: 1 }, { pap: 3 }, st);
+  assert.equal(x.entry.pap, 3, 'extra overrides');
+  const old = createMemoryStorage();
+  old.setItem(SCORES.key, JSON.stringify({ v: 1, scores: [{ round: 5, points: 50, kills: 3 }] }));
+  assert.equal(loadScores(old)[0].pap, 0);
+  assert.equal(normalizeEntry({ pap: 'x' }).pap, 0);
+  assert.equal(normalizeEntry({ pap: -4 }).pap, 0);
 });

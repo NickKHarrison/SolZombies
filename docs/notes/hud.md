@@ -369,3 +369,64 @@ placed in the bottom-left. Points sit directly above them.
 - Follow-up (playtest #13): if `summary.rankText` is set (main.js sends "Not ranked" for runs that
   die before round 1), the game-over rank line shows only that text and drops the best / "#N ALL
   TIME" lines. `npm test` passed 511/511.
+
+## WO8 (Agent E) — Pack-a-Punch names, Upgrades row, pap:done banner
+
+### hud.js
+- `isUpgradedWeapon(w)`: `weaponsMod.isUpgraded(w)` when it is a function (guarded by try/catch),
+  else `w.upgraded || w.def.upgraded`. `heldName(w)` = `w.def.name || w.id`, so the upgraded def's
+  Pack-a-Punch name shows automatically.
+- Active weapon name: `'★ ' + name` and class `.upgraded` on `.hud-weapon-name` when upgraded.
+  Each holstered line (`updateWeaponSecondary`) gets the same star prefix and a `.hud-weapon-sec.upgraded`
+  class. The rebuild key includes the upgraded flag, so an upgrade taken back into the same slot redraws.
+- `pap:done { weaponId }` → `queueBanner(papName(id).toUpperCase())` through the WO5 queue.
+  `papName` uses `weapons.upgradedName`, then `UPGRADES[id].name`, then the base weapon name.
+  The listener is in `unsubs`, so it is dropped and re-added on every `initHud` (re-init safe).
+- Game-over "Upgrades" row (after "Perks used") from `summary.papCount`, then `summary.pap`,
+  `entry.pap`, `state.stats.papCount`. It is omitted only when none of them exist.
+
+### styles.css
+- `--hud-gold: #ffc93c` / `--hud-gold-dim: #d9a92c`. The upgraded active name is gold with a faint
+  purple glow; holstered upgraded lines are dim gold.
+- Desktop: `.hud-weapon { max-width: 52cqh }`, name and holstered lines are `nowrap` with an ellipsis,
+  so no name can push the readout toward the centre column.
+- Mobile: the name stays at 2.6cqh and may wrap, but is clamped to 2 lines (`-webkit-line-clamp: 2`,
+  `overflow-wrap: anywhere`). The holstered line keeps its FIX-2 single-line ellipsis.
+
+### Verified (port 8256, Agent A's `upgradeWeapon` already live)
+- Desktop 1604x902 stage: "★ PORTER'S X2 RAY GUN" in gold (rgb 255,201,60); holstered lines
+  "1 ★ NIGHTINGALE" (gold) and "3 KN-44" (plain). Readout x1326–1735, clear of the banner column
+  (banner x640–1280).
+- Touch, stage forced 844x390: the readout measured 1269–1370 × 575–634, with or without reloading.
+  RELOAD/KNIFE bottom was 572 and the right stick's right edge 1257, so there was no overlap. The
+  name wraps to "★ PORTER'S / X2 RAY GUN" (2 lines), and the holstered line ellipsises to
+  "★ NIGHTINGALE · …".
+- `pap:done` banners showed "PORTER'S X2 RAY GUN" (`.long`), "ZEUS CANNON" and "WARDEN'S WRATH"
+  (the last after two extra `initHud` calls). The mobile banner sits above the sticks.
+- Mobile game over with `papCount: 3` showed "Upgrades 3" between Perks used and Favourite weapon.
+  All 10 rows and the top-5 fit the 390-px-high stage. With no summary, the row reads
+  `state.stats.papCount`.
+- There were no console errors. `node --check src/hud.js` passed and `npm test` passed 531/531.
+
+## WO8 FIX-B (playtest #2): three guns on touch
+- `updateWeaponSecondary` also renders a `.hud-weapon-sec-short` span per holstered gun, and sets
+  `.multi` on the box when two guns are holstered. `shortWeaponName` returns:
+  - names of 7 characters or fewer, whole;
+  - otherwise the first word that is not digits only, not 1-2 characters, and not
+    GUN/RAY/X2/CANNON/&, with "'S" dropped. For example, "WARDEN'S WRATH" -> WARDEN,
+    "PORTER'S X2 RAY GUN" -> PORTER, "48 DREDGE" -> DREDGE.
+- **styles.css.** The short span is hidden by default. `#hud.mobile .hud-weapon-secondary.multi`:
+  - shows short names, gold when upgraded and without the star;
+  - is a flex row (justify end) in a `max(9px, 2.2cqh)` font with letter-spacing 0;
+  - has `margin-left: -3.5cqh`, so it may reach left of the 26cqh readout (still right of the right
+    stick's base);
+  - gives each name `flex: 0 1 auto; min-width: 0` with its own ellipsis, so the longest pair
+    still shows the start of both.
+
+  Desktop, and mobile with one holstered gun, are unchanged.
+- **Verified at 844x390** (`&touch=1`). The line spans 1259-1366 px and its top is at 578, below
+  KNIFE's bottom at 571. The right stick's base ends at 1257. None of the pairs was cut:
+  - "WARDEN · GRAVEDIGGER"
+  - "JUDGE · SEKHMET"
+  - "PORTER · SEKHMET"
+- No console errors.
