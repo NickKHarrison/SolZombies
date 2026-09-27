@@ -19,6 +19,13 @@
 //   .tbtn.tbtn-reload "RELOAD", .tbtn.tbtn-swap "SWAP", .tbtn.tbtn-pause "‖", .tbtn.tbtn-action (> .tbtn-label)
 //   WO7: .tbtn.tbtn-knife "KNIFE" (button name 'knife' -> getTouchState().melee edge)
 //   pressed state: class .pressed
+//
+// WO9 (level select, Agent G):
+//   onLevelsButton(cb) -> unsubscribe   cb() runs when a LEVELS button is activated
+//   triggerLevelsButton()               runs every registered cb (hud's desktop click path)
+//   A tap on the touch layer whose point lies inside a visible element with data-action="levels"
+//   ANYWHERE in the document (e.g. hud's pause-screen LEVELS button, which sits under #touch and
+//   has pointer-events:none) is forwarded: callbacks run, no stick is grabbed, no start edge.
 
 const STICK_RADIUS_H = 0.13;  // stick travel radius as a fraction of the layer height
 const MOVE_DEADZONE = 0.08;   // move stick magnitude below this = no movement
@@ -41,6 +48,7 @@ const sticks = { left: makeStick('left'), right: makeStick('right') };
 // Buttons: name -> { el, pointerId }
 const buttons = {};
 let promptText = null;
+const levelsCbs = new Set(); // WO9: onLevelsButton callbacks
 let promptBlocked = false;   // WO8 Phase 4a: ACTION shows a blocked prompt (greyed, inert)
 let promptCantAfford = false; // greyed like the desktop prompt, still tappable (denied feedback)
 
@@ -211,9 +219,27 @@ function applyPrompt() {
 
 // ---------------------------------------------------------------- listeners
 
+// WO9: is the point inside a visible [data-action="levels"] element (outside the touch layer)?
+function levelsButtonAt(x, y) {
+  if (typeof document === 'undefined' || !document.querySelectorAll) return null;
+  for (const el of document.querySelectorAll('[data-action="levels"]')) {
+    if (layer && layer.contains(el)) continue;
+    if (el.checkVisibility && !el.checkVisibility({ visibilityProperty: true, opacityProperty: true })) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return el;
+  }
+  return null;
+}
+
 function onPointerDown(e) {
   if (!enabled || !accepts(e)) return;
   const btnEl = e.target && e.target.closest ? e.target.closest('.tbtn') : null;
+  if (!btnEl && levelsCbs.size && levelsButtonAt(e.clientX, e.clientY)) {
+    if (e.cancelable) e.preventDefault();
+    triggerLevelsButton();
+    return;
+  }
   if (btnEl && layer.contains(btnEl)) {
     const name = btnEl.dataset.btn;
     const b = buttons[name];
@@ -363,4 +389,21 @@ export function endTouchFrame() {
 
 export function isTouchActive() {
   return enabled && layer !== null;
+}
+
+/**
+ * WO9: register a callback for the LEVELS button (pause screen). Returns an unsubscribe function.
+ * Touch taps on any visible [data-action="levels"] element are forwarded here by the touch layer.
+ */
+export function onLevelsButton(cb) {
+  if (typeof cb !== 'function') return () => {};
+  levelsCbs.add(cb);
+  return () => { levelsCbs.delete(cb); };
+}
+
+/** WO9: run every onLevelsButton callback (hud's desktop click handler can call this). */
+export function triggerLevelsButton() {
+  for (const cb of [...levelsCbs]) {
+    try { cb(); } catch (err) { console.error('[touch] levels callback threw', err); }
+  }
 }

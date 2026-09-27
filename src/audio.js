@@ -4,7 +4,7 @@
 
 import { on } from './events.js';
 import { WEAPONS } from './weapons.js';
-import { AUDIO, PAP } from './config.js';
+import { AUDIO, PAP, BOSS } from './config.js';
 
 // Tunables live in config.js AUDIO (moved by integrator).
 const MASTER_GAIN = AUDIO.masterGain;
@@ -366,78 +366,271 @@ function acidSizzle(dest, t) {
   }
 }
 
-// Lab ambience: a quiet looping electrical hum (60 Hz saw + harmonics through a lowpass, a
-// slow level flutter, a faint band-passed crackle) on its own small gain into the world bus.
-// At most one instance; stopped on level change, game over, restart and re-init.
-const LAB_HUM_GAIN = 0.035;
-let labHum = null; // { gain, sources }
-function isLabLevel(p) {
-  if (!p) return false;
-  if (typeof p.name === 'string' && p.name) return /LABORATORY/i.test(p.name);
-  return p.index === 2;
+// ---- WO9 (Agent H): ambience manager ----
+// One looping per-level ambience at a time (lab hum, KINO organ, OUTPOST wind, TEMPLE water),
+// each on its own small gain into the world bus, well under every other sound. Started on
+// level:start (by level name; loop names like "KINO — FLOODED" map to their base; index fallback
+// when no name), fading in over AMBIENCE_FADE_IN. Stopped (short fade) on any other level:start,
+// level:descend, game:over, game:restart and every initAudio() re-init. Occasional one-shots
+// (projector clatter, gusts, drips, drums) are scheduled by a small setInterval look-ahead ticker
+// onto the ambience's own gain, so stopping it silences them too.
+const AMBIENCE_FADE_IN = 1.5;
+const AMBIENCE_FADE_OUT = 0.3;
+const AMBIENCE_TICK_MS = 250;
+const AMBIENCE_LOOKAHEAD = 0.6; // seconds
+const AMBIENCE_GAIN = { lab: 0.035, kino: 0.04, outpost: 0.045, temple: 0.05 };
+const AMBIENCE_BY_INDEX = [null, null, 'lab', 'kino', 'outpost', 'temple'];
+let ambience = null; // { id, gain, sources, timer, next }
+let ambNoiseBuf = null; // 3 s noise so long filtered loops do not audibly repeat every second
+
+function ambienceIdFor(p) {
+  if (!p) return null;
+  const name = typeof p.name === 'string' ? p.name : '';
+  if (name) {
+    if (/LABORATORY/i.test(name)) return 'lab';
+    if (/KINO/i.test(name)) return 'kino';
+    if (/OUTPOST/i.test(name)) return 'outpost';
+    if (/TEMPLE/i.test(name)) return 'temple';
+    return null;
+  }
+  if (Number.isInteger(p.index) && p.index >= 0) return AMBIENCE_BY_INDEX[p.index % AMBIENCE_BY_INDEX.length] || null;
+  return null;
 }
-function startLabHum() {
-  if (!ready() || labHum) return;
+function getAmbNoise() {
+  if (ambNoiseBuf && ambNoiseBuf.sampleRate === ctx.sampleRate) return ambNoiseBuf;
+  const len = ctx.sampleRate * 3;
+  ambNoiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
+  const d = ambNoiseBuf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = rand() * 2 - 1;
+  return ambNoiseBuf;
+}
+function ambOsc(amb, dest, type, f, lvl, now) {
+  const o = ctx.createOscillator();
+  o.type = type;
+  o.frequency.value = f;
+  const g = ctx.createGain();
+  g.gain.value = lvl;
+  o.connect(g);
+  g.connect(dest);
+  o.start(now);
+  amb.sources.push(o);
+  return o;
+}
+function ambNoise(amb, dest, now) {
+  const src = ctx.createBufferSource();
+  src.buffer = getAmbNoise();
+  src.loop = true;
+  src.connect(dest);
+  src.start(now, rand() * 2.5);
+  amb.sources.push(src);
+  return src;
+}
+function ambLfo(amb, param, hz, depth, now) {
+  const lfo = ctx.createOscillator();
+  lfo.type = 'sine';
+  lfo.frequency.value = hz;
+  const d = ctx.createGain();
+  d.gain.value = depth;
+  lfo.connect(d);
+  d.connect(param);
+  lfo.start(now);
+  amb.sources.push(lfo);
+  return lfo;
+}
+function biquad(type, f, q, dest) {
+  const b = ctx.createBiquadFilter();
+  b.type = type;
+  b.frequency.value = f;
+  b.Q.value = q;
+  if (dest) b.connect(dest);
+  return b;
+}
+// Seconds from now for an absolute audio time (never negative).
+function rel(at) { return Math.max(0, at - ctx.currentTime); }
+// Scheduler helper: fires cb(at) for every due slot of key before horizon; a slot that fell far
+// behind (throttled background tab) is re-seeded instead of bursting.
+function due(amb, key, horizon, gapLo, gapHi, cb) {
+  const now = ctx.currentTime;
+  if (amb.next[key] === undefined) return;
+  if (amb.next[key] < now - 1) amb.next[key] = now + rrange(gapLo, gapHi) * 0.5;
+  let guard = 0;
+  while (amb.next[key] < horizon && guard++ < 8) {
+    cb(amb.next[key]);
+    amb.next[key] += rrange(gapLo, gapHi);
+  }
+}
+
+const AMBIENCES = {
+  // WO7 laboratory hum: 60 Hz saw + harmonics through a lowpass, a 0.23 Hz flutter, faint crackle.
+  lab(amb, out, now, level) {
+    const lp = biquad('lowpass', 700, 0.7, out);
+    for (const [type, f, lvl] of [['sawtooth', 60, 0.5], ['sine', 120, 0.8], ['square', 180, 0.12], ['sine', 240.4, 0.25]]) {
+      ambOsc(amb, lp, type, f, lvl, now);
+    }
+    ambLfo(amb, out.gain, 0.23, level * 0.3, now);
+    const cg = ctx.createGain();
+    cg.gain.value = 0.08;
+    cg.connect(out);
+    const crackle = ctx.createBufferSource();
+    crackle.buffer = noiseBuf;
+    crackle.loop = true;
+    crackle.connect(biquad('bandpass', 4200, 2, cg));
+    crackle.start(now);
+    amb.sources.push(crackle);
+    return null;
+  },
+  // KINO: a soft, slow theatre-organ chord (sine + octave triangle + quiet 3rd drawbar per note)
+  // with a 5.6 Hz tremulant, gliding through Dm - Bb - Gm - A every ~11-15 s; now and then an old
+  // film projector clatters (a 1.5-3 s burst of ~22 Hz sprocket clicks over a motor whir).
+  kino(amb, out, now) {
+    const lp = biquad('lowpass', 1100, 0.6, out);
+    const mix = ctx.createGain();
+    mix.gain.value = 0.85;
+    mix.connect(lp);
+    ambLfo(amb, mix.gain, 5.6, 0.1, now);
+    const chords = [
+      [73.42, 110.0, 146.83, 174.61, 220.0],   // Dm
+      [58.27, 87.31, 146.83, 174.61, 233.08],  // Bb
+      [49.0, 73.42, 146.83, 196.0, 233.08],    // Gm
+      [55.0, 82.41, 138.59, 164.81, 220.0],    // A
+    ];
+    const voices = chords[0].map(f => [
+      ambOsc(amb, mix, 'sine', f, 0.16, now),
+      ambOsc(amb, mix, 'triangle', f * 2.003, 0.05, now),
+      ambOsc(amb, mix, 'sine', f * 3, 0.02, now),
+    ]);
+    amb.chord = 0;
+    amb.next.chord = now + rrange(11, 15);
+    amb.next.clatter = now + rrange(6, 12);
+    const clatterBus = biquad('highpass', 300, 0.7, out);
+    return (a, horizon) => {
+      due(a, 'chord', horizon, 11, 15, at => {
+        a.chord = (a.chord + 1) % chords.length;
+        chords[a.chord].forEach((f, i) => {
+          const [o1, o2, o3] = voices[i];
+          o1.frequency.setTargetAtTime(f, at, 0.9);
+          o2.frequency.setTargetAtTime(f * 2.003, at, 0.9);
+          o3.frequency.setTargetAtTime(f * 3, at, 0.9);
+        });
+      });
+      due(a, 'clatter', horizon, 14, 28, at => {
+        const dur = rrange(1.5, 3);
+        const t = rel(at);
+        tone(clatterBus, { type: 'triangle', f0: 46, f1: 50, t, dur, peak: 0.12, attack: 0.25 });
+        noise(clatterBus, { t, dur, peak: 0.08, attack: 0.3, filter: 'bandpass', freq: 1300, q: 4 });
+        const rate = rrange(20, 24);
+        const n = Math.floor(dur * rate);
+        for (let i = 0; i < n; i++) {
+          const fade = Math.max(0.05, Math.min(1, i / 6, (n - i) / 6));
+          noise(clatterBus, { t: t + i / rate, dur: 0.012, peak: 0.45 * fade * rrange(0.7, 1), attack: 0.001, filter: 'highpass', freq: 2600 });
+          if (i % 2 === 0) noise(clatterBus, { t: t + i / rate + 0.004, dur: 0.02, peak: 0.25 * fade, attack: 0.001, filter: 'bandpass', freq: 850, q: 3 });
+        }
+      });
+    };
+  },
+  // OUTPOST: wind howl. A broad band-passed noise body plus a narrow, resonant "whistle" band whose
+  // centre two slow LFOs drift; gusts every 4-9 s swell the level and lift the whistle.
+  outpost(amb, out, now) {
+    const gust = ctx.createGain();
+    gust.gain.value = 1;
+    gust.connect(out);
+    const bodyG = ctx.createGain();
+    bodyG.gain.value = 0.7;
+    bodyG.connect(gust);
+    ambNoise(amb, biquad('bandpass', 420, 0.7, bodyG), now);
+    ambLfo(amb, bodyG.gain, 0.061, 0.22, now);
+    const howlG = ctx.createGain();
+    howlG.gain.value = 1.1;
+    howlG.connect(gust);
+    const howl = biquad('bandpass', 780, 9, howlG);
+    ambNoise(amb, howl, now);
+    ambLfo(amb, howl.frequency, 0.09, 220, now);
+    ambLfo(amb, howl.frequency, 0.037, 130, now);
+    amb.next.gust = now + rrange(2, 5);
+    return (a, horizon) => {
+      due(a, 'gust', horizon, 4, 9, at => {
+        const up = rrange(0.8, 1.8);
+        gust.gain.setTargetAtTime(rrange(1.5, 2.1), at, up / 3);
+        gust.gain.setTargetAtTime(1, at + up, rrange(0.8, 1.4));
+        howl.frequency.setTargetAtTime(rrange(950, 1250), at, up / 3);
+        howl.frequency.setTargetAtTime(780, at + up, 1.2);
+      });
+    };
+  },
+  // TEMPLE: a low, lapping water bed, random water drips (a quick rising sine "plink" plus a
+  // fainter echo) every 0.5-2.6 s, and every 9-16 s a few distant slow drums through a lowpass.
+  temple(amb, out, now) {
+    const bedG = ctx.createGain();
+    bedG.gain.value = 0.22;
+    bedG.connect(out);
+    ambNoise(amb, biquad('lowpass', 360, 0.8, bedG), now);
+    ambLfo(amb, bedG.gain, 0.05, 0.08, now);
+    const far = biquad('lowpass', 420, 0.7, out);
+    amb.next.drip = now + rrange(0.4, 1.5);
+    amb.next.drums = now + rrange(4, 8);
+    return (a, horizon) => {
+      due(a, 'drip', horizon, 0.5, 2.6, at => {
+        const t = rel(at);
+        const f = rrange(900, 1700);
+        tone(out, { type: 'sine', f0: f, f1: f * 1.9, t, dur: 0.05, peak: 0.32, attack: 0.001 });
+        tone(out, { type: 'sine', f0: f * 0.98, f1: f * 1.85, t: t + rrange(0.16, 0.24), dur: 0.05, peak: 0.1, attack: 0.001 });
+      });
+      due(a, 'drums', horizon, 9, 16, at => {
+        const t = rel(at);
+        const hits = 3 + Math.floor(rand() * 2);
+        const gap = rrange(0.75, 0.9);
+        for (let i = 0; i < hits; i++) {
+          const accent = i === hits - 1 ? 1.25 : 1;
+          tone(far, { type: 'sine', f0: 76 / accent, f1: 42, t: t + i * gap, dur: 0.7, peak: 0.5 * accent, attack: 0.004 });
+          noise(far, { t: t + i * gap, dur: 0.22, peak: 0.18 * accent, attack: 0.002, filter: 'lowpass', freq: 320, freq1: 120 });
+        }
+      });
+    };
+  },
+};
+
+function startAmbience(id) {
+  stopAmbience();
+  if (!id || !AMBIENCES[id] || !ready()) return;
+  const level = AMBIENCE_GAIN[id] ?? 0.04;
+  const amb = { id, gain: null, sources: [], timer: null, next: {} };
+  ambience = amb;
   try {
     const now = ctx.currentTime;
     const out = ctx.createGain();
     out.gain.setValueAtTime(0.0001, now);
-    out.gain.linearRampToValueAtTime(LAB_HUM_GAIN, now + 1.5);
+    out.gain.linearRampToValueAtTime(level, now + AMBIENCE_FADE_IN);
     out.connect(buses.world || master);
-    const lp = ctx.createBiquadFilter();
-    lp.type = 'lowpass';
-    lp.frequency.value = 700;
-    lp.Q.value = 0.7;
-    lp.connect(out);
-    const sources = [];
-    for (const [type, f, lvl] of [['sawtooth', 60, 0.5], ['sine', 120, 0.8], ['square', 180, 0.12], ['sine', 240.4, 0.25]]) {
-      const o = ctx.createOscillator();
-      o.type = type;
-      o.frequency.value = f;
-      const g = ctx.createGain();
-      g.gain.value = lvl;
-      o.connect(g);
-      g.connect(lp);
-      o.start(now);
-      sources.push(o);
+    amb.gain = out;
+    const tick = AMBIENCES[id](amb, out, now, level);
+    if (tick && typeof setInterval === 'function') {
+      const run = () => {
+        if (ambience !== amb || !ready()) return;
+        try { tick(amb, ctx.currentTime + AMBIENCE_LOOKAHEAD); } catch (_) { /* never throw */ }
+      };
+      run();
+      amb.timer = setInterval(run, AMBIENCE_TICK_MS);
     }
-    // Slow flutter (+-30 % of the hum level), like a tired ballast.
-    const lfo = ctx.createOscillator();
-    lfo.type = 'sine';
-    lfo.frequency.value = 0.23;
-    const lfoDepth = ctx.createGain();
-    lfoDepth.gain.value = LAB_HUM_GAIN * 0.3;
-    lfo.connect(lfoDepth);
-    lfoDepth.connect(out.gain);
-    lfo.start(now);
-    sources.push(lfo);
-    const crackle = ctx.createBufferSource();
-    crackle.buffer = noiseBuf;
-    crackle.loop = true;
-    const bp = ctx.createBiquadFilter();
-    bp.type = 'bandpass';
-    bp.frequency.value = 4200;
-    bp.Q.value = 2;
-    const cg = ctx.createGain();
-    cg.gain.value = 0.08;
-    crackle.connect(bp);
-    bp.connect(cg);
-    cg.connect(out);
-    crackle.start(now);
-    sources.push(crackle);
-    labHum = { gain: out, sources };
-  } catch (_) { labHum = null; }
+  } catch (_) { stopAmbience(); }
 }
-function stopLabHum() {
-  const h = labHum;
-  labHum = null;
-  if (!h || !ctx) return;
+function stopAmbience(fade = AMBIENCE_FADE_OUT) {
+  const a = ambience;
+  ambience = null;
+  if (!a) return;
+  if (a.timer !== null) { try { clearInterval(a.timer); } catch (_) { /* ignore */ } }
+  if (!ctx) return;
   try {
     const now = ctx.currentTime;
-    h.gain.gain.cancelScheduledValues(now);
-    h.gain.gain.setValueAtTime(h.gain.gain.value, now);
-    h.gain.gain.linearRampToValueAtTime(0, now + 0.3);
-    for (const s of h.sources) { try { s.stop(now + 0.35); } catch (_) { /* already stopped */ } }
+    if (a.gain) {
+      a.gain.gain.cancelScheduledValues(now);
+      a.gain.gain.setValueAtTime(a.gain.gain.value, now);
+      a.gain.gain.linearRampToValueAtTime(0, now + fade);
+    }
+    for (const s of a.sources) { try { s.stop(now + fade + 0.05); } catch (_) { /* already stopped */ } }
+    const g = a.gain;
+    if (g && typeof setTimeout === 'function') {
+      setTimeout(() => { try { g.disconnect(); } catch (_) { /* ignore */ } }, (fade + AMBIENCE_LOOKAHEAD + 0.5) * 1000);
+    }
   } catch (_) { /* ignore */ }
 }
 // ---- WO8 (Agent F): Pack-a-Punch ----
@@ -577,9 +770,9 @@ function startPapWork(t0) {
 }
 
 function onLevelStart(p) {
-  stopLabHum();
+  stopAmbience();
   if (p && p.index > 0) playSfx('levelStart', p);
-  if (isLabLevel(p)) startLabHum();
+  startAmbience(ambienceIdFor(p)); // WO9: one per-level ambience (fades in over 1.5 s)
 }
 
 const SFX = {
@@ -851,6 +1044,56 @@ const SFX = {
     });
     noise(u, { t: 0.1, dur: 0.7, peak: 0.06, attack: 0.08, filter: 'highpass', freq: 5000, freq1: 9000 });
   },
+  // ---- WO9 (Agent H) ----
+  // boss:frost: an icy inhale over the telegraph (rising band-passed air + a thin glassy sine
+  // swelling in), then the breath hiss (bright high-passed noise with crystalline tinkles).
+  frostBreath() {
+    if (rateLimited('frostBreath', 0.3)) return;
+    const b = bossBus();
+    const tele = Math.max(0.2, Math.min(1.5, Number(BOSS && BOSS.frost && BOSS.frost.telegraph) || 0.6));
+    noise(b, { dur: 0.06, peak: 0.26, attack: tele - 0.02, filter: 'bandpass', freq: 700, freq1: 2600, q: 1.6 });
+    noise(b, { dur: 0.05, peak: 0.12, attack: tele - 0.03, filter: 'highpass', freq: 4000, freq1: 7000, q: 0.7 });
+    tone(b, { type: 'sine', f0: 1800, f1: 3400, dur: 0.05, peak: 0.05, attack: tele - 0.02 });
+    voice(b, { f0: 70, f1: 95, dur: 0.08, peak: 0.1, attack: tele - 0.05, formants: [[900, 5, 1], [2400, 6, 0.5]] });
+    const t = tele;
+    noise(b, { t, dur: 0.6, peak: 0.34, attack: 0.02, filter: 'highpass', freq: 2800, freq1: 1600, q: 0.7 });
+    noise(b, { t, dur: 0.5, peak: 0.16, attack: 0.03, filter: 'bandpass', freq: 1200, freq1: 700, q: 1.2 });
+    for (let i = 0; i < 7; i++) {
+      tone(b, { type: 'sine', f0: rrange(3200, 6400), t: t + 0.04 + i * rrange(0.05, 0.09), dur: 0.06, peak: 0.035, attack: 0.001 });
+    }
+  },
+  // boss:tide: a rising water roar. Low-passed noise opening up over the telegraph, a sub swell,
+  // a bubbling gurgle, then a broad crashing wash that decays while the wave rolls out.
+  tideRoar() {
+    if (rateLimited('tideRoar', 0.3)) return;
+    const b = bossBus();
+    const tele = Math.max(0.2, Math.min(1.5, Number(BOSS && BOSS.tide && BOSS.tide.telegraph) || 0.8));
+    noise(b, { dur: 0.15, peak: 0.3, attack: tele, filter: 'lowpass', freq: 220, freq1: 1400, q: 1.5 });
+    tone(b, { type: 'sine', f0: 38, f1: 62, dur: 1.4, peak: 0.35, attack: tele });
+    gurgle(b, 0.05, tele);
+    const t = tele;
+    noise(b, { t, dur: 1.4, peak: 0.42, attack: 0.05, filter: 'lowpass', freq: 2600, freq1: 300, q: 0.7 });
+    noise(b, { t, dur: 0.9, peak: 0.16, attack: 0.03, filter: 'highpass', freq: 3000, freq1: 1500, q: 0.7 });
+    noise(b, { t: t + 0.25, dur: 1.1, peak: 0.14, attack: 0.15, filter: 'bandpass', freq: 500, freq1: 250, q: 2 });
+  },
+  // level:teleport: a whoosh. Band-passed noise sweeping up then down, a rising sine and a shimmer.
+  teleport() {
+    const w = buses.world;
+    noise(w, { dur: 0.35, peak: 0.28, attack: 0.25, filter: 'bandpass', freq: 300, freq1: 4200, q: 1.4 });
+    noise(w, { t: 0.55, dur: 0.5, peak: 0.2, attack: 0.02, filter: 'bandpass', freq: 4200, freq1: 350, q: 1.4 });
+    tone(w, { type: 'sine', f0: 180, f1: 1500, dur: 0.55, peak: 0.12, attack: 0.04 });
+    tone(w, { type: 'triangle', f0: 90, f1: 45, t: 0.55, dur: 0.4, peak: 0.16, attack: 0.005 });
+    notes(buses.ui, [1047, 1319, 1568, 2093], { type: 'sine', step: 0.05, dur: 0.25, peak: 0.05, t0: 0.5 });
+  },
+  // levelselect:open / close: soft UI blips (rising / falling pair of quiet sines).
+  uiOpen() {
+    if (rateLimited('uiBlip', 0.05)) return;
+    notes(buses.ui, [660, 990], { type: 'sine', step: 0.06, dur: 0.09, peak: 0.1 });
+  },
+  uiClose() {
+    if (rateLimited('uiBlip', 0.05)) return;
+    notes(buses.ui, [990, 620], { type: 'sine', step: 0.06, dur: 0.09, peak: 0.09 });
+  },
   board(p) {
     const byZombie = p && p.by === 'zombie';
     const f = byZombie ? rrange(120, 160) : rrange(200, 260);
@@ -898,12 +1141,12 @@ function onZombieKilledSfx(p) {
 export function initAudio() {
   for (const u of unsubs) { try { u(); } catch (_) { /* ignore */ } }
   unsubs = [];
-  stopLabHum(); // WO7: a re-init (restart path) never leaves the lab hum running
+  stopAmbience(); // WO7/WO9: a re-init (restart path) never leaves a level ambience running
   stopPapWork(0.05); // WO8: nor the Pack-a-Punch hum/jingle
   const sub = (event, fn) => { unsubs.push(on(event, fn)); };
 
   sub('game:start', () => createContext());
-  sub('game:restart', () => { tryResume(); gunVoices = []; thunderVoices = []; stopLabHum(); stopPapWork(); });
+  sub('game:restart', () => { tryResume(); gunVoices = []; thunderVoices = []; stopAmbience(); stopPapWork(); });
 
   sub('weapon:fired', p => playSfx('gunshot', p));
   sub('weapon:reload', () => playSfx('reload'));
@@ -939,11 +1182,17 @@ export function initAudio() {
   sub('melee:swing', () => playSfx('meleeSwing'));
   sub('melee:hit', p => playSfx('meleeHit', p));
   sub('boss:spit', () => playSfx('bossSpit'));
-  sub('game:over', () => stopLabHum());
-  sub('level:descend', () => stopLabHum());
+  sub('game:over', () => stopAmbience());
+  sub('level:descend', () => stopAmbience());
   // WO8
   sub('pap:start', p => playSfx('papStart', p));
   sub('pap:done', p => playSfx('papDone', p));
   sub('game:over', () => stopPapWork());
   sub('level:descend', () => stopPapWork());
+  // WO9
+  sub('boss:frost', () => playSfx('frostBreath'));
+  sub('boss:tide', () => playSfx('tideRoar'));
+  sub('level:teleport', () => playSfx('teleport'));
+  sub('levelselect:open', () => playSfx('uiOpen'));
+  sub('levelselect:close', () => playSfx('uiClose'));
 }

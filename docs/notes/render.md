@@ -535,3 +535,145 @@ Tunables are in `RENDER` in `src/config.js`: `flicker`, `buyPlateOverPlayerAlpha
   - A pink bolt and splash, and a gold cone. A base Ray Gun splash latches `pap: false`.
   - `render()` with the machine working and 25 zombies: median 0.1 ms, max 0.9 ms. No console errors.
   - `npm test` 552/552; `node --check` is clean.
+
+## WO9 (Agent F): KINO / OUTPOST / TEMPLE looks, pits, overlays, frost + tide, slowed player
+- **Style dispatch.** `buildTheme` resolves `style`: `raw.style` if it is `kino` / `outpost` /
+  `temple`, else the theme-name prefix (`/^KINO\b/`, `/^OUTPOST\b/`, `/^TEMPLE\b/`), so loop themes
+  (`KINO — FLOODED`) keep their look. `styleHints(raw, style)` reads the optional level-theme hints
+  with defaults: KINO `curtain seat lamp grain stageRows curtainRow seatRows`; OUTPOST
+  `ice iceDeep hutWood snow`; TEMPLE `waterDeep waterLight moss vine glyph spores`. Both the style
+  and a hint signature are in `theme.sig`, so the static-layer key changes with them. A style theme
+  skips the WO5 checker, flecks, brickwork, lab panels and the grid, and uses its own painters.
+- **Pits (`T_PIT = 12`, `~`).** They are painted per theme by `paintPits`, after the floor and before
+  the walls. They are never walls: `map.walls` holds code 1 only, pits are not in `isSolidCode`,
+  they get no brick and no edge of their own, and `findDecorBlocks` / `wallComponents` treat them
+  as separators. Wall tiles that border a pit do get their normal edge line. OUTPOST: dark
+  blue-cyan water (`iceDeep` x 0.6), deeper centre, glints, a few ice floes, a 5 px ice shelf with a
+  jagged `ice` edge on every shore, and sparse cracks into the snow. TEMPLE: `waterDeep`, depth
+  shading, a lip shadow, a sandstone lip and a few algae pads. Any other theme: a dark hole with a
+  lip (`wallEdge`-tinted on KINO).
+- **KINO.** The floor is carpet: a `floorAlt` diamond in every tile inside a gold (`accent`)
+  diagonal lattice, with centre studs and nap specks. `stageRows` across the curtain line's span
+  become wooden stage boards (plain floor tiles only). Walls are dark wood panels (3 boards, grain)
+  with gold trim and brass studs on every floor-facing side, plus the gold `wallEdge`.
+  - `kinoDecor` looks at free-standing, 1-tile-thick, pure-wall rows. The `curtainRow` row becomes
+    the red velvet curtain: pleats, a dark valance and a gold fringe with tassels, facing away from
+    the Pack-a-Punch. The `seatRows` rows become two seats per tile (cushion, raised back with a
+    lit top, brass plate, wood armrests), facing the stage. A wall run directly behind the
+    Pack-a-Punch is also curtained.
+  - Fallback without hints: rows at least 6 long; the one nearest the machine (within 5 tiles) is
+    the curtain and the rest are seats. Checked on KINO II.
+  - Lamps: `theme.torch` positions, but `drawKinoLamps` draws a steady amber-white glow (the `lamp`
+    colour), a brass sconce and a bulb instead of flames. Seats and curtains get no lamps (the
+    `styleNoTorch` set, filled while painting, is read by `findTorches`).
+  - Film grain: a 128 px noise tile built once (`ihash`) is drawn as a pattern over the screen at
+    alpha `0.28 x grain / 0.035`. It is fixed to the screen and does not flicker.
+- **OUTPOST.** The floor is snow: soft drifts (a bright ellipse with a blue shadow), wind streaks
+  and drift speckles. Wall masses (`wallComponents`: 4-connected over every solid-ish code; floor,
+  open spawns, arena, box and pit separate them) are classified as follows:
+  - A free-standing hollow shape of at most 12x12 is a wooden hut (`hutWood` planks along the run,
+    nails, a frost line). If it holds a perk machine or Pack-a-Punch it is a concrete building
+    instead (radar ring, command bunker): panels, form ties and an orange trim.
+  - A free solid block of 2-3 x 2-3 is a fuel tank (a steel cylinder with an orange band and frost
+    cap, drawn once per block) if it contains a buy or pocket. A pure block is an ice column (arena).
+  - Everything else is grey-blue rock: boulder facets, cracks and snow caps.
+  - Any rock tile with open ground on both opposite sides (floor, pit or gate) is an orange hazard
+    fence instead: snow under a chain-link mesh, a black/orange striped rail and posts with snow
+    caps. Junction tiles stay rock and read as posts.
+  - Overlay: `drawSnowfall` draws 120 flakes on 3 depths, from wall time plus camera parallax, each
+    with a 1 px blue-grey shadow so it shows on snow. Under prefers-reduced-motion it draws 36
+    static flakes. The cold tint is the theme ambient.
+- **TEMPLE.** The floor is flagstones: mortar, then 1 / 2 / 4 stones per tile shaded between
+  `floor` and `floorAlt`, with moss tufts at the joints and hairline cracks.
+  - Walls are sandstone ashlar: 2 staggered courses, per-block shade, lit tops. Every floor-facing
+    side carries a carved glyph band (circle / cross / zigzag / boxed dot) with a `glyph`-coloured
+    lit edge.
+  - `paintVines` runs after the wall edges: leafy clumps on floor-facing edges, and 1-3 strands
+    with leaves dangling onto the floor below south faces (`vine` / `moss`).
+  - `drawTempleWater(view, t, theme)` is a dynamic pass right after the static blit, over visible
+    pit tiles only. Each tile gets 2 short wavy highlight strokes that drift and grow and shrink
+    over about 4.5 s, and about 14 % of tiles get a slow expanding drip ring. It is deterministic
+    from `state.time`, uses 2 batched paths and pre-built colour strings.
+  - `drawSpores` draws 26 faint green-gold motes (10 static under reduced motion).
+- **Frost boss** (`z.frost`, E's fields). `drawBossAbilitiesFloor` runs before the zombies:
+  - The cone is cut per ray (17 rays, 10 px steps, the same blockers as `map.blocksRay`: solid
+    codes, doors and stairs; pits do not block).
+  - Telegraph: a pale fill growing with progress, a marching dashed outline, and an inner sweep
+    that reaches the range as the breath nears.
+  - Breath (`t / 0.35`): a translucent blue-white cone whose front races out, an additive white
+    core, and 40 ice particles/crystals streaming out and cut at walls.
+  - `drawBossAbilitiesFx` runs after the zombies and adds the additive icy glow, mist puffs at the
+    mouth and a pulsing ice ring during the telegraph. The angle is `z.frost.angle`, falling back to
+    the player.
+- **Tide boss** (`z.tide`).
+  - Telegraph: dark water welling under the boss, a faint dashed reach circle at `maxRadius`, a
+    teal glow, three spiral water arms tightening with progress, and orbiting droplets.
+  - Wave: centred on `z.tide.x/y`, not the boss. Per frame, 72 ray reaches from the wave centre
+    (capped at the radius) decide which arc segments are drawn, so pillars and walls cast gaps in
+    the ring.
+  - Each open segment is stroked 3 times: a band-wide translucent water body, a bright teal 6 px
+    crest and a white 2 px core. A trailing ripple is drawn at 0.78 R, with foam flecks on the
+    crest. The ring fades toward `maxRadius`.
+- **Slowed player** (`player.slowT > 0`, strength `max(0.35, slowT / BOSS.frost.slowSeconds)`):
+  an additive icy glow, a frost film over the body, a pale ring at the feet and 6 ice crystals
+  (outlined 6-point stars) circling slowly (static under reduced motion). There is also a frosty
+  screen-edge vignette, built once.
+- **No per-frame canvas allocation.** Glow sprites (`ice`, `teal`, `lamp`), the grain pattern and
+  the frost vignette are built once. Ray buffers are module `Float32Array`s. The static layer
+  carries `pits` (an Int32Array) and `cols`.
+- **Verified** in Chrome on port 8306 with the real layouts of A, B and C and E's real boss code:
+  - `setLevel(3/4/5)` and `openAllDoors`: KINO theatre (curtain line, three seat rows, stage
+    boards, lamps) and lobby; OUTPOST fences, huts, fuel tanks, concrete radar/bunker, ice holes
+    and arena ice columns; TEMPLE courtyard pool, sandstone and glyphs, vines.
+  - KINO II uses the fallback and looks the same.
+  - `startBoss` with forced phases: WENDIGO telegraph cone cut by the arena pillars, breath
+    particles, slowed player with crystals; DROWNED KING swirl and wave ring with pillar gaps.
+  - `render()` with boss + 10 minions + 24 zombies and every effect active: KINO 0.16 ms, OUTPOST
+    0.52 ms (snow + breath), TEMPLE 0.15-0.41 ms per call.
+  - No console errors. `npm test` 642/642; `node --check` is clean.
+- For INT / QA: pits in non-WO9 themes draw as dark holes. Reduced-motion behaviour (static snow
+  and spores, fixed crystals) was checked in code only, not with the media query emulated.
+
+## WO9 FIX-2 (render): QA KINO #2 #6 #7, OUTPOST #5 #6 #7 #9 #10, TEMPLE #2 #5 #6 #11
+- **KINO floor zones.** `theme.floorZones` (`[{ x0, y0, x1, y1 inclusive, floor: 'boards' | 'asphalt' | 'concrete' }]`,
+  `kind` is accepted as an alias) is normalised in `styleHints` (part of `theme.sig`) and painted in the
+  floor pass (`paintKinoZoneFloors`, over the carpet, before arena shading / spawn marks): worn boards
+  (shared `paintBoardTile` with the stage), dark asphalt with grit, cracks, puddles and oil stains,
+  concrete 2x2 slabs with seams and stains. Later zones win on overlap.
+- **Zone walls.** A wall whose open neighbour lies in an asphalt zone is brick (`paintKinoBrickTile`),
+  concrete -> grey cinder block, boards -> plain wood without gold trim plus the odd make-up mirror.
+  Brick / cinder / prop tiles are put in `styleNoEdge`, so the generic (gold) `wallEdge` line skips them.
+- **Props.** `kinoPropKinds`: a free-standing mass (not a seat row or curtain) whose centre lies in a zone
+  is a trash bin (asphalt), crate or scenery flat (concrete; thin rows are flats), costume rack or
+  crate (boards). No gold trim. The ticket booth (hint `booth: [tx, ty]`, else the free mass nearest
+  the player start within 6 tiles) gets a counter strip, dark glass and a brass grille on every open
+  side. Small free masses 3-10 rows behind the last seat row inside the seat span form the
+  projection booth: the widest (or hint `projector`) is a projector (two reels, lens, a faint
+  additive beam toward the seats), the rest are reel cabinets.
+- **Stairs.** `paintKinoStairs`: floor tiles on a stepped diagonal (inner corner whose diagonal
+  continuation is also an inner corner, outside zones) get 5 dark treads with a brass nosing.
+- **Boss body tint.** `bossTinted(sp, tint, marker, bodyMix)` optionally washes the whole sprite in the
+  tint (luminance preserving, strong reds such as eyes are kept); cached per sprite x tint x mix.
+  KINO (gold PROJECTIONIST) 0.42, TEMPLE (teal DROWNED KING) 0.38, others 0 (unchanged).
+- **Mega door plates** (SEALED and MEGA DOOR) are tagged `buy`, so the over-player re-blit uses
+  `RENDER.buyPlateOverPlayerAlpha` (35 %). `paintPlate` now tags its rect by `labelKind`.
+- **OUTPOST.** `outpostSpecialKinds` re-classifies masses: hollow buildings whose bounding boxes touch
+  within 2 tiles are merged; a merged group >= 8x5 with open bbox corners is a **glass dome**
+  (cyan panes, white mullions, glints, frost; interior floor gets planting beds and faint dome ribs),
+  other merged groups with a machine get one material. A free solid 4-6 x 3-6 blob with open corners
+  (or hint `dish`) is the **dish plinth** (concrete + a big radar dish: bowl rings, feed horn on
+  struts, red beacon); a pure 2-3 block not touching the arena is a **small dish** (arena ones stay ice
+  columns). A tank-shaped block with no other tank within 7 tiles (or hint `shed`) is the **shed**
+  (plank walls, corrugated metal roof with ridge, rust and snow). Open spawns on snow are a churned
+  snow hole (`paintSnowHole`). Frost telegraph fills x1.6 on the OUTPOST style.
+- **TEMPLE.** The tide telegraph reach circle is at `maxRadius + band * 0.6` and stroked per ray
+  (72 `rayReach` samples, the same segments as the wave), so walls and pillars cut it. In TEMPLE's
+  small arena most of it is therefore hidden (every tile in line of sight is in reach), which is
+  truthful. Glyph kinds 1/2 are an eye and a stepped pyramid.
+- **Verified** (Chrome, port 8331, `?debug=1`): KINO alley (asphalt, brick, bins, lobby stair
+  treads), dressing rooms (boards, costume racks, mirrors), projection booth (projector + cabinet
+  under the moved Juggernog), booth with Quick Revive, vault (concrete, cinder walls, crates, flats)
+  with the gold PROJECTIONIST and the faded SEALED plate over the player; OUTPOST dome, plinth dish,
+  small dish, shed, snow hole, brighter frost telegraph; TEMPLE glyphs, teal boss, reach circle
+  (checked on an open field with a forced tide). `render()` per frame: KINO 0.18 ms, OUTPOST 0.24 ms,
+  TEMPLE 0.25 ms; static-layer rebuilds 18-42 ms once per level. No console errors. `npm test` green.

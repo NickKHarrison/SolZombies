@@ -24,7 +24,7 @@ opened, and the mystery box is two doors deep.
 Mega door and boss: once all five doors on a level are open, the iron **mega door** in the deepest
 zone can be bought (before that its prompt reads "MEGA DOOR — open all doors first").
 Its price rises by 250 per level: **250** on
-level 1, **500** on level 2, **750** on level 3, **1000** on level 4, and so on for later loops.
+level 1, **500** on level 2, **750** on level 3, **1000** on level 4, **1250** on level 5, **1500** on level 6, and so on for later loops.
 It leads into the boss arena. Stepping inside seals the door behind you and starts the boss fight:
 normal rounds pause, a boss bar appears, and the boss (THE WARDEN on level 1, THE BONE PRIEST on
 level 2) hunts you, telegraphs a charge (it flashes white, then dashes; it is stunned if it hits a
@@ -45,9 +45,43 @@ tanks and flickering fluorescent lights, with tougher zombies again (2x health, 
 count). Its walls sell the three tier-3 guns (HG 40 350, M8A7 375, Peacekeeper MK2 400; also in
 the box) plus the Gorgon and Drakon. Its boss, **THE SUBJECT**, does not charge: every 6 s it
 stops, gurgles and lobs three acid globs at you; each leaves a green pool for 5 s that burns 25
-HP/s while you stand in it. After the last level the stairs loop back to level 1's layout with a
-compounding difficulty multiplier (level 4 = BUNKER II, and so on). Restarting always returns to
-level 1.
+HP/s while you stand in it.
+
+Level 4 is **KINO**, a haunted-theatre homage: you start in the grand lobby (ticket booth, stepped
+staircases) and fight through the foyer ring, the dressing rooms off a narrow backstage corridor,
+the alley behind the building and the projection room into the **auditorium**, with long rows of
+seats you move along the aisles and the **Pack-a-Punch standing centre-stage**. Red carpet with a
+gold diamond pattern, dark wood panelling, velvet curtains, warm lamps and a faint film grain.
+Its boss, **THE PROJECTIONIST**, waits in the backstage vault and charges. Zombies: 2.4x health,
+1.22x speed, 1.6x count.
+
+Level 5 is the **OUTPOST**, an arctic research station played in the open: a wide snowfield of
+huts, fuel tanks, a radar array, a greenhouse dome and a command bunker, split by chain-link
+fences with gates and **ice holes**, which you cannot walk (and zombies cannot cross) but can see
+and shoot across. Snow falls over the screen. **THE WENDIGO** (ice cavern) stops every 6 s, draws
+breath (0.6 s telegraph) and exhales a **frost cone** (30 damage) that **slows you to 55 % speed for
+2 s**; the HEALTH label shows **SLOWED** with a frost icon while it lasts. 2.9x health, 1.24x speed.
+
+Level 6 is the **TEMPLE**, a symmetric sunken jungle ruin around a flooded courtyard: animated
+**water channels** (impassable, see-through) crossed by narrow stone bridges make chokepoints and
+long sight lines; the idol hall is an island in the pool. Mossy flagstones, carved sandstone,
+hanging vines and drifting spores. **THE DROWNED KING** (flooded pit) raises his arms every 7 s
+(0.8 s telegraph) and sends out an expanding **tide ring** (40 damage, 120 px knockback) that you
+must outrun or put a pillar or wall between you and him to block. 3.5x health, 1.26x speed.
+Levels 4-6 sell tier-3 guns (HG 40, M8A7, Peacekeeper MK2) and tier-2 guns (Gorgon, Drakon,
+Man-O-War, Marshal 16), with one cheaper gun in each start room.
+
+After level 6 the stairs loop back to level 1's layout with a compounding difficulty multiplier
+(level 7 = BUNKER II, and so on; loop levels keep their look and sell upgraded wall guns, never
+the same gun twice). Restarting always returns to level 1.
+
+Level select: press **Shift+M** (or tap ‖ and then **LEVELS** on touch; the pause screen has the
+button on desktop too) to open a full-screen menu of all six levels with a mini-map, boss and
+difficulty per card; the game is paused while it is open. Arrow keys / 1-6 and Enter, or a click
+/ tap on a card, **teleport** you to that level (fresh level, you keep weapons, points, perks and
+the round, full heal and a break as after a descent; "TELEPORTED — L5 OUTPOST"). Esc or Shift+M
+again closes it. Plain M does nothing. Once you teleport, the run is a **practice run**: the game
+over screen shows "PRACTICE RUN — NOT RANKED" and the run is not saved to the high scores.
 
 Perks: every level has six perk machines in its walls (Quick Revive in the start room, Mule Kick
 in the deepest zone). Stand next to one and press F to buy; you can hold at most **four** perks
@@ -64,7 +98,8 @@ and they carry over when you descend.
 
 Pack-a-Punch: every level has one **Pack-a-Punch** machine (purple cabinet with a gold marquee)
 in the deepest zone, behind the last door (H), near the mega door: the vault on level 1, the
-sanctum on level 2, the reactor room on level 3. Hold the gun you want upgraded and press F
+sanctum on level 2, the reactor room on level 3, centre-stage in the KINO auditorium, the
+command bunker on the OUTPOST and the inner sanctum of the TEMPLE. Hold the gun you want upgraded and press F
 ("Press F to Pack-a-Punch KN-44 [500]"): you pay **500**, the gun slides into the machine, it
 works for 3 s (sparks and a jingle), then the upgraded gun waits on the tray until you take it
 (F again, "Press F to take Warden's Wrath"). It returns to the slot it came from and is made
@@ -107,6 +142,7 @@ The menu shows your best run and the top 5. The top 10 are saved in the browser'
 | 1 / 2 / 3, Q, mouse wheel | Swap weapon (3 = Mule Kick slot) |
 | Enter / Space | Start / restart |
 | Esc / P | Pause |
+| Shift+M | Level select (teleport; practice run) |
 | Backquote | Toggle debug overlay |
 
 ## Mobile (touch)
@@ -121,7 +157,8 @@ side is under 900 css px) and switch to a twin-stick touch scheme. Desktop is un
 - **Left half:** touch anywhere to spawn a move stick; drag to move, push to the edge to sprint.
 - **Right half:** aim stick. Drag to aim; drag past about a third of the way to auto-fire.
   Releasing keeps the last facing.
-- **Buttons:** RELOAD, KNIFE and SWAP (bottom right), pause (top right), and an ACTION button
+- **Buttons:** RELOAD, KNIFE and SWAP (bottom right), pause (top right; the pause screen has a
+  **LEVELS** button for the level select), and an ACTION button
   (bottom centre) that appears next to a wall buy, perk machine, door, box or barricade. Tap it to buy or open;
   hold it to rebuild a barricade.
 - **Override:** add `?touch=1` to force the touch scheme (e.g. to try it in desktop Chrome; the
@@ -141,7 +178,9 @@ Boss and levels: `openMegaDoor()` (opens every door, then the mega door, for fre
 `startBoss()` (teleports into the arena and starts the fight), `killBoss()` (kills the boss
 like a weapon kill: 200 points, stairs open), `boss()` (fight state), `descend()` (opens the
 stairs if needed and starts the fade to the next level), `setLevel(i)` (loads level index `i`
-at once; 0 = bunker, 1 = catacombs, 2 = laboratory, 3 = bunker II, ...), and
+at once; 0 = bunker, 1 = catacombs, 2 = laboratory, 3 = kino, 4 = outpost, 5 = temple,
+6 = bunker II, ...), `levelSelect()` (toggles the level select like Shift+M) / `levelSelect(i)`
+(teleports to card `i` like a pick, marks the run as practice), and
 `setDifficulty({ healthMult, speedMult, countMult, sprintShift })` (edits the current level's
 difficulty).
 

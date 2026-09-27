@@ -74,3 +74,17 @@ the sticks, and mobile banners moved up to 36cqh so they clear the sticks.
   blocked) grey the ACTION button (`.blocked`) and a tap sets neither `interact` nor
   `interactHeld`. Unaffordable prompts get `.cant-afford` (red tint) and stay tappable so the
   denied feedback plays. `main.js` passes both flags from `state.shop.prompt`.
+
+## WO9 (Agent G) - LEVELS button hook
+- `onLevelsButton(cb) -> unsubscribe` and `triggerLevelsButton()` (runs every callback).
+- **Contract for hud (Agent I):** render the pause-screen LEVELS button as any element with
+  `data-action="levels"`. On touch it sits under `#touch` (z-index 3, and `#hud *` has
+  pointer-events none), so touch.js forwards the tap: a touch-layer pointerdown that is not on a
+  `.tbtn` and whose point lies inside a visible (`checkVisibility`, non-zero rect) `[data-action="levels"]`
+  element anywhere in the document runs the callbacks, grabs no stick and sets no `start` edge
+  (only when at least one callback is registered). On desktop (touch layer hidden) hud gives the
+  button `pointer-events:auto` and calls `touch.triggerLevelsButton()` from its click handler
+  (or main wires the click itself). main registers `touch.onLevelsButton(() => open level select)`.
+- While the overlay is open, levelselect.js hides `#touch` (`html.ls-open`), so taps reach the cards.
+- Verified in Chrome (`?debug=1&touch=1`): synthetic touch pointerdown over a `data-action="levels"`
+  div -> callback once, no start edge; with the div hidden the same tap is a normal start tap.

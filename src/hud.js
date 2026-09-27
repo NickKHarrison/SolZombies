@@ -8,6 +8,7 @@ import { createFaceState, updateFaceState, faceEvent, faceFrameKey, composeFace 
 import * as bossMod from './boss.js'; // WO5: boss bar reads bossHpFrac lazily (guarded)
 import * as config from './config.js'; // WO7: PERKS (perk row, revive overlay, banner), guarded
 import * as weaponsMod from './weapons.js'; // WO7: favourite weapon name on game over (guarded)
+import * as touchMod from './touch.js'; // WO9: LEVELS click -> touch.triggerLevelsButton (guarded)
 
 // Fallback labels in case powerups.js does not (yet) provide a key.
 const FALLBACK_LABEL = {
@@ -31,6 +32,7 @@ let root = null;
 let els = null;
 let unsubs = [];
 let lastPhase = null;
+let lastLevelStyle = null;       // WO9 FIX-4: mirrored onto #stage/#hud[data-level-style]
 let chips = new Map();           // type -> { el, label, time }
 let faceState = null;            // WO2 3.8: status face state machine (sprites/face.js)
 let faceKey = null;              // last drawn faceFrameKey
@@ -65,6 +67,10 @@ let lastState = null;            // for rebuilding the centre screen when mobile
 let scoreSummary = null;
 let gameOverSummary = null;
 const TOP_ROWS = 5;
+// WO9 (Agent I): pause-screen LEVELS button listeners (hud.onLevelsButton). Module level, so they
+// survive initHud / screen rebuilds; each button click calls every listener once.
+const levelsListeners = new Set();
+const PRACTICE_TEXT = 'PRACTICE RUN — NOT RANKED';
 
 // ---------- small DOM helpers ----------
 
@@ -97,6 +103,26 @@ function retrigger(e, cls) {
 
 function labelFor(type) {
   return (POWERUP_LABEL && POWERUP_LABEL[type]) || FALLBACK_LABEL[type] || String(type).toUpperCase();
+}
+
+// WO9: small six-armed ice crystal (inline SVG, stroke = currentColor).
+function iceIcon() {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '-12 -12 24 24');
+  svg.setAttribute('class', 'hud-slow-icon');
+  svg.setAttribute('aria-hidden', 'true');
+  let d = '';
+  for (let i = 0; i < 6; i++) {
+    const a = (i * Math.PI) / 3;
+    const c = Math.cos(a), s = Math.sin(a);
+    const p = (r, t) => `${(c * r - s * t).toFixed(2)} ${(s * r + c * t).toFixed(2)}`;
+    d += `M0 0L${p(11, 0)}M${p(6, 0)}L${p(9, 3)}M${p(6, 0)}L${p(9, -3)}`;
+  }
+  const path = document.createElementNS(NS, 'path');
+  path.setAttribute('d', d);
+  svg.append(path);
+  return svg;
 }
 
 // ---------- build ----------
@@ -147,7 +173,14 @@ function build() {
   const vitals = el('div', 'hud-vitals hidden');
   const health = el('div', 'hud-vital hud-vital-health');
   const healthValue = el('div', 'hud-vital-value', '100%');
-  health.append(el('div', 'hud-vital-label', 'HEALTH'), healthValue);
+  // WO9: the label row swaps "HEALTH" for an ice-crystal icon + "SLOWED" while player.slowT > 0
+  // (frost breath). Same row, same width budget, so nothing else in the bottom-left moves.
+  const healthLabel = el('div', 'hud-vital-label');
+  const healthLabelText = el('span', 'hud-vital-label-text', 'HEALTH');
+  const slow = el('span', 'hud-slow hidden');
+  slow.append(iceIcon(), el('span', 'hud-slow-text', 'SLOWED'));
+  healthLabel.append(healthLabelText, slow);
+  health.append(healthLabel, healthValue);
   const kills = el('div', 'hud-vital hud-vital-kills');
   const killsValue = el('div', 'hud-vital-value', '0');
   kills.append(el('div', 'hud-vital-label', 'KILLS'), killsValue);
@@ -182,7 +215,7 @@ function build() {
     round, roundTally, roundNum,
     weapon, weaponSecondary, weaponName, weaponAmmo, ammoMag, ammoSep, ammoReserve, weaponReload,
     powerups, banner, prompt, screen,
-    faceBox, vitals, health, healthValue, faceCanvas, kills, killsValue,
+    faceBox, vitals, health, healthValue, faceCanvas, kills, killsValue, healthLabelText, slow,
     levelLabel, bossBar, bossName, bossLag: bossLagEl, bossFill,
     perks, down, downFill,
   };
@@ -214,6 +247,7 @@ function buildScreen(state) {
       ['RELOAD / SWAP / ‖', 'Reload / swap weapon / pause'],
       ['KNIFE', 'Melee swing'],
       ['ACTION', 'Buy / open / rebuild (hold)'],
+      ['‖ → LEVELS', 'Level select'],
     ] : [
       ['WASD / Arrows', 'Move'],
       ['Shift', 'Sprint'],
@@ -223,6 +257,7 @@ function buildScreen(state) {
       ['F / E', 'Buy guns / perks / doors / rebuild (hold)'],
       ['1 / 2 / 3 / Q / Wheel', 'Swap weapon (3 = Mule Kick)'],
       ['Esc / P', 'Pause'],
+      ['Shift+M', 'Level select'],
     ];
     for (const [k, v] of controls) {
       const li = el('li');
@@ -243,7 +278,13 @@ function buildScreen(state) {
       el('div', 'screen-headline', `YOU SURVIVED ${sum.rounds} ROUND${sum.rounds === 1 ? '' : 'S'}`),
     );
     // WO7 T4: rank line ("NEW BEST ROUND!" and/or "#3 ALL TIME").
-    if (g && g.rankText) {
+    // WO9: a run that used the level select is practice: fixed line, no rank, no table highlight.
+    const practice = isPractice(state, g);
+    if (practice) {
+      const line = el('div', 'screen-rank practice');
+      line.append(el('span', 'rank-practice', PRACTICE_TEXT));
+      s.append(line);
+    } else if (g && g.rankText) {
       // FIX-2 (playtest #13): unranked runs (died before round 1) show main.js's rankText instead.
       const line = el('div', 'screen-rank');
       line.append(el('span', 'rank-pos', String(g.rankText)));
@@ -279,15 +320,54 @@ function buildScreen(state) {
     const cols = el('div', 'screen-cols');
     cols.append(table);
     const top = topOf(g);
-    if (top.length) cols.append(buildTopTable(top, g && Number(g.rank) > 0 ? (g.rank | 0) : 0));
+    if (top.length) cols.append(buildTopTable(top, !practice && g && Number(g.rank) > 0 ? (g.rank | 0) : 0));
     s.append(cols, el('div', 'screen-sub blink', mobileHud ? 'Tap to restart' : 'Press Enter to restart'));
   } else if (phase === 'paused') {
     s.append(
       el('div', 'screen-title', 'PAUSED'),
       el('div', 'screen-sub', mobileHud ? 'Tap ‖ to resume' : 'Press Esc / P to resume'),
+      buildLevelsButton(),
     );
+    // WO9: key hint on desktop; on touch the LEVELS button is the hint.
+    if (!mobileHud) s.append(el('div', 'screen-hint', 'Shift+M — Level select'));
   }
   s.dataset.phase = phase;
+}
+
+// ---------- WO9: LEVELS button + practice flag ----------
+
+// Pause-screen LEVELS button (desktop and touch). data-action="levels" is the touch.js /
+// levelselect contract hook; a click (mouse or tap) calls every hud.onLevelsButton listener.
+function buildLevelsButton() {
+  const b = el('button', 'screen-btn screen-btn-levels', 'LEVELS');
+  b.type = 'button';
+  b.dataset.action = 'levels';
+  b.setAttribute('aria-label', 'Level select');
+  b.addEventListener('pointerdown', (ev) => ev.stopPropagation()); // not a stage/stick tap
+  b.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    try { b.blur(); } catch { /* ignore */ } // Enter / Space must not re-press it later
+    fireLevels();
+  });
+  return b;
+}
+
+// One click = one notification per channel: hud.onLevelsButton listeners, then touch.js's
+// onLevelsButton callbacks via touch.triggerLevelsButton (Agent G's single channel for taps and
+// clicks). Main should subscribe through ONE of the two, else a click fires twice.
+function fireLevels() {
+  try {
+    if (typeof touchMod.triggerLevelsButton === 'function') touchMod.triggerLevelsButton();
+  } catch (err) { console.error('[hud] touch.triggerLevelsButton', err); }
+  for (const cb of [...levelsListeners]) {
+    try { cb(); } catch (err) { console.error('[hud] levels listener', err); }
+  }
+}
+
+function isPractice(state, g) {
+  if (g && typeof g === 'object' && g.practice != null) return !!g.practice;
+  return !!(state && state.stats && state.stats.practice);
 }
 
 // ---------- WO7 T4: score formatting helpers ----------
@@ -499,8 +579,18 @@ function onBossDefeated() {
 
 function onLevelStart(p) {
   if (!p || !(p.index > 0)) return; // no banner for the first level of a new game
+  if (p.teleport) return;           // WO9 (INT): level:teleport shows "TELEPORTED — L<n> <NAME>" instead
   const n = (p.index | 0) + 1;
   queueBanner(p.name ? `LEVEL ${n} — ${String(p.name).toUpperCase()}` : `LEVEL ${n}`);
+}
+
+// WO9 (INT): level-select teleport banner, same queue. `to` is the absolute index (L<to+1>).
+function onLevelTeleport(p) {
+  if (!p || !Number.isFinite(p.to)) return;
+  const n = (p.to | 0) + 1;
+  const name = p.name || (lastState && lastState.level && lastState.level.name) || '';
+  bannerQueue = bannerQueue.filter((t) => !t.startsWith('TELEPORTED')); // only the latest teleport waits
+  queueBanner(`TELEPORTED — L${n}${name ? ' ' + String(name).toUpperCase() : ''}`);
 }
 
 // WO7 T2: "<PERK NAME>" banner on purchase (same queue as FIRE SALE! / BOSS / LEVEL banners).
@@ -552,6 +642,7 @@ export function initHud(rootEl) {
   if (!root) return;
   chips = new Map();
   lastPhase = null;
+  lastLevelStyle = null;
   faceState = createFaceState(1);
   faceKey = null;
   grinBlockT = GRIN_SUPPRESS_SECONDS;
@@ -577,6 +668,7 @@ export function initHud(rootEl) {
     on('boss:start', onBossStart),
     on('boss:defeated', onBossDefeated),
     on('level:start', onLevelStart),
+    on('level:teleport', onLevelTeleport),
     on('perk:bought', onPerkBought),
     on('pap:done', onPapDone),
   );
@@ -597,6 +689,7 @@ export function updateHud(state) {
     if (phase === 'menu' || phase === 'gameover') resetBanners();
   }
 
+  updateLevelStyle(state);
   updatePoints(state.player);
   updateRound(state.rounds);
   updateWeapon(state.player);
@@ -609,6 +702,22 @@ export function updateHud(state) {
   updatePerks(state);
   updateDown(state);
   markSeenWeapons(state.player);
+}
+
+// WO9 FIX-4 (QA OUTPOST #3): expose the level's theme style for CSS (bright-level contrast on
+// the HUD and touch controls). Set on #hud and its #stage parent (#touch is a sibling of #hud).
+// Polled per frame because the first level's level:start fires before the HUD listens.
+function updateLevelStyle(state) {
+  const th = (state.map && state.map.theme) || (state.level && state.level.def && state.level.def.theme) || null;
+  const style = (state.phase !== 'menu' && th && typeof th.style === 'string') ? th.style : '';
+  if (style === lastLevelStyle) return;
+  lastLevelStyle = style;
+  const targets = [root, root.parentElement];
+  for (const el of targets) {
+    if (!el || !el.dataset) continue;
+    if (style) el.dataset.levelStyle = style;
+    else delete el.dataset.levelStyle;
+  }
 }
 
 // ---------- WO7 T4: high scores (menu) + run summary (game over) ----------
@@ -626,6 +735,14 @@ export function setScores(summary) {
 export function setGameOverSummary(summary) {
   gameOverSummary = summary && typeof summary === 'object' ? summary : null;
   if (els && lastState && lastPhase === 'gameover') buildScreen(lastState);
+}
+
+// WO9: subscribe to the pause-screen LEVELS button (desktop click and touch tap). Returns an
+// unsubscribe function. Listeners are kept across initHud; the same function is added once.
+export function onLevelsButton(cb) {
+  if (typeof cb !== 'function') return () => {};
+  levelsListeners.add(cb);
+  return () => { levelsListeners.delete(cb); };
 }
 
 // ---------- WO7 T2: perk row + revive overlay ----------
@@ -777,6 +894,11 @@ function updateStatus(state) {
   setText(els.healthValue, shownPct + '%');
   setClass(els.health, 'warn', !p.down && frac < HEALTH_YELLOW && frac >= HEALTH_RED);
   setClass(els.health, 'crit', p.down || frac < HEALTH_RED);
+  // WO9: frost slow (Agent E's player.slowT) -> ice icon + "SLOWED" in the HEALTH label row.
+  const slowed = !p.down && numOr(p.slowT, 0) > 0 && lastPhase !== 'gameover' && lastPhase !== 'menu';
+  setHidden(els.slow, !slowed);
+  setHidden(els.healthLabelText, slowed);
+  setClass(els.health, 'slowed', slowed);
 
   setText(els.killsValue, (state.stats && state.stats.kills) | 0);
 

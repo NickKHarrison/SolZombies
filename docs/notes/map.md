@@ -256,3 +256,27 @@ in `WALLBUY_MAP` but not placed (box-only in practice).
   blocked / busy / take).
 - Tests (`tests/map.test.js`, "WO8 ..."): parse + null, duplicates / wall-buy clash, movers / rays /
   flow field, active-spawn and arena floods, nearestInteractable range edge and tie order.
+
+
+## WO9 (Agent D): pit tile `~`
+
+- `TILE_PIT = 12`, legend char `'~'` (in `CHAR_CODE`). Ice hole / water channel.
+- **Movement:** `isWalkable` returns false for both movers (default branch), so `resolveCircle`
+  treats it as solid for the player and zombies (movement, knockback slides, `pushZombie` /
+  boss knockback paths, powerup drop snapping via `isWalkable`). Pathfinding walks only 0/2/3/6
+  (`ZOMBIE_WALKABLE` whitelist), so flow fields route around pits (verified, pathfinding.js not
+  edited).
+- **Rays:** `blocksRay` does not list 12, so `raycastWalls` passes over pits: bullets, LOS,
+  splash LOS, Thundergun, boss tide LOS all see across.
+- **Floods:** solid in `computeArena` and `recomputeActiveSpawns` (whitelists exclude 12).
+  `nearestInteractable` is pure edge distance (never looked at tiles), unchanged: an interactable
+  across a narrow pit can be in range; the level checker forbids perks / `A` 4-adjacent to `~`.
+- **Acid:** `zombie.acidLandingPoint` filters with `isWalkable(.., false)`, so acid never lands in
+  a pit (tested).
+- `map.walls` still holds only code-1 tiles; pits are not wall rects.
+- **For render (F):** code 12 is not in `isSolidCode` / `isOpenFloorCode`, so wall tiles next to a
+  pit get an outline edge on that side (like facing floor) and floor decorations skip pit tiles.
+  The base floor fill will cover pit tiles unless F paints them (water / ice hole per theme).
+- Tests (`tests/map.test.js`, "WO9 ..."): code + parse + walls exclusion, shoot-across /
+  no-walk-across, `resolveCircle` push-out for both movers (edge, centre inside, slide), flow
+  field detour vs. full split, active-spawn / arena floods, acid landing.

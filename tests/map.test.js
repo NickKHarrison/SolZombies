@@ -7,8 +7,9 @@ import {
   raycastWalls, tearBoard, repairBoard, repairAll, barricadeOpen, nearestInteractable,
   TILE_DOOR, DOOR_MAP, openDoor, recomputeActiveSpawns, isSpawnActive,
   TILE_ARENA_SPAWN, TILE_STAIRS, allDoorsOpen, megaDoorUnlockable, openMegaDoor, sealMegaDoor,
-  unsealMegaDoor, openStairs, inArena, isBossActiveBlocking,
+  unsealMegaDoor, openStairs, inArena, isBossActiveBlocking, TILE_PIT, TILE_WALL,
 } from '../src/map.js';
+import { acidLandingPoint } from '../src/zombie.js';
 import { DOORS } from '../src/config.js';
 import { LEVELS } from '../src/levels/levels.js';
 import { LEVEL1 } from '../src/levels/level1.js';
@@ -963,4 +964,102 @@ test('WO8 nearestInteractable: pap kind, range edge, tie order (after perk, befo
   const t2 = loadMap(['#####', '#D.A#', '#.P.#', '#####']);
   hit = nearestInteractable(t2, (t2.doors[0].x + TILE + t2.pap.x) / 2, t2.pap.y + TILE / 2, PLAYER.interactRange);
   assert.equal(hit.kind, 'pap');
+});
+
+// ---- WO9: pit tile '~' ----------------------------------------------------------------------
+// Column tx=3 is a pit that fully splits the room (rows 1-2); PIT_DETOUR adds an open row 3.
+const PIT_SPLIT = ['#######', '#P.~..#', '#..~..#', '#######'];
+const PIT_DETOUR = ['#######', '#P.~..#', '#..~..#', '#.....#', '#######'];
+
+test('WO9 TILE_PIT: code 12, parsed from ~, not a wall rect', () => {
+  assert.equal(TILE_PIT, 12);
+  const m = loadMap(PIT_SPLIT);
+  assert.equal(code(m, 3, 1), TILE_PIT);
+  assert.equal(code(m, 3, 2), TILE_PIT);
+  // map.walls covers exactly the '#' tiles (pits are drawn by render, not merged as walls)
+  const hashes = PIT_SPLIT.join('').split('').filter((c) => c === '#').length;
+  const area = m.walls.reduce((a, r) => a + (r.w * r.h) / (TILE * TILE), 0);
+  assert.equal(area, hashes);
+  for (const r of m.walls) {
+    for (let ty = r.y / TILE; ty < (r.y + r.h) / TILE; ty++) {
+      for (let tx = r.x / TILE; tx < (r.x + r.w) / TILE; tx++) assert.equal(code(m, tx, ty), TILE_WALL);
+    }
+  }
+});
+
+test('WO9 pit: can shoot across it but not walk across it', () => {
+  const m = loadMap(PIT_SPLIT);
+  assert.equal(isWalkable(m, 3, 1, false), false);
+  assert.equal(isWalkable(m, 3, 1, true), false);
+  // ray from the start tile centre east passes over the pit and hits the east wall (tx=6)
+  const ox = 1.5 * TILE, oy = 1.5 * TILE;
+  const t = raycastWalls(m, ox, oy, 1, 0);
+  assert.ok(Math.abs(t - (6 * TILE - ox)) < 1e-6, `ray stopped at ${t}`);
+  // a ray starting inside the pit is not "inside a wall"
+  assert.ok(raycastWalls(m, 3.5 * TILE, 1.5 * TILE, 1, 0) > 0);
+  // a limited ray over the pit reports no hit
+  assert.equal(raycastWalls(m, ox, oy, 1, 0, 3 * TILE), Infinity);
+  // the player cannot walk from P to the far side
+  const d = bfs(m, [startTile(m)], (tx, ty) => isWalkable(m, tx, ty, false));
+  assert.equal(d[1 * m.cols + 4], -1);
+  assert.equal(d[1 * m.cols + 2], 1);
+});
+
+test('WO9 pit: resolveCircle pushes both movers out (edge overlap, centre inside, slide)', () => {
+  const m = loadMap(PIT_SPLIT);
+  const r = 14;
+  for (const fz of [false, true]) {
+    // overlapping the pit's west edge -> pushed back to x = 3*TILE - r
+    let p = resolveCircle(m, 3 * TILE - 5, 1.5 * TILE, r, fz);
+    assert.ok(Math.abs(p.x - (3 * TILE - r)) < 1e-6, `fz=${fz} x=${p.x}`);
+    assert.ok(Math.abs(p.y - 1.5 * TILE) < 1e-6);
+    // centre inside the pit -> leaves to a walkable tile, no overlap with the pit
+    p = resolveCircle(m, 3.3 * TILE, 1.5 * TILE, r, fz);
+    const t = worldToTile(p.x, p.y);
+    assert.ok(isWalkable(m, t.tx, t.ty, fz), `fz=${fz} landed in ${t.tx},${t.ty}`);
+    assert.ok(p.x <= 3 * TILE - r + 1e-6 || p.x >= 4 * TILE + r - 1e-6);
+    // knockback-style slide along the pit edge keeps the tangential component
+    p = resolveCircle(m, 3 * TILE - 5, 1.8 * TILE, r, fz);
+    assert.ok(Math.abs(p.x - (3 * TILE - r)) < 1e-6);
+    assert.ok(Math.abs(p.y - 1.8 * TILE) < 1e-6);
+  }
+});
+
+test('WO9 pit: zombies path around pits, never through them', () => {
+  const split = loadMap(PIT_SPLIT);
+  const f1 = buildFlowField(split, 5.5 * TILE, 1.5 * TILE);
+  assert.equal(distanceAt(f1, 1.5 * TILE, 1.5 * TILE), Infinity);
+  assert.equal(distanceAt(f1, 3.5 * TILE, 1.5 * TILE), Infinity); // the pit tile itself
+  const m = loadMap(PIT_DETOUR);
+  const f = buildFlowField(m, 5.5 * TILE, 1.5 * TILE);
+  // straight line would be 4 steps; around the pit via row 3 it is 2 + 4 + 2
+  assert.equal(distanceAt(f, 1.5 * TILE, 1.5 * TILE), 8);
+  assert.equal(distanceAt(f, 2.5 * TILE, 1.5 * TILE), 7);
+  assert.equal(distanceAt(f, 3.5 * TILE, 2.5 * TILE), Infinity);
+});
+
+test('WO9 pit: solid for the active-spawn search and the arena flood, otherwise neutral', () => {
+  const s = loadMap(['#######', '#P.~.O#', '#######']);
+  assert.equal(isSpawnActive(s, s.spawnPoints[0].id), false);
+  const s2 = loadMap(['#######', '#P.~.O#', '#.....#', '#######']);
+  assert.equal(isSpawnActive(s2, s2.spawnPoints[0].id), true);
+  // arena: floor beyond a pit that cuts it off is not arena; a pit inside a connected arena
+  // is excluded itself but does not shrink the rest
+  const a = loadMap(['########', '#P#Z.~.#', '########']);
+  const at = (mm, tx, ty) => inArena(mm, tileToWorld(tx, ty).x, tileToWorld(tx, ty).y);
+  assert.equal(at(a, 4, 1), true);
+  assert.equal(at(a, 5, 1), false);
+  assert.equal(at(a, 6, 1), false);
+  const b = loadMap(['########', '#P#Z.~.#', '###....#', '########']);
+  assert.equal(at(b, 5, 1), false);
+  assert.equal(at(b, 6, 1), true);
+  assert.equal(b.arenaTiles.size, 7);
+});
+
+test('WO9 pit: boss acid never lands in a pit', () => {
+  const m = loadMap(PIT_DETOUR);
+  const p = acidLandingPoint(m, undefined, 3.5 * TILE, 1.4 * TILE, 1.5 * TILE, 1.5 * TILE);
+  const t = worldToTile(p.x, p.y);
+  assert.notEqual(code(m, t.tx, t.ty), TILE_PIT);
+  assert.ok(isWalkable(m, t.tx, t.ty, false));
 });

@@ -16,6 +16,9 @@
 // WO7 3.4 (Agent I): perk machines (wall tiles J Q C N U K): Q chapel (22,11), C ossuary (30,2),
 //   J west crypts (2,19), N bone chamber (57,6), U charnel pit (26,37), K sanctum (34,37).
 // WO8 1.1 (Agent C): Pack-a-Punch machine A (map.js TILE_PAP) on the sanctum altar's NE corner (38,31).
+// WO9 FIX-1 (interact-reach check, tests/helpers/levelcheck.js checkInteractReach): XR-2 moved from
+//   (10,10) to (2,11): the crypts' north wall there is 2 thick, so it was buyable (54 px) from the
+//   ossuary floor on row 8. Same zone (crypts, behind E).
 // See docs/notes/levels.md.
 
 export const LEVEL2 = {
@@ -32,8 +35,8 @@ export const LEVEL2 = {
     '###.........................................F............###', //  7
     '###.........................................#.....##.....###', //  8
     '###########################...######3########.....##.....WS#', //  9
-    '##########6################...###############............###', // 10
-    '###................###Q####DDD###############............###', // 11
+    '###########################...###############............###', // 10
+    '##6................###Q####DDD###############............###', // 11
     '###................###.............##########............###', // 12
     '###...###...###....##...............##########..........####', // 13
     '#SW...###...###....#.................##########........#####', // 14

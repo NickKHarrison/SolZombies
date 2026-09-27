@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PLAYER, POINTS, PERKS, MELEE } from '../src/config.js';
+import { PLAYER, POINTS, PERKS, MELEE, BOSS } from '../src/config.js';
 import * as events from '../src/events.js';
 import { createEmptyState } from '../src/state.js';
 import * as weapons from '../src/weapons.js';
@@ -8,7 +8,7 @@ import * as powerups from '../src/powerups.js';
 import {
   createPlayer, initPlayer, updatePlayer, damagePlayer, addPoints, spendPoints,
   getActiveWeapon, giveWeapon, hasWeapon, equipTemporary, clearTemporary,
-  perkMods, addPerk, removeAllPerks, hasPerk,
+  perkMods, addPerk, removeAllPerks, hasPerk, slowMult,
 } from '../src/player.js';
 
 const isStub = (fn) => String(fn).includes('not implemented');
@@ -545,4 +545,57 @@ test('WO8 FIX-A (M1): Mule Kick lost with slot 0 empty switches to the first fil
   assert.deepEqual(s.player.weapons, [null, null]);
   assert.equal(s.player.activeSlot, 0);
   assert.deepEqual(eq, []);
+});
+
+// ---------------------------------------------------------------------------
+// WO9 (Agent E): frost slow (player.slowT)
+// ---------------------------------------------------------------------------
+
+test('WO9 createPlayer has slowT 0; slowMult comes from BOSS.frost', () => {
+  assert.equal(createPlayer(0, 0).slowT, 0);
+  assert.equal(slowMult(), BOSS.frost.slowMult);
+});
+
+test('WO9 frost slow: move speed x slowMult while slowT > 0, counts down, then full speed', () => {
+  const s = makeState();
+  s.player.slowT = 1;
+  updatePlayer(s, { ...noInput, moveX: 1 }, null, 0.5);
+  assert.ok(Math.abs(s.player.x - (100 + PLAYER.speed * BOSS.frost.slowMult * 0.5)) < 1e-6);
+  assert.ok(Math.abs(s.player.slowT - 0.5) < 1e-9);
+  const x1 = s.player.x;
+  updatePlayer(s, { ...noInput, moveX: 1, sprint: true }, null, 0.5);
+  assert.ok(Math.abs(s.player.x - (x1 + PLAYER.speed * PLAYER.sprintMult * BOSS.frost.slowMult * 0.5)) < 1e-6, 'sprint slowed too');
+  assert.equal(s.player.slowT, 0);
+  const x2 = s.player.x;
+  updatePlayer(s, { ...noInput, moveX: 1 }, null, 0.5);
+  assert.ok(Math.abs(s.player.x - (x2 + PLAYER.speed * 0.5)) < 1e-6, 'full speed once the slow ends');
+  // Standing still still counts the slow down.
+  s.player.slowT = 0.3;
+  updatePlayer(s, noInput, null, 0.5);
+  assert.equal(s.player.slowT, 0);
+});
+
+test('WO9 frost slow stacks multiplicatively with Stamin-Up', () => {
+  const s = makeState();
+  addPerk(s, 'stamin');
+  s.player.slowT = 2;
+  updatePlayer(s, { ...noInput, moveX: 1 }, null, 1);
+  const st = PERKS.list.stamin;
+  assert.ok(Math.abs(s.player.x - (100 + PLAYER.speed * st.speedMult * BOSS.frost.slowMult)) < 1e-6);
+});
+
+test('WO9 frost slow resets on Quick Revive, game:restart and level change', () => {
+  const s = makeState();
+  initPlayer(s);
+  addPerk(s, 'revive');
+  s.player.slowT = 2;
+  damagePlayer(s, 999);
+  assert.ok(s.player.downT > 0);
+  updatePlayer(s, noInput, null, s.player.downT + 0.01);
+  assert.equal(s.player.slowT, 0, 'revive clears the slow');
+  for (const ev of ['game:restart', 'level:descend', 'level:teleport']) {
+    s.player.slowT = 2;
+    events.emit(ev, {});
+    assert.equal(s.player.slowT, 0, ev);
+  }
 });

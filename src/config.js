@@ -200,6 +200,11 @@ export const BOSS = {
   },
   // WO7 3.1 (Phase 0): THE SUBJECT (levelDef.boss.ability 'acid'). spread = +-radians (~25 deg).
   acid: { every: 6, telegraph: 0.5, globs: 3, spread: 0.44, flight: 0.8, poolRadius: 50, poolSeconds: 5, dps: 25 },
+  // WO9 3.1 (Phase 0): THE WENDIGO (ability 'frost') and THE DROWNED KING (ability 'tide').
+  // frost: cone breath (range px, halfAngle rad) -> damage + player slow (speed x slowMult for slowSeconds).
+  frost: { every: 6, telegraph: 0.8, range: 260, halfAngle: 0.5, damage: 30, slowMult: 0.55, slowSeconds: 2 },
+  // tide: expanding ring (speed px/s up to maxRadius); hit once per wave when |dist - radius| < band.
+  tide: { every: 7, telegraph: 0.8, speed: 320, maxRadius: 420, damage: 40, knockback: 120, band: 28 },
   // WO7 FIX-5 (balance #1): Double Tap's bullet-damage multiplier is capped at this vs kind 'boss'
   // (the x1.33 rpm still applies; minions and normal zombies still take the full x2).
   dtapDamageMult: 1,
@@ -262,3 +267,11 @@ export const PAP = { letter: 'A', cost: 500, ammoCost: 450, workSeconds: 3, dama
   spreadMult: 0.8, penetrationBonus: 1, maxPenetration: 4, projectileMult: 1.5, coneKillMult: 1.25, coneRangeMult: 1.15, knockMult: 1.2,
   // WO8 Phase 4a (economy #5): upgraded wall ammo = min(ammoCost, round(ammoCostMult x base ammo price)).
   ammoCostMult: 3.75 };
+
+// ---------------------------------------------------------------------------
+// WO9 3.1 (Phase 0) — level-select overlay (Shift+M).
+// ---------------------------------------------------------------------------
+
+// WO9 FIX-3 (QA kino #5, outpost #8): a practice teleport to level index i > 0 tops the player up to
+// at least minPoints x i points (enough for a door and a wall gun); never applied on a descent.
+export const LEVEL_SELECT = { key: 'KeyM', requireShift: true, thumbScale: 3, bannerSeconds: 2.5, minPoints: 400 };

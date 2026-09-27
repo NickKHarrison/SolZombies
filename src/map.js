@@ -26,6 +26,10 @@ export const TILE_PERK = 10;
 // WO8: Pack-a-Punch machine ('A', at most one per map). Blocks movers and rays like a perk machine;
 // solid in the arena and active-spawn searches (both walk whitelists that exclude it).
 export const TILE_PAP = 11;
+// WO9: pit ('~'). Blocks movement for both movers (isWalkable false -> resolveCircle solid,
+// pathfinding's 0/2/3/6 whitelist excludes it) but NOT rays: bullets, LOS and splash pass over.
+// Solid in the arena and active-spawn searches. Not a wall: map.walls holds code-1 tiles only.
+export const TILE_PIT = 12;
 
 // Perk machine letter -> perk id, built from config PERKS (namespace read: guarded).
 export const PERK_LETTERS = (() => {
@@ -62,6 +66,8 @@ const CHAR_CODE = {
   'M': TILE_DOOR, 'Z': TILE_FLOOR, 'X': TILE_FLOOR, 'T': TILE_STAIRS,
   // WO8: Pack-a-Punch machine.
   'A': TILE_PAP,
+  // WO9: pit (walk-blocking, shoot-over).
+  '~': TILE_PIT,
 };
 
 function charToCode(ch, wallbuyMap) {

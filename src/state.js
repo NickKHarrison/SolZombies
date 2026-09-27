@@ -30,6 +30,8 @@ export function createEmptyState(seed = Date.now()) {
       meleeKills: 0, perksBought: 0, bestWeaponId: null,
       // WO8: Pack-a-Punch upgrades bought this run (shop.takePap increments)
       papCount: 0,
+      // WO9: true once the level select teleported this run (not ranked; see docs/notes/wo9-scaffold.md)
+      practice: false,
     },
     debug: false,
     // WO5

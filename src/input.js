@@ -20,9 +20,16 @@
 // WO7 (knife / Mule Kick): getInput() also returns
 //   melee : edge, true for the frame V was pressed (or the touch KNIFE button was tapped)
 //   slot  : may now be 3 (digit 3) for the Mule Kick third weapon slot
+//
+// WO9 (level select): getInput() also returns
+//   levelSelect : edge, true for the frame Shift+M was pressed (plain M never sets it)
+// While levelselect.isLevelSelectOpen(): keydowns set no edges except levelSelect and are not
+// recorded as held; getInput() returns a neutral snapshot (no move/fire/start/restart/pause/...)
+// apart from mouseX/mouseY and levelSelect. The overlay handles its own keys (window capture).
 
-import { INPUT } from './config.js';
+import { INPUT, LEVEL_SELECT } from './config.js';
 import * as touch from './touch.js';
+import * as levelselect from './levelselect.js'; // WO9: gameplay input is neutral while the overlay is open
 
 const WHEEL_THRESHOLD = INPUT.wheelThreshold; // config.js (moved by integrator) // min |deltaY| to count as a wheel step (ignores trackpad jitter of 0)
 
@@ -41,6 +48,8 @@ const MELEE = ['KeyV'];
 const START = ['Enter', 'NumpadEnter', 'Space'];
 const PAUSE = ['Escape', 'KeyP'];
 const DEBUG = ['Backquote'];
+const LEVEL_SELECT_KEY = (LEVEL_SELECT && LEVEL_SELECT.key) || 'KeyM';           // WO9 3.1
+const LEVEL_SELECT_SHIFT = !LEVEL_SELECT || LEVEL_SELECT.requireShift !== false;
 
 // Keys whose browser default (scrolling, focus moves) must be suppressed.
 const PREVENT = new Set(['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Backquote']);
@@ -53,7 +62,7 @@ let mouseDown = false;           // left button held
 const edge = {
   firePressed: false, reload: false, interact: false, swap: false,
   restart: false, start: false, pause: false, debugKey: false,
-  slot: 0, wheel: 0, melee: false,
+  slot: 0, wheel: 0, melee: false, levelSelect: false,
 };
 
 let cleanup = null;
@@ -75,6 +84,17 @@ function clearEdges() {
   edge.slot = 0;
   edge.wheel = 0;
   edge.melee = false;
+  edge.levelSelect = false;
+}
+
+function overlayOpen() {
+  try { return !!(levelselect.isLevelSelectOpen && levelselect.isLevelSelectOpen()); } catch (_) { return false; }
+}
+
+function isLevelSelectKey(e) {
+  if (e.code !== LEVEL_SELECT_KEY) return false;
+  const shift = !!e.shiftKey || held.has('ShiftLeft') || held.has('ShiftRight');
+  return LEVEL_SELECT_SHIFT ? shift : true;
 }
 
 /** Release all held keys/buttons and clear edges (used on blur, hidden tab, restart). */
@@ -88,8 +108,14 @@ function onKeyDown(e) {
   const code = e.code;
   if (PREVENT.has(code)) e.preventDefault();
   const first = !e.repeat && !held.has(code);
+  if (overlayOpen()) {
+    // WO9: only the level-select toggle gets through while the overlay is open.
+    if (first && isLevelSelectKey(e)) edge.levelSelect = true;
+    return;
+  }
   held.add(code);
   if (!first) return;
+  if (isLevelSelectKey(e)) { edge.levelSelect = true; return; } // Shift+M: no other edge
   if (RELOAD.includes(code)) edge.reload = true;
   if (INTERACT.includes(code)) edge.interact = true;
   if (SWAP.includes(code)) edge.swap = true;
@@ -200,10 +226,24 @@ export function getInput() {
     slot: edge.slot,
     wheel: edge.wheel,
     melee: edge.melee,
+    levelSelect: edge.levelSelect,
     aimVector: null,
     autoFire: false,
   };
+  if (overlayOpen()) return neutralise(out);
   if (touch.isTouchActive()) mergeTouch(out, touch.getTouchState());
+  return out;
+}
+
+/** WO9: gameplay-neutral snapshot while the level-select overlay is open (keeps mouse + levelSelect). */
+function neutralise(out) {
+  out.moveX = 0; out.moveY = 0;
+  out.fire = false; out.firePressed = false;
+  out.reload = false; out.interact = false; out.interactHeld = false;
+  out.swap = false; out.sprint = false;
+  out.restart = false; out.start = false; out.pause = false; out.debugKey = false;
+  out.slot = 0; out.wheel = 0; out.melee = false;
+  out.aimVector = null; out.autoFire = false;
   return out;
 }
 

@@ -20,6 +20,8 @@ import * as level from './level.js';
 import * as touch from './touch.js';
 import * as device from './device.js';
 import * as scores from './scores.js';
+import * as levelselect from './levelselect.js'; // WO9: Shift+M level select overlay (DOM)
+import { LEVELS } from './levels/levels.js';
 
 const canvas = document.getElementById('game');
 const hudRoot = document.getElementById('hud');
@@ -49,6 +51,8 @@ let lastKillUpgraded = false;
 // WO7 FIX-3 (playtest #6): every perk bought this run, in purchase order, no duplicates. Reset
 // with the run (initStats); a Quick Revive strip does not remove entries.
 let perksRun = [];
+// WO9 level select: the phase to restore when the overlay closes without a pick.
+let lsPrevPhase = null;
 
 // touch.js / hud.js mobile exports are optional at runtime: call only when present.
 function call(mod, name, ...args) {
@@ -186,17 +190,20 @@ function recordGameOver(s) {
     s.stats.timeSurvived = s.time;
     const perks = s.player && Array.isArray(s.player.perks) ? s.player.perks.slice() : [];
     const run = perksRun.slice();
-    if (!((s.stats.roundReached | 0) > 0)) {
+    // WO9: a run that used the level select (practice) is never recorded.
+    const practice = !!s.stats.practice;
+    if (practice || !((s.stats.roundReached | 0) > 0)) {
       call(hud, 'setGameOverSummary', {
         ...s.stats, rank: null, isBestRound: false, isBestPoints: false, recorded: false,
-        rankText: 'Not ranked', top: scores.topScores(5), perks, perksRun: run, papCount: s.stats.papCount | 0,
+        rankText: practice ? 'PRACTICE RUN — NOT RANKED' : 'Not ranked', practice,
+        top: scores.topScores(5), perks, perksRun: run, papCount: s.stats.papCount | 0,
         weaponName: favouriteWeaponName(s),
       });
       return;
     }
     const result = scores.recordRun(s.stats, { perks, pap: s.stats.papCount | 0 }); // WO8: entry.pap
     events.emit('score:recorded', { rank: result.rank, entry: result.entry, isBestRound: result.isBestRound, isBestPoints: result.isBestPoints });
-    call(hud, 'setGameOverSummary', { ...s.stats, ...result, recorded: true, top: scores.topScores(5), perks, perksRun: run, papCount: s.stats.papCount | 0,
+    call(hud, 'setGameOverSummary', { ...s.stats, ...result, recorded: true, practice: false, top: scores.topScores(5), perks, perksRun: run, papCount: s.stats.papCount | 0,
       weaponName: favouriteWeaponName(s) });
     call(hud, 'setScores', scoresSummary());
   } catch (err) {
@@ -280,6 +287,8 @@ function startGame() {
 }
 
 function restartGame() {
+  if (lsOpen()) call(levelselect, 'closeLevelSelect');
+  lsPrevPhase = null;
   events.clearAll();
   state = buildState(Date.now());
   initAll(state);
@@ -290,8 +299,74 @@ function restartGame() {
 }
 
 // ---------------------------------------------------------------------------
+// WO9 level select (Shift+M / pause-screen LEVELS button)
+// ---------------------------------------------------------------------------
+
+function lsOpen() {
+  try { return !!call(levelselect, 'isLevelSelectOpen'); } catch { return false; }
+}
+
+// Opens from 'playing' or 'paused' only (not menu / game over / a descent fade); the game is
+// paused while open (phase 'levelselect'; update() only runs while 'playing').
+function openLevelSelectOverlay() {
+  if (!state || state.transition) return false;
+  if (state.phase !== 'playing' && state.phase !== 'paused') return false;
+  lsPrevPhase = state.phase;
+  state.phase = 'levelselect';
+  try { call(levelselect, 'openLevelSelect', state); } catch (err) { console.error('[main] level select open error', err); }
+  return true;
+}
+
+// Close without a pick: restore the phase the overlay was opened from.
+function closeLevelSelectOverlay() {
+  if (lsOpen()) call(levelselect, 'closeLevelSelect');
+  restoreFromLevelSelect();
+}
+
+// levelselect onClose (Esc / X): the overlay already hid itself.
+function restoreFromLevelSelect() {
+  if (state && state.phase === 'levelselect') state.phase = lsPrevPhase === 'paused' ? 'paused' : 'playing';
+  lsPrevPhase = null;
+  input.resetInput();
+}
+
+function toggleLevelSelect() {
+  if (state && state.phase === 'levelselect') { closeLevelSelectOverlay(); return false; }
+  return openLevelSelectOverlay();
+}
+
+// Card pick: teleport (level.js emits level:start + level:teleport; the HUD shows the
+// "TELEPORTED — L<n> <NAME>" banner), close, resume playing, mark the run as practice.
+function pickLevel(i) {
+  if (!state || state.phase !== 'levelselect') return false;
+  const idx = Math.floor(Number(i));
+  if (!(idx >= 0 && idx < LEVELS.length)) return false;
+  try {
+    level.teleportTo(state, idx);
+    state.stats.practice = true;
+    flowMap = null;
+    flowVersion = -1;
+    flowTimer = LOOP.flowRebuildInterval;
+    updateCamera(state);
+  } catch (err) {
+    console.error('[main] teleport error', err);
+  }
+  if (lsOpen()) call(levelselect, 'closeLevelSelect');
+  state.phase = 'playing';
+  lsPrevPhase = null;
+  rotatePaused = false;
+  input.resetInput();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Per-frame update (3.7)
 // ---------------------------------------------------------------------------
+
+// WO9 FIX-4: over-scroll margins per edge, as a fraction of the canvas height (1 cqh = 0.01).
+// left ~ face box / points column, right ~ weapon readout, top ~ portrait + round counter,
+// bottom ~ vitals / weapon ammo rows.
+const CAM_PAD = { left: 0.2, right: 0.2, top: 0.16, bottom: 0.16 };
 
 function updateCamera(s) {
   const p = s.player, m = s.map;
@@ -299,9 +374,17 @@ function updateCamera(s) {
   const z = mobile ? CAMERA.mobileZoom : CAMERA.zoom;
   s.zoom = z;
   const vw = (canvas ? canvas.width : CANVAS.width) / z, vh = (canvas ? canvas.height : CANVAS.height) / z;
+  // WO9 FIX-4 (QA KINO #4, TEMPLE #9): the camera may run a HUD-safe margin past each map edge
+  // (the void renders as the dark background), so edge content — the KINO arena under the round
+  // counter, the lobby wall buys under the points/weapon corners — can be brought out from under
+  // the HUD. The pads are fractions of the canvas height (the HUD is sized in cqh), converted to
+  // world px by the zoom, so desktop and mobile keep the same on-screen margin.
+  const ch = canvas ? canvas.height : CANVAS.height;
+  const padL = (ch * CAM_PAD.left) / z, padR = (ch * CAM_PAD.right) / z;
+  const padT = (ch * CAM_PAD.top) / z, padB = (ch * CAM_PAD.bottom) / z;
   let cx = p.x - vw / 2, cy = p.y - vh / 2;
-  cx = m.width <= vw ? (m.width - vw) / 2 : Math.max(0, Math.min(m.width - vw, cx));
-  cy = m.height <= vh ? (m.height - vh) / 2 : Math.max(0, Math.min(m.height - vh, cy));
+  cx = m.width <= vw ? (m.width - vw) / 2 : Math.max(-padL, Math.min(m.width - vw + padR, cx));
+  cy = m.height <= vh ? (m.height - vh) / 2 : Math.max(-padT, Math.min(m.height - vh + padB, cy));
   s.camera.x = cx;
   s.camera.y = cy;
 }
@@ -352,7 +435,7 @@ function update(s, inp, dt) {
 // Edge-triggered flags must only act once even when a frame is split into sub-steps.
 function withoutEdges(inp) {
   return { ...inp, firePressed: false, reload: false, interact: false, swap: false, slot: 0, wheel: 0,
-    restart: false, start: false, pause: false, debugKey: false, melee: false };
+    restart: false, start: false, pause: false, debugKey: false, melee: false, levelSelect: false };
 }
 
 function frame(now) {
@@ -364,6 +447,10 @@ function frame(now) {
 
 // One frame of the 3.7 loop with an explicit dt (also driven by the debug step() hook).
 function tick(dt, inp) {
+  if (inp.levelSelect) toggleLevelSelect();
+  // WO9: the overlay owns the keyboard while open; gameplay edges are ignored (input.js already
+  // returns a neutral snapshot, this also covers debug step() overrides).
+  if (state.phase === 'levelselect') inp = withoutEdges(inp);
   if (inp.debugKey) state.debug = !state.debug;
   if (inp.pause) {
     if (state.phase === 'playing') state.phase = 'paused';
@@ -587,6 +674,16 @@ function installDebug() {
     },
     papStart() { return shop.startPap(state); },
     papTake() { return shop.takePap(state); },
+    // WO9 level select. levelSelect(): toggle like Shift+M (returns { open, phase });
+    // levelSelect(i): open if needed and pick card i (teleport, practice run).
+    levelSelect(i) {
+      if (i === undefined || i === null) toggleLevelSelect();
+      else {
+        if (state.phase !== 'levelselect') openLevelSelectOverlay();
+        pickLevel(i);
+      }
+      return { open: lsOpen(), phase: state.phase, level: state.level ? state.level.index : null, practice: !!state.stats.practice };
+    },
     upgrade() {
       const w = player.getActiveWeapon(state.player);
       if (!w) return null;
@@ -597,7 +694,7 @@ function installDebug() {
   window.__game = {
     get state() { return state; },
     debug,
-    modules: { events, input, player, weapons, zombie, pathfinding, waves, powerups, map, shop, render, hud, audio, boss, level, touch, device, scores },
+    modules: { events, input, player, weapons, zombie, pathfinding, waves, powerups, map, shop, render, hud, audio, boss, level, touch, device, scores, levelselect },
   };
 }
 
@@ -612,6 +709,18 @@ function boot() {
   window.addEventListener('keydown', onKeyDown);
   canvas.addEventListener('click', onCanvasClick);
   if (stageEl) stageEl.addEventListener('pointerdown', onStagePointerDown, { capture: true });
+  // WO9: level select overlay in #stage; the LEVELS button through ONE channel (hud.onLevelsButton
+  // covers desktop clicks and touch taps; touch.onLevelsButton is deliberately not used).
+  try {
+    call(levelselect, 'initLevelSelect', stageEl || document.body, {
+      levels: LEVELS,
+      onPick: (i) => pickLevel(i),
+      onClose: () => restoreFromLevelSelect(),
+    });
+  } catch (err) { console.error('[main] level select init error', err); }
+  call(hud, 'onLevelsButton', () => {
+    if (state && state.phase === 'paused') openLevelSelectOverlay();
+  });
   if (DEBUG_URL) installDebug();
   requestAnimationFrame(frame);
 }

@@ -430,3 +430,62 @@ placed in the bottom-left. Points sit directly above them.
   - "JUDGE · SEKHMET"
   - "PORTER · SEKHMET"
 - No console errors.
+
+## WO9 (Agent I) — LEVELS button, level-select phase, practice line, slow status
+
+### hud.js
+- **Pause screen** (desktop and touch): a `<button class="screen-btn screen-btn-levels" data-action="levels">LEVELS</button>`
+  under "Press Esc / P to resume" / "Tap ‖ to resume", plus (desktop only) a small hint line
+  "Shift+M — Level select". The button's `click` (mouse or tap) blurs it (so a later Enter / Space
+  cannot re-press it) and notifies **both channels once**:
+  1. `touch.triggerLevelsButton()` (Agent G, imported as a guarded namespace) → every
+     `touch.onLevelsButton(cb)` callback;
+  2. every `hud.onLevelsButton(cb)` listener (new export, returns an unsubscribe; module-level set,
+     kept across `initHud`; the same function is added once).
+  **Integrator: subscribe through exactly ONE of `touch.onLevelsButton` / `hud.onLevelsButton`**,
+  or a click fires the toggle twice. Either one alone covers desktop clicks and touch taps.
+  No DOM CustomEvent is emitted.
+- **Menu controls list**: desktop adds `Shift+M — Level select`; touch adds `‖ → LEVELS — Level select`.
+- **Game over**: when `summary.practice` is true (falls back to `state.stats.practice` only when the
+  summary has no `practice` field), the rank line is replaced by "PRACTICE RUN — NOT RANKED"
+  (`.screen-rank.practice .rank-practice`, ice blue) and the TOP RUNS table has no highlighted row.
+  It also wins over `rankText`.
+- **Slow status**: while `player.slowT > 0` (Agent E) and the player is not down (and not on menu /
+  game over), the HEALTH label row shows an inline-SVG six-armed ice crystal + "SLOWED" instead of
+  "HEALTH", and the health value gets a cold blue glow (`.hud-vital-health.slowed`). warn/crit
+  colours are unchanged.
+- **Phase `levelselect`**: `buildScreen` is not called (the centre screen is hidden); prompts only
+  show while playing; face / boss-lag timers already only tick while playing, so they freeze.
+
+### styles.css
+- `.screen-btn` (gold-bordered dark-red plate, `pointer-events: auto` over `#hud *`), `.screen-hint`,
+  mobile floors (14px font, 40px min height).
+- `#hud[data-phase="paused"] ~ #touch .tj-zone { display: none }`: the stick zones (full-height
+  halves above `#hud`) step aside while paused, so a tap lands on the LEVELS button itself (PAUSE
+  still shows). touch.js's own hit-test forward (`levelsButtonAt`) therefore never sees that tap,
+  so there is no double fire.
+- `#hud[data-phase="levelselect"]`: gameplay widgets at opacity 0.3, `.hud-screen` / `.hud-prompt`
+  hidden, crit/revive pulses stopped, all touch buttons and stick zones hidden.
+- `.hud-slow` is absolutely positioned in the (now `position: relative`) health cell so its wider
+  text never widens the cell: KILLS stays put (measured 618 px left edge slowed and not slowed at
+  844x390; badge ends at 610). Pulse animation off when paused / reduced motion.
+
+### Verified (port 8309)
+- Desktop 1920-wide window, `?debug=1`: pause → LEVELS + hint; a real mouse click on the button
+  fired the listener once, phase stayed `paused`, focus back on body. SLOWED badge with icon next
+  to 100%. Practice game over: "PRACTICE RUN — NOT RANKED", no `.td.me` though `rank: 1` was passed.
+  Phase `levelselect`: screen `display:none`, widgets opacity 0.3.
+- Touch `&touch=1`, `#stage` forced 844x390: pause screen title 417–464, sub 474–487, button
+  900–1020 × 501–541 (hit-test top element = the button), PAUSE still shown, stick zones hidden;
+  a real click fired `touch.onLevelsButton` 1× and `hud.onLevelsButton` 1×. Practice game over with
+  all 10 rows (5 perks wrapping) + 4-column top-5 fits (326–632 inside the stage 284–674). Menu with
+  scores + the extra controls row fits (cols 473–583). levelselect: touch buttons hidden.
+- Zero console errors. `node --check src/hud.js` OK. `npm test`: 605/606, the only failure is
+  `WO9 new exports` → `level.teleportTo` (INT's, Phase 2).
+
+
+## WO9 FIX-4 — camera over-scroll and bright-level contrast (QA KINO #4, OUTPOST #3, TEMPLE #9)
+
+- **Camera (`src/main.js` `updateCamera`).** The clamp is now `[-padL, map.width - vw + padR]` (and the same for y). `CAM_PAD = { left: 0.2, right: 0.2, top: 0.16, bottom: 0.16 }` is a fraction of `canvas.height`, divided by `state.zoom`. The HUD is sized in cqh, so the margin matches the HUD corners on both desktop (zoom 1) and mobile (zoom 1.96). Small maps are still centred. The player stays centred except within one pad of an edge. The mouse-aim conversion (`mouseX / zoom + camera.x`) is unchanged and correct for negative offsets: in the browser the angle matched the cursor. `render.js` already clears to `#050506` before the world pass, so the void is dark.
+- **Contrast (`styles.css`, `src/hud.js`).** `--hud-outline` is applied to the vitals labels and values and to the points value. `hud.updateLevelStyle(state)` sets `data-level-style` on `#hud` and `#stage`, taken from `map.theme.style` or else `level.def.theme.style`, and cleared on the menu. The CSS hooks `#stage[data-level-style="outpost"] …` cover `.tj-base`, `.tj-knob`, `.tbtn` and `.hud-vital-label`. Other bright levels can reuse this by adding their style name to the selectors.
+- Verified in Chrome: KINO lobby and arena on desktop, and OUTPOST snow with `&touch=1` (844x390), with before/after screenshots. `node --check` passes for main.js and hud.js. `npm test`: 637/643. The 6 failures are level-validity checks from FIX-1's new interact-reach rule on the level data (other agents' in-progress files), not from this change.

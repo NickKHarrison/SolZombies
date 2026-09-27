@@ -303,3 +303,91 @@ Tests that need the real `player.damagePlayer` or map functions are skipped whil
 - Tests: `tests/zombie.test.js` "WO7 FIX-5 lobAcid" (pillar, past the arena wall, off-map aims all
   land on arena floor; nearest-tile snaps; valid points untouched; player fallback; outside-arena
   snap to the nearest walkable tile).
+
+## WO9 (Agent E): frost and tide boss abilities (WORK_ORDER_9.md 3.3)
+- `bossAbilityOf` accepts `'charge' | 'acid' | 'frost' | 'tide'` (unknown -> `'charge'`). Every boss
+  keeps an idle `z.charge` (render-safe). Dispatch goes through `updateBossAbility` (acid / frost /
+  tide / default charge); returning true skips the normal hunt/melee AI for that frame.
+- **Cooldown pause rule (both new abilities):** the idle `timer` does not count down while
+  `playerTargetable(p)` is false (down, `downT > 0`, `invulnT > 0`), so the boss never unloads a
+  frost / tide the instant the revive invulnerability ends. (Acid/charge still count down but do not
+  start; unchanged.) A telegraph already running continues, but its hit is skipped while untargetable.
+- **frost** (`z.frost = { timer, phase: 'idle'|'telegraph'|'breath', t, angle, hit }`, config
+  `frostCfg()` = `BOSS.frost` over defaults): idle hunts + melees; at `timer <= 0` (and no swing
+  winding up) -> `telegraph`: boss stands still, `angle` = direction to the player **locked** at
+  telegraph start (sidestepping dodges), emits `boss:frost { x, y, angle }`. After `telegraph` s ->
+  `breath` for `FROST_BREATH` (0.35 s, exported), still; the first frame the player is in the cone
+  -> `slowT = max(slowT, slowSeconds)` (skipped for god-mode `invulnerable`) + `damagePlayer(damage)`.
+  At most one hit per breath. Then idle with `timer = every`. Never charges.
+- `inFrostCone(map, x, y, angle, player, F?)` (exported): edge distance `d - r <= range`; angular
+  test `|delta| <= halfAngle + asin(r / d)` (player circle touches the sector); inside the boss
+  (`d <= r`) always in; plus line of sight via `clearShot`.
+- `clearShot(map, ax, ay, bx, by)` (exported): `map.raycastWalls` from a to b; blocked when a
+  ray-blocking tile is hit before `d`. Pits (`~`, TILE_PIT) never block (raycastWalls ignores them);
+  bare test maps without `tiles` never block.
+- **tide** (`z.tide = { timer, phase: 'idle'|'telegraph'|'wave', t, radius, x, y, hit }`, config
+  `tideCfg()`): idle -> `telegraph` (still, emits `boss:tide { x, y }`) -> `wave`: centre `(x, y)` =
+  the boss position when the telegraph ends (fixed for the wave; render should draw the ring there,
+  not at the moving boss), `radius += speed * dt` up to `maxRadius`, then idle (`radius = 0`,
+  `timer = every`). During the wave the boss hunts again (the ability returns false).
+- Tide hit: once per wave (`hit` flag), when the ring swept this frame passes within `band` of the
+  player (`tideBandHits(d, r0, r1, band)` exported: `d > r0 - band && d < r1 + band`, i.e.
+  `|d - radius| < band` made frame-rate independent) and `clearShot(centre -> player)` holds ->
+  `damagePlayer(damage)` + `knockback` px radially away from the wave centre, sub-stepped through
+  `map.resolveCircle` (wall-safe, same as the charge hit; applies to a god-mode player as the charge
+  knock does) + a small shake. LOS is taken from the wave centre (= where the boss stood).
+- `killZombie` resets frost/tide to idle (tide radius 0).
+- Tests (`tests/zombie.test.js`, "WO9 ..."): ability switch/state shapes; frost cadence (period,
+  still telegraph + breath, angle payload, no charges); cone geometry (edge range, widened
+  half-angle, behind, wall blocks, pit does not); breath damage + slow once, max-merge of slowT;
+  misses behind a wall / after a sidestep / invulnerable / invulnT / downT; cooldown pause for both;
+  band helper; tide cadence (radius growth, fixed centre, wave duration, timer reset); once-per-wave
+  hit + 120 px knockback; wall blocks, pit does not, out of reach, untargetable; wall-safe knockback;
+  kill resets.
+
+## WO9 FIX-3: large-zombie navigation (QA outpost #1, temple #1) and frost telegraph (outpost #5)
+- **Scope:** zombies with `radius > TILE / 2` (`isLargeZombie`, exported). Today that is only the
+  boss (radius 34). Minions (10) and normal zombies (14) are unchanged and never get `z.unstick`.
+- **Clearance flow ("fat flow"):** `fatMask(map, r)` (exported, cached per map + radius and
+  recomputed when `map.tiles` changes) marks each zombie-walkable tile where a circle of radius r
+  fits on at least one of its 9 half-tile lattice points (corners, edge midpoints, centre).
+  `circleFits(map, x, y, r)` (exported) is the fit test. It checks centre tile walkability and
+  no overlap with any tile blocking for zombies (`map.isWalkable(.., true)`). A 1-tile lane closes
+  for the boss, and a 2-wide lane stays open because the shared edge midpoint is 40 px from each wall.
+  `fatFlowFor(state, r)` builds `buildFlowField` on a copy of the grid where non-fitting walkable
+  tiles are walls, targeting `state.flow.targetX/Y`. It is rebuilt whenever `state.flow` is
+  replaced (main rebuilds on its interval and on map version changes), and cached per state.
+  - `largeFlowDir`: fat flow at the zombie. If its own tile is not in the fat field, it heads for the
+    centre of the neighbouring fat tile nearest the target. If the fat field has no route, it uses
+    the shared flow. Without any flow, direct pursuit as before.
+- **Watchdog** (`UNSTICK = { span 0.75, minMove 4, steer 0.6, seek 0.9, nudge 2, calm 2, search 3 }`,
+  exported; state `z.unstick = { ax, ay, t, stage, calm, mode, modeT, dx, dy, gx, gy, count }`,
+  created lazily). The watchdog runs in `updateChasing` only. It is reset (`resetUnstick`, exported)
+  on every ability frame (telegraph / breath / charge dash), in `updateAttacking`, and while the
+  zombie touches the player or has no direction. If the zombie moves < `minMove` px over `span` s,
+  `count++` and `stage++`:
+  1. `steer`: for `steer` s, go along the best probed direction. Candidates are the fat and shared
+     flow directions at the 8 neighbouring tile centres, the two perpendiculars of the current
+     direction, and direct pursuit. Each is probed with one resolveCircle step of
+     max(8, 0.15 x speed) px. Candidates that move > 2 px along themselves are kept, and the one
+     landing at the lowest flow distance wins (ties go to the larger gain). If none moves, it
+     skips to stage 2.
+  2. `seek`: for up to `seek` s, steer to `nearestFitPoint` (exported). This is the nearest
+     half-tile lattice point within `search` tiles, at least 4 px away, where the circle fits.
+  3. `nudge` (stage 3+, last resort): straight displacement toward that point at max(speed, 60)
+     px/s, without collision on the way (it may graze a corner), then `settle` on arrival.
+     Up to `nudge` s.
+  - `stage` decays to 0 after `calm` s of chasing without a new detection.
+- **Known limit:** if the player stands where the boss cannot physically go (a 1-tile nook), the
+  fat field has no route. The boss then presses at the entrance with the shared flow, and the
+  watchdog keeps it moving (never parked for more than about 1.4 s). Once the player moves to a
+  reachable spot it follows the fat field again.
+- **Real levels (sim):** over every arena tile of all 6 levels (7 s each, abilities off), there were
+  0 stand-stills over 1.5 s. OUTPOST with both QA lanes re-opened routes around the holes with
+  0 watchdog triggers.
+- **Frost:** `BOSS.frost.telegraph` 0.6 -> 0.8 (`FROST_DEFAULTS` too), QA outpost #5.
+- **Tests** (`tests/zombie.test.js`, "WO9 FIX-3"): mask, fit and nearest-point on an inline map
+  with a 1-tile gap and a 3-tile detour; the boss takes the detour and reaches the player with no
+  watchdog; without a detour the watchdog fires, escalates (steer, then seek/nudge), never lets the
+  boss stand still longer than span + steer + 0.2 s and never squeezes it through; no false trigger
+  while swinging or frost-telegraphing; normal zombies untouched.

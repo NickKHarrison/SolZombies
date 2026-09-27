@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as events from '../src/events.js';
-import { LEVELS_CFG, ROUNDS } from '../src/config.js';
+import { LEVELS_CFG, ROUNDS, LEVEL_SELECT } from '../src/config.js';
 import { createEmptyState } from '../src/state.js';
 import { LEVELS, levelByIndex } from '../src/levels/levels.js';
 import {
@@ -316,7 +316,13 @@ test('FIX-3 (balance #4): loop levels sell upgraded wall guns, letters kept, bas
     assert.equal(l0.def.wallbuys, base.wallbuys, 'loop 0 keeps the authored def');
     assert.notEqual(lv.def, base); assert.notEqual(lv.def.wallbuys, base.wallbuys);
     assert.deepEqual(Object.keys(lv.def.wallbuys).sort(), Object.keys(base.wallbuys).sort(), 'letters kept');
-    for (const [k, id] of Object.entries(base.wallbuys)) assert.equal(lv.def.wallbuys[k], up[id] || id, `${base.id} ${k}`);
+    // WO9 (INT): upgraded unless the target gun is already on that level's walls (no duplicates).
+    const vals = Object.values(lv.def.wallbuys);
+    assert.equal(new Set(vals).size, vals.length, `${base.id}: no gun sold twice in the loop variant`);
+    for (const [k, id] of Object.entries(base.wallbuys)) {
+      const got = lv.def.wallbuys[k];
+      assert.ok(got === (up[id] || id) || (got === id && vals.includes(up[id])), `${base.id} ${k}: ${id} -> ${got}`);
+    }
     assert.equal(createLevelState(N + pos).def, lv.def, 'memoized');
     assert.deepEqual(createLevelState(2 * N + pos).def.wallbuys, lv.def.wallbuys, 'same upgrade every loop');
   }
@@ -472,4 +478,140 @@ test('WO8 FIX-A (playtest #4): a returned gun is announced with a gold "<NAME> R
   // nothing in the machine: no text
   startLevel(s, 2);
   assert.equal(s.effects.filter((e) => e.type === 'text').length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// WO9 (INT): teleportTo, loop theme hints, wall-buy dedupe
+// ---------------------------------------------------------------------------
+import { teleportTo } from '../src/level.js';
+
+test('WO9 teleportTo: fresh level with arrival relief, emits level:start (teleport) + level:teleport', () => {
+  const s = setup();
+  s.transition = { t: 0.1, dur: 1, nextIndex: 3, swapped: false };
+  const starts = record('level:start'), tps = record('level:teleport');
+  const lv = teleportTo(s, 4);
+  assert.equal(lv.index, 4); assert.equal(s.level.index, 4);
+  assert.equal(s.transition, null, 'a running descent is cancelled');
+  assert.equal(s.player.health, s.player.maxHealth, 'healed');
+  assert.equal(s.rounds.round, 7, 'round kept');
+  assert.equal(s.rounds.phase, 'break');
+  assert.equal(s.rounds.timer, LEVELS_CFG.arrivalBreak);
+  // WO9 FIX-3: topped up to LEVEL_SELECT.minPoints x 4 when below it (1234 < 1600)
+  assert.equal(s.player.points, Math.max(1234, LEVEL_SELECT.minPoints * 4), 'points kept or topped up');
+  assert.equal(s.player.weapons.length, 2, 'weapons kept');
+  assert.equal(starts.length, 1); assert.equal(starts[0].teleport, true); assert.equal(starts[0].index, 4);
+  assert.deepEqual(tps, [{ from: 0, to: 4, name: LEVELS[4].name }]);
+  // index 0 also gets the arrival relief (unlike a boot / restart)
+  s.player.health = 10;
+  teleportTo(s, 0);
+  assert.equal(s.player.health, s.player.maxHealth);
+  assert.equal(s.rounds.timer, LEVELS_CFG.arrivalBreak);
+  assert.deepEqual(tps[1], { from: 4, to: 0, name: LEVELS[0].name });
+  // plain startLevel(0) keeps the boot behaviour and has no teleport flag
+  s.player.health = 10;
+  startLevel(s, 0);
+  assert.equal(s.player.health, 10);
+  assert.equal(starts[starts.length - 1].teleport, undefined);
+  assert.equal(teleportTo(null, 1), null);
+});
+
+test('WO9 teleportTo hands back a gun left in the Pack-a-Punch (as on a descent)', () => {
+  const s = setup();
+  const w = { id: 'rk5', def: { name: 'RK5' }, upgraded: true };
+  s.player.weapons = [{ id: 'm1911' }, null];
+  s.player.activeSlot = 0;
+  s.shop = { pap: { state: 'ready', timer: 0, weapon: w, slot: 1, baseId: 'rk5' } };
+  teleportTo(s, 2);
+  assert.ok(s.player.weapons.includes(w), 'gun returned');
+  assert.equal(s.shop.pap.state, 'idle');
+});
+
+test('WO9 loopTheme keeps the render style and level hint keys', () => {
+  for (const base of LEVELS) {
+    const t = createLevelState(N + LEVELS.indexOf(base)).def.theme;
+    for (const k of ['style', 'curtainRow', 'seatRows', 'stageRows', 'snow', 'water', 'spores', 'ice', 'iceDeep', 'hutWood',
+      'waterDeep', 'waterLight', 'moss', 'vine', 'glyph', 'curtain', 'seat', 'lamp', 'grain']) {
+      assert.deepEqual(t[k], base.theme[k], `${base.id} ${k}`);
+    }
+  }
+  const kino = LEVELS.find((d) => d.id === 'kino');
+  if (kino) assert.equal(loopTheme(kino.theme, 1).style, 'kino');
+});
+
+test('WO9 loopWallbuys skips an upgrade whose target is already on the walls', () => {
+  // xr2 -> m8a7 collides with an authored m8a7; icr1 -> gorgon collides with gorgon.
+  assert.deepEqual(loopWallbuys({ 1: 'icr1', 2: 'xr2', 5: 'm8a7', 7: 'gorgon' }),
+    { 1: 'icr1', 2: 'xr2', 5: 'm8a7', 7: 'gorgon' });
+  // two different guns upgrading to the same target: only the first stays un-upgraded
+  const out = loopWallbuys({ a: 'kn44', b: 'manowar' });
+  assert.equal(new Set(Object.values(out)).size, 2);
+  assert.ok(Object.values(out).includes('peacekeeper'));
+  // CATACOMBS: hvk30 -> manowar is fine because manowar itself -> peacekeeper
+  const l2 = createLevelState(N + 1).def.wallbuys;
+  assert.equal(l2['1'], 'manowar');
+  assert.equal(l2['4'], 'peacekeeper');
+});
+
+test('WO9 startLevel clears the frost slow on every entry path', () => {
+  const s = setup();
+  s.player.slowT = 1.5;
+  startLevel(s, 4);
+  assert.equal(s.player.slowT, 0);
+  s.player.slowT = 2;
+  teleportTo(s, 1);
+  assert.equal(s.player.slowT, 0);
+  s.player.slowT = 2;
+  beginDescent(s);
+  updateLevel(s, LEVELS_CFG.fadeSeconds);
+  assert.equal(s.player.slowT, 0);
+});
+
+// ---------------------------------------------------------------------------
+// WO9 FIX-3: practice teleport points floor (QA kino #5, outpost #8), loop floorZones
+// ---------------------------------------------------------------------------
+import { teleportMinPoints } from '../src/level.js';
+
+test('WO9 FIX-3 teleportTo tops points up to LEVEL_SELECT.minPoints x index, never lowers, never on descent', () => {
+  assert.ok(LEVEL_SELECT.minPoints > 0);
+  assert.equal(teleportMinPoints(0), 0);
+  assert.equal(teleportMinPoints(3), LEVEL_SELECT.minPoints * 3);
+  const s = setup();
+  const pts = record('points:changed');
+  s.player.points = 50;
+  const earned = s.stats.pointsEarned;
+  teleportTo(s, 3);
+  assert.equal(s.player.points, LEVEL_SELECT.minPoints * 3);
+  assert.deepEqual(pts, [{ delta: LEVEL_SELECT.minPoints * 3 - 50, total: LEVEL_SELECT.minPoints * 3 }]);
+  assert.equal(s.stats.pointsEarned, earned, 'a grant is not counted as earned');
+  // already above the floor: untouched, no event
+  s.player.points = 99999;
+  teleportTo(s, 5);
+  assert.equal(s.player.points, 99999);
+  assert.equal(pts.length, 1);
+  // index 0: no floor
+  s.player.points = 0;
+  teleportTo(s, 0);
+  assert.equal(s.player.points, 0);
+  // a descent (and a plain startLevel) never grants points
+  s.player.points = 0;
+  beginDescent(s);
+  updateLevel(s, LEVELS_CFG.fadeSeconds);
+  assert.equal(s.level.index, 1);
+  assert.equal(s.player.points, 0);
+  startLevel(s, 4);
+  assert.equal(s.player.points, 0);
+  assert.equal(pts.length, 1);
+});
+
+test('WO9 FIX-3 loopTheme copies floorZones (entries not shared with the base theme)', () => {
+  const zones = [{ x0: 1, y0: 2, x1: 5, y1: 6, floor: '#123456' }, { x0: 10, y0: 0, x1: 12, y1: 3, floor: '#abcdef' }];
+  const t = loopTheme({ floor: '#303030', style: 'kino', floorZones: zones }, 1);
+  assert.deepEqual(t.floorZones, zones);
+  assert.notEqual(t.floorZones, zones);
+  assert.notEqual(t.floorZones[0], zones[0]);
+  assert.equal(loopTheme({ floor: '#303030' }, 1).floorZones, undefined);
+  for (const base of LEVELS) {
+    if (!base.theme || base.theme.floorZones === undefined) continue;
+    assert.deepEqual(createLevelState(N + LEVELS.indexOf(base)).def.theme.floorZones, base.theme.floorZones, base.id);
+  }
 });

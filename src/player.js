@@ -1,7 +1,7 @@
 // player.js (Agent B) — pure logic, no DOM.
 // Movement, aiming, firing/reload/swap orchestration, health + regen, points, inventory.
 
-import { PLAYER, POINTS, PERKS, MELEE } from './config.js';
+import { PLAYER, POINTS, PERKS, MELEE, BOSS } from './config.js';
 import { emit, on } from './events.js';
 import { nextId, norm, clamp } from './math.js';
 import * as weapons from './weapons.js';
@@ -43,6 +43,8 @@ export function createPlayer(x, y) {
     downT: 0,           // seconds of Quick Revive "down" pause left
     meleeCd: 0,         // knife cooldown left (set by weapons.meleeAttack)
     meleeT: 0,          // knife swing animation time left (set by weapons.meleeAttack)
+    // WO9 frost (THE WENDIGO): seconds of frost slow left (movement x BOSS.frost.slowMult).
+    slowT: 0,
   };
 }
 
@@ -147,6 +149,10 @@ export function initPlayer(state) {
     on('round:start', () => {
       if (state.player) state.player.boardsThisRound = 0;
     }),
+    // WO9: the frost slow never survives a restart or a level change.
+    on('game:restart', () => { if (state.player) state.player.slowT = 0; }),
+    on('level:descend', () => { if (state.player) state.player.slowT = 0; }),
+    on('level:teleport', () => { if (state.player) state.player.slowT = 0; }),
   ];
 }
 
@@ -180,6 +186,9 @@ export function updatePlayer(state, input, aim, dt) {
     return;
   }
   if (p.invulnT > 0) p.invulnT = Math.max(0, p.invulnT - dt);
+  // WO9 frost slow: the multiplier applies for this whole frame, then the timer counts down.
+  const slowed = p.slowT > 0;
+  if (slowed) p.slowT = Math.max(0, p.slowT - dt);
   if (p.meleeCd > 0) p.meleeCd = Math.max(0, p.meleeCd - dt);
   if (p.meleeT > 0) p.meleeT = Math.max(0, p.meleeT - dt);
 
@@ -197,7 +206,8 @@ export function updatePlayer(state, input, aim, dt) {
   p.sprinting = !!input.sprint && p.moving && !input.fire; // firing cancels sprint
   if (p.moving) {
     const mods = perkMods(p);
-    const speed = PLAYER.speed * mods.speedMult * (p.sprinting ? PLAYER.sprintMult * mods.sprintMult : 1);
+    const speed = PLAYER.speed * mods.speedMult * (p.sprinting ? PLAYER.sprintMult * mods.sprintMult : 1)
+      * (slowed ? slowMult() : 1);
     let nx = p.x + mv.x * speed * dt;
     let ny = p.y + mv.y * speed * dt;
     if (state.map) {
@@ -276,7 +286,14 @@ function revive(state) {
   p.health = p.maxHealth;
   p.regenTimer = 0;
   p.invulnT = invuln;
+  p.slowT = 0;
   emit('player:revived', { health: p.health });
+}
+
+// WO9: movement multiplier while player.slowT > 0 (stacks multiplicatively with Stamin-Up).
+export function slowMult() {
+  const m = BOSS && BOSS.frost && BOSS.frost.slowMult;
+  return Number.isFinite(m) && m > 0 ? m : 0.55;
 }
 
 // Health regen, ticked from updatePlayer: after regenDelay without damage, +regenPerSec.

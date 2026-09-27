@@ -356,3 +356,41 @@ test('WO7 hazards and globs clear on level change (state.map swap) and on game:r
   bossMod.updateHazards(s, 1 / 60);
   assert.deepEqual(s.hazards, []);
 });
+
+// ---------------------------------------------------------------------------
+// WO9 (Agent E): frost / tide bosses through a real fight
+// ---------------------------------------------------------------------------
+
+test('WO9 startFight on frost / tide levels spawns the matching boss', () => {
+  for (const [ability, name] of [['frost', 'THE WENDIGO'], ['tide', 'THE DROWNED KING']]) {
+    const s = fresh(60);
+    s.level.def.boss = { name, tint: '#bfe8ff', ability };
+    startFight(s);
+    const z = bossZombie(s);
+    assert.equal(z.ability, ability);
+    assert.equal(z.name, name);
+    assert.equal(z[ability].phase, 'idle');
+  }
+});
+
+test('WO9 frost / tide bosses use their ability in a fight and never charge; the player stays sane', () => {
+  for (const ability of ['frost', 'tide']) {
+    const s = fresh(61);
+    s.level.def.boss = { name: 'B', tint: '#ffffff', ability };
+    s.player.health = s.player.maxHealth = 1e6;
+    const used = record(`boss:${ability}`);
+    const charges = record('boss:charge');
+    startFight(s);
+    const dt = 1 / 60;
+    for (let t = 0; t < 20; t += dt) {
+      zombie.updateZombies(s, dt);
+      updateBoss(s, dt);
+      player.updatePlayer(s, { moveX: 0, moveY: 0 }, null, dt);
+      assert.ok(Number.isFinite(s.player.x) && Number.isFinite(s.player.y));
+    }
+    assert.ok(used.length >= 2, `${ability} used ${used.length} times`);
+    assert.equal(charges.length, 0);
+    const tx = Math.floor(s.player.x / TILE), ty = Math.floor(s.player.y / TILE);
+    assert.ok(tx > 0 && ty > 0 && tx < COLS - 1 && ty < ROWS - 1, 'player never pushed into the wall ring');
+  }
+});

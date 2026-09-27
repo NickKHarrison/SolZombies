@@ -26,6 +26,7 @@ const T_DOOR = 7; // WO4 2.1: closed buyable door (opening sets its tiles to T_F
 const T_ARENA = 8, T_STAIRS = 9; // WO5 3.1: arena minion spawn (floor), staircase (solid until opened)
 const T_PERK = 10; // WO7 T2: perk machine (blocking, like a wall buy)
 const T_PAP = 11;  // WO8: Pack-a-Punch machine (blocking, like a perk machine)
+const T_PIT = 12;  // WO9: '~' ice hole / water channel (blocks movers, not rays; never drawn as wall)
 const DOOR_FX_TTL = 0.6;
 const DOOR_SHAKE = { ttl: 0.35, magnitude: 3 };
 // WO5 3.6 tunables (config RENDER; local fallbacks keep older configs working)
@@ -146,7 +147,8 @@ export function render(state) {
   const theme = themeOf(state);
   papStateCode = papCodeOf(state);
   drawStaticLayer(map, view, theme);
-  if (theme.torch) drawTorches(view, now);
+  if (theme.style === 'temple') drawTempleWater(view, t, theme);   // WO9: ripples on the water channels
+  if (theme.torch) { if (theme.style === 'kino') drawKinoLamps(view, now, theme); else drawTorches(view, now); }
   drawBarricades(map, view);
   drawBox(state, map, t);
   drawPap(state, map, t, view);         // WO8: Pack-a-Punch glow, gun sliding in, sparks, tray gun
@@ -154,10 +156,13 @@ export function render(state) {
   drawHazards(state, view, t);          // WO7 T5: acid pools on the floor
   // FIX-3 (playtest #1): power-ups above every blood decal so the boss's Max Ammo stays visible.
   drawPowerups(state, t, view);
+  drawBossAbilitiesFloor(state, view, t); // WO9: frost cone / tide ring (under the crowd)
   drawZombies(state, view);
+  drawBossAbilitiesFx(state, view, t);    // WO9: icy glow + mist, water swirl
   drawBullets(state);
   drawAcidGlobs(state, view);           // WO7 T5: lobbed globs (state.acidGlobs) in flight
   drawPlayer(state);
+  drawPlayerFrost(state, now);          // WO9: frost-slowed player (ice crystals + glow)
   drawEffectsOfType(state, 'slash', view); // WO7 T3: knife arc
   drawLabelsOverPlayer(state);
   drawBoxLabel(state, map, t);
@@ -176,9 +181,11 @@ export function render(state) {
 
   // ---- screen space ----
   drawAmbient(theme, W, H);
+  if (theme.style) drawStyleOverlay(theme, W, H, view, zoom, now); // WO9: film grain / snowfall / spores
   if (theme.flicker) drawFlicker(t, W, H); // WO7 T5: failing fluorescent tubes (LABORATORY)
   drawZombieBloodTint(state, W, H);
   drawDamageVignette(state, W, H);
+  drawFrostVignette(state, W, H);       // WO9: frosty screen edges while slowed
   drawFlash(state, W, H);
   drawTransition(state, W, H);
   if (state.debug) drawDebugScreen(state);
@@ -539,11 +546,14 @@ function buildTheme(raw) {
     // explicit raw.wallStyle wins; otherwise any LABORATORY theme (incl. loop names) gets panels.
     wallStyle: raw.wallStyle === 'panel' || raw.wallStyle === 'brick' ? raw.wallStyle
       : (/LABORATORY/i.test(str(raw.name, '')) ? 'panel' : 'brick'),
+    // WO9: 'kino' | 'outpost' | 'temple' | '' (raw.style, else the name prefix; loop themes drop style).
+    style: resolveStyle(raw),
   };
+  t.hints = styleHints(raw, t.style);
   // A theme with a distinct floorAlt gets the checker, accent flecks and wall brickwork. Level 1
   // (floorAlt = floor) therefore keeps the flat WO4 look exactly.
   t.textured = t.floorAlt.toLowerCase() !== t.floor.toLowerCase();
-  t.sig = [t.name, t.floor, t.floorAlt, t.wall, t.wallEdge, t.accent, t.doorWood, t.doorIron, t.torch ? 1 : 0, t.wallStyle].join('|');
+  t.sig = [t.name, t.floor, t.floorAlt, t.wall, t.wallEdge, t.accent, t.doorWood, t.doorIron, t.torch ? 1 : 0, t.wallStyle, t.style, t.hints ? t.hints.sig : ''].join('|');
   return t;
 }
 // map.theme first (map.js 3.1), then the level def (state.level.def.theme), else the WO4 look.
@@ -603,8 +613,11 @@ function getStaticLayer(map, theme) {
   const c = oc.getContext('2d');
   labelRects = [];
   try { paintStatic(c, map, width, height, theme); } finally {
-    staticLayer = { canvas: oc, map, key, torches: theme.torch ? findTorches(map) : [], labels: labelRects };
+    staticLayer = { canvas: oc, map, key, torches: theme.torch ? findTorches(map) : [], labels: labelRects,
+      pits: findPits(map), cols: map.cols || Math.round(width / TILE) };
     labelRects = null;
+    styleNoTorch = null;
+    styleNoEdge = null;
   }
   return oc;
 }
@@ -617,6 +630,10 @@ function paintStatic(c, map, width, height, theme) {
   // Floor (WO5: theme floor, plus a floorAlt checker and accent flecks when the theme has one)
   c.fillStyle = th.floor;
   c.fillRect(0, 0, width, height);
+  styleNoTorch = null;
+  styleNoEdge = null;
+  if (th.style) paintStyleFloor(c, map, th, cols, rows); // WO9: carpet / snow / flagstones
+  else {
   if (th.textured) {
     c.fillStyle = th.floorAlt;
     for (let ty = 0; ty < rows; ty++) for (let tx = (ty & 1); tx < cols; tx += 2) c.fillRect(tx * TILE, ty * TILE, TILE, TILE);
@@ -632,15 +649,18 @@ function paintStatic(c, map, width, height, theme) {
     }
   }
   if (th.textured) paintFloorFlecks(c, th, cols, rows);
+  }
   // WO5: the boss arena floor is slightly darker.
   paintArenaFloor(c, map, cols);
-  // Grid
-  c.strokeStyle = 'rgba(255,255,255,0.04)';
-  c.lineWidth = 1;
-  c.beginPath();
-  for (let x = 0; x <= width; x += TILE) { c.moveTo(x + 0.5, 0); c.lineTo(x + 0.5, height); }
-  for (let y = 0; y <= height; y += TILE) { c.moveTo(0, y + 0.5); c.lineTo(width, y + 0.5); }
-  c.stroke();
+  // Grid (WO9 styles carry their own tile pattern)
+  if (!th.style) {
+    c.strokeStyle = 'rgba(255,255,255,0.04)';
+    c.lineWidth = 1;
+    c.beginPath();
+    for (let x = 0; x <= width; x += TILE) { c.moveTo(x + 0.5, 0); c.lineTo(x + 0.5, height); }
+    for (let y = 0; y <= height; y += TILE) { c.moveTo(0, y + 0.5); c.lineTo(width, y + 0.5); }
+    c.stroke();
+  }
 
   // Spawn pockets, open spawns, window frames
   if (map.tiles) {
@@ -651,6 +671,8 @@ function paintStatic(c, map, width, height, theme) {
         if (code === T_POCKET) {
           c.fillStyle = '#0a0a0c';
           c.fillRect(x, y, TILE, TILE);
+        } else if (code === T_OPEN && th.style === 'outpost') {
+          paintSnowHole(c, x, y, ty * cols + tx);  // FIX-2 (WO9 QA OUTPOST #9)
         } else if (code === T_OPEN) {
           c.fillStyle = 'rgba(90,10,10,0.35)';
           c.fillRect(x + 4, y + 4, TILE - 8, TILE - 8);
@@ -676,6 +698,9 @@ function paintStatic(c, map, width, height, theme) {
     }
   }
 
+  // WO9: pits ('~') per theme; never walls (no brick, no wall edge of their own).
+  if (map.tiles) paintPits(c, map, th, cols);
+
   // Walls: prefer merged rects, fall back to tiles
   const rects = Array.isArray(map.walls) && map.walls.length ? map.walls : null;
   c.fillStyle = th.wall;
@@ -690,7 +715,8 @@ function paintStatic(c, map, width, height, theme) {
   if (Array.isArray(map.wallBuys)) {
     for (const wb of map.wallBuys) c.fillRect(wb.x, wb.y, wb.w || TILE, wb.h || TILE);
   }
-  if (th.wallStyle === 'panel') paintLabWalls(c, map, th, cols, rows);
+  if (th.style) paintStyleWalls(c, map, th, cols, rows); // WO9: wood + curtains + seats / rock, huts, fences / sandstone
+  else if (th.wallStyle === 'panel') paintLabWalls(c, map, th, cols, rows);
   else if (th.textured) paintBrickwork(c, map, th, cols, rows);
   // Edges: draw per-tile edges only where a wall borders a non-solid tile (clean outlines)
   if (map.tiles) {
@@ -701,6 +727,7 @@ function paintStatic(c, map, width, height, theme) {
       for (let tx = 0; tx < cols; tx++) {
         const code = map.tiles[ty * cols + tx];
         if (code !== T_WALL && code !== T_WALLBUY) continue;
+        if (styleNoEdge && styleNoEdge.has(ty * cols + tx)) continue;
         const x = tx * TILE, y = ty * TILE;
         if (!isSolidCode(tileAt(map, tx, ty - 1)) || tileAt(map, tx, ty - 1) === T_WINDOW) { c.moveTo(x, y + 0.5); c.lineTo(x + TILE, y + 0.5); }
         if (!isSolidCode(tileAt(map, tx, ty + 1)) || tileAt(map, tx, ty + 1) === T_WINDOW) { c.moveTo(x, y + TILE - 0.5); c.lineTo(x + TILE, y + TILE - 0.5); }
@@ -713,6 +740,7 @@ function paintStatic(c, map, width, height, theme) {
     c.strokeStyle = th.wallEdge;
     for (const r of rects) c.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
   }
+  if (th.style === 'temple') paintVines(c, map, th, cols, rows); // WO9: hanging vines over wall edges
 
   // Wall buys: chalk outline + name + price
   // FIX-1 (#3): their plates are tagged 'buy' so the over-player re-blit keeps the player visible.
@@ -968,7 +996,7 @@ function findDecorBlocks(map, cols, rows) {
   const out = new Set();
   const T = map.tiles;
   if (!T) return out;
-  const conn = (code) => code != null && code !== T_FLOOR && code !== T_OPEN && code !== T_ARENA && code !== T_BOX;
+  const conn = (code) => code != null && code !== T_FLOOR && code !== T_OPEN && code !== T_ARENA && code !== T_BOX && code !== T_PIT;
   const seen = new Uint8Array(cols * rows);
   const stack = [], comp = [];
   for (let i = 0; i < cols * rows; i++) {
@@ -1152,6 +1180,7 @@ function findTorches(map) {
       if ((tx + 5 * ty) % 6 !== 0) continue;
       const i = ty * cols + tx;
       if (map.tiles[i] !== T_WALL) continue;
+      if (styleNoTorch && styleNoTorch.has(i)) continue; // WO9: seats, curtains, fences, huts
       for (const [dx, dy] of dirs) {
         if (!isOpenFloorCode(tileAt(map, tx + dx, ty + dy))) continue;
         out.push({
@@ -1192,7 +1221,7 @@ function paintPlate(c, b, side, text, fg, bg, border) {
   else if (side.dx === 1) { px = b.x + b.w + gap; py = b.y + b.h / 2 - plateH / 2; }
   else { px = b.x - gap - plateW; py = b.y + b.h / 2 - plateH / 2; }
   px = Math.round(px); py = Math.round(py);
-  if (labelRects) labelRects.push({ x: px, y: py, w: plateW, h: plateH });
+  if (labelRects) labelRects.push({ x: px, y: py, w: plateW, h: plateH, buy: labelKind === 'buy' });
   c.fillStyle = bg;
   roundRect(c, px, py, plateW, plateH, 3);
   c.fill();
@@ -1283,10 +1312,16 @@ function paintMegaDoor(c, map, th) {
     : { x: b.x, y: b.y - over, w: b.w, h: b.h + over * 2 };
   const price = Number.isFinite(md.cost) ? String(md.cost)
     : (CFG.DOORS && Number.isFinite(CFG.DOORS.megaCost) ? String(CFG.DOORS.megaCost) : '');
-  for (const s of labelSides(axis)) {
-    if (sealed) paintPlate(c, lb, s, 'SEALED', '#ffe0e0', 'rgba(110,8,8,0.94)', '#ff5a5a');
-    else paintWallBuyLabel(c, lb, lb.w, lb.h, s, 'MEGA DOOR', price);
-  }
+  // FIX-2 (WO9 QA TEMPLE #5 / OUTPOST #10 / KINO #6): mega door plates (SEALED on the arena side
+  // at the boss start) are re-blitted over the player at the 35 % buy-plate alpha.
+  const prevKind = labelKind;
+  labelKind = 'buy';
+  try {
+    for (const s of labelSides(axis)) {
+      if (sealed) paintPlate(c, lb, s, 'SEALED', '#ffe0e0', 'rgba(110,8,8,0.94)', '#ff5a5a');
+      else paintWallBuyLabel(c, lb, lb.w, lb.h, s, 'MEGA DOOR', price);
+    }
+  } finally { labelKind = prevKind; }
 }
 
 function paintSkullPlate(c, x, y, R, th, sealed) {
@@ -2647,10 +2682,12 @@ function whiteSprite(sp) {
 // only in the boss crown/helmet) become levelDef.boss.tint. Darker shades of a magenta marker (r === b, g === 0,
 // e.g. from a custom palette) keep their relative brightness. Cached per sprite x tint.
 const tintCache = new WeakMap(); // sprite -> Map(tint -> sprite)
-function bossTinted(sp, tint, marker) {
+function bossTinted(sp, tint, marker, bodyMix) {
   let m = tintCache.get(sp);
   if (!m) { m = new Map(); tintCache.set(sp, m); }
-  let out = m.get(tint);
+  const mix = bodyMix > 0 ? Math.min(0.8, bodyMix) : 0;
+  const key = mix ? tint + '@' + mix : tint;
+  let out = m.get(key);
   if (out) return out;
   const mk = hexRgb(marker) || [255, 0, 255];
   const tc = hexRgb(tint) || [122, 31, 31];
@@ -2662,10 +2699,18 @@ function bossTinted(sp, tint, marker) {
       const f = r / 255;
       return [Math.round(tc[0] * f), Math.round(tc[1] * f), Math.round(tc[2] * f), a];
     }
+    // FIX-2 (WO9 QA KINO #7 / TEMPLE #11): optional body wash in the tint, luminance-preserving;
+    // glowing red eyes / blood (strong red) keep their colour.
+    if (mix && !(r > 150 && g < 90 && b < 90)) {
+      const L = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+      const k = 0.35 + L * 1.25;
+      return [Math.min(255, Math.round(r + (tc[0] * k - r) * mix)), Math.min(255, Math.round(g + (tc[1] * k - g) * mix)),
+        Math.min(255, Math.round(b + (tc[2] * k - b) * mix)), a];
+    }
     return null;
   });
   if (m.size > 8) m.clear();
-  m.set(tint, out);
+  m.set(key, out);
   return out;
 }
 
@@ -2782,12 +2827,19 @@ function drawStunnedSprite(z, spr, zx, zy, rad, scale, dirs, t) {
 
 // Boss body via sprites (called from drawBoss after the shadow, before the telegraph ring).
 // Returns false when the boss art is missing / placeholder (drawBoss then draws the vector boss).
+// FIX-2: body wash strength per WO9 look (KINO: gold PROJECTIONIST, TEMPLE: teal DROWNED KING).
+const BOSS_BODY_MIX = { kino: 0.42, temple: 0.38 };
+function bossBodyMix(state) {
+  return BOSS_BODY_MIX[themeOf(state).style] || 0;
+}
+
 function drawBossSprite(state, z, dying, alpha, ang, phase, t) {
   const B = zombieArt.ZOMBIE_SPRITES && zombieArt.ZOMBIE_SPRITES.boss;
   const spr = B ? zombieSpritesFor(z) : null;
   if (!spr) return false;
   const tint = bossTint(state);
   const marker = typeof B.tintColor === 'string' ? B.tintColor : '#b44dff';
+  const mix = bossBodyMix(state);
   const scale = spriteScale();
   const dirs = spriteDirections();
   const r = trackZombie(state, z);
@@ -2796,7 +2848,7 @@ function drawBossSprite(state, z, dying, alpha, ang, phase, t) {
     if (!dying) r.bodyA = ang;
     ctx.globalAlpha = alpha;
     if (dying) {
-      const cs = bossTinted(realArt(spr.corpse) ? spr.corpse : spr.body, tint, marker);
+      const cs = bossTinted(realArt(spr.corpse) ? spr.corpse : spr.body, tint, marker, mix);
       const ca = anchorOf(spr.anchor, cs);
       drawCrisp(cs, zx, zy, 0, 0, r.bodyA, ca.x, ca.y, scale, dirs);
       ctx.globalAlpha = 1;
@@ -2805,14 +2857,14 @@ function drawBossSprite(state, z, dying, alpha, ang, phase, t) {
     const stride = CFG.SPRITES && CFG.SPRITES.bossStride > 0 ? CFG.SPRITES.bossStride : 90;
     const lf = legFrameOf(spr.legs, r, stride);
     if (lf && lf.pixels) {
-      const lt = bossTinted(lf, tint, marker);
+      const lt = bossTinted(lf, tint, marker, mix);
       const la = anchorOf(spr.legs.anchor, lt);
       // Legs follow the dash while charging, else the tracked movement.
       drawCrisp(lt, zx, zy, 0, 0, phase === 'dash' ? ang : r.legA, la.x, la.y, scale, dirs);
     }
     const charging = phase === 'telegraph' || phase === 'dash';
     const raw = charging && realArt(B.charge) ? B.charge : spr.body;
-    const body = bossTinted(raw, tint, marker);
+    const body = bossTinted(raw, tint, marker, mix);
     const ba = anchorOf(spr.anchor, body);
     drawCrisp(body, zx, zy, 0, 0, ang, ba.x, ba.y, scale, dirs);
     if (phase === 'telegraph') {
@@ -4605,6 +4657,2066 @@ function drawFlicker(t, W, H) {
   ctx.fillStyle = '#02040a';
   ctx.fillRect(0, 0, W, H);
   ctx.globalAlpha = 1;
+}
+
+// ---------------------------------------------------------------------------
+// WO9 (Agent F): KINO / OUTPOST / TEMPLE looks (static layer), pit tiles '~', water / snow /
+// spores / film-grain overlays, frost breath + tide ring, frosty slowed player.
+// ---------------------------------------------------------------------------
+const WO9_STYLES = ['kino', 'outpost', 'temple'];
+// theme.style wins; otherwise the theme name prefix (loop themes are named 'KINO — FLOODED' and
+// level.loopTheme() drops `style`).
+function resolveStyle(raw) {
+  const s = typeof raw.style === 'string' ? raw.style.toLowerCase() : '';
+  if (WO9_STYLES.indexOf(s) >= 0) return s;
+  const n = typeof raw.name === 'string' ? raw.name.trim() : '';
+  if (/^KINO\b/i.test(n)) return 'kino';
+  if (/^OUTPOST\b/i.test(n)) return 'outpost';
+  if (/^TEMPLE\b/i.test(n)) return 'temple';
+  return '';
+}
+
+// Integer hash -> [0, 1) (better spread than the sin hash for dense noise).
+function ihash(n) {
+  let h = Math.imul((n | 0) ^ 0x9e3779b9, 0x85ebca6b);
+  h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+function fract(v) { return v - Math.floor(v); }
+function rgbaHex(hex, a) {
+  const c = hexRgb(hex) || [128, 128, 128];
+  return `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+}
+// Mixes two #rrggbb colours (f = 0 -> a, 1 -> b), then scales brightness by k.
+function mixHex(a, b, f, k) {
+  const x = hexRgb(a) || [0, 0, 0], y = hexRgb(b) || x;
+  const m = (i) => Math.max(0, Math.min(255, Math.round((x[i] + (y[i] - x[i]) * f) * (k || 1)))).toString(16).padStart(2, '0');
+  return '#' + m(0) + m(1) + m(2);
+}
+function isOpenish(code) { return isOpenFloorCode(code) || code === T_DOOR; }
+
+// Wall tiles the WO9 styles repaint as non-wall decor (seat rows, curtains, fences): no torches.
+let styleNoTorch = null;
+// FIX-2: wall tiles a WO9 painter draws with their own outline (KINO props, brick, cinder): the
+// generic wallEdge line (gold on KINO) is skipped for them.
+let styleNoEdge = null;
+
+// Connected wall masses (4-neighbour). Everything solid-ish connects (walls, buys, perks, doors,
+// windows, pockets, stairs) so a wall run between two doors still counts as part of its building;
+// floor, open spawns, arena floor, the box and pits separate. `walls` = plain T_WALL tiles.
+function wallComponents(map, cols, rows) {
+  const T = map.tiles, n = cols * rows;
+  const comp = new Int32Array(n).fill(-1);
+  const list = [];
+  const stack = [];
+  const conn = (c) => c != null && c !== T_FLOOR && c !== T_OPEN && c !== T_ARENA && c !== T_BOX && c !== T_PIT;
+  for (let i = 0; i < n; i++) {
+    if (comp[i] >= 0 || !conn(T[i])) continue;
+    const info = { id: list.length, walls: 0, other: 0, border: false, x0: cols, y0: rows, x1: -1, y1: -1 };
+    stack.length = 0; stack.push(i); comp[i] = info.id;
+    while (stack.length) {
+      const j = stack.pop();
+      const x = j % cols, y = (j / cols) | 0;
+      if (T[j] === T_WALL) info.walls++; else info.other++;
+      if (x < info.x0) info.x0 = x; if (x > info.x1) info.x1 = x;
+      if (y < info.y0) info.y0 = y; if (y > info.y1) info.y1 = y;
+      if (x === 0 || y === 0 || x === cols - 1 || y === rows - 1) info.border = true;
+      if (x > 0 && comp[j - 1] < 0 && conn(T[j - 1])) { comp[j - 1] = info.id; stack.push(j - 1); }
+      if (x < cols - 1 && comp[j + 1] < 0 && conn(T[j + 1])) { comp[j + 1] = info.id; stack.push(j + 1); }
+      if (y > 0 && comp[j - cols] < 0 && conn(T[j - cols])) { comp[j - cols] = info.id; stack.push(j - cols); }
+      if (y < rows - 1 && comp[j + cols] < 0 && conn(T[j + cols])) { comp[j + cols] = info.id; stack.push(j + cols); }
+    }
+    info.bw = info.x1 - info.x0 + 1; info.bh = info.y1 - info.y0 + 1;
+    list.push(info);
+  }
+  return { comp, list };
+}
+
+// Which sides of tile (tx, ty) face walkable floor: bit 1 up, 2 down, 4 left, 8 right.
+function openSides(map, tx, ty) {
+  return (isOpenish(tileAt(map, tx, ty - 1)) ? 1 : 0) | (isOpenish(tileAt(map, tx, ty + 1)) ? 2 : 0) |
+    (isOpenish(tileAt(map, tx - 1, ty)) ? 4 : 0) | (isOpenish(tileAt(map, tx + 1, ty)) ? 8 : 0);
+}
+
+// ---- floors ----
+function paintStyleFloor(c, map, th, cols, rows) {
+  const W = cols * TILE, H = rows * TILE;
+  c.save();
+  if (th.style === 'kino') {
+    // Carpet: a floorAlt diamond in every tile inside a gold diamond lattice, gold centre studs,
+    // dark nap specks.
+    c.fillStyle = th.floorAlt;
+    c.beginPath();
+    for (let ty = 0; ty < rows; ty++) for (let tx = 0; tx < cols; tx++) {
+      const x = tx * TILE, y = ty * TILE, h = TILE / 2;
+      c.moveTo(x + h, y + 5); c.lineTo(x + TILE - 5, y + h); c.lineTo(x + h, y + TILE - 5); c.lineTo(x + 5, y + h); c.closePath();
+    }
+    c.fill();
+    c.strokeStyle = rgbaHex(th.accent, 0.32);
+    c.lineWidth = 1.5;
+    c.beginPath();
+    for (let k = -H; k <= W + H; k += TILE) {
+      const o = k + TILE / 2;
+      c.moveTo(o, 0); c.lineTo(o + H, H);          // x - y = o
+      c.moveTo(o, 0); c.lineTo(o - H, H);          // x + y = o
+    }
+    c.stroke();
+    c.fillStyle = rgbaHex(th.accent, 0.5);
+    for (let ty = 0; ty < rows; ty++) for (let tx = 0; tx < cols; tx++) c.fillRect(tx * TILE + 19, ty * TILE + 19, 2, 2);
+    c.fillStyle = 'rgba(0,0,0,0.22)';
+    for (let ty = 0; ty < rows; ty++) for (let tx = 0; tx < cols; tx++) {
+      for (let k = 0; k < 4; k++) {
+        const h = ihash((ty * cols + tx) * 7 + k);
+        c.fillRect(tx * TILE + Math.floor(h * 38), ty * TILE + Math.floor(ihash(h * 1e6 + k) * 38), 1, 1);
+      }
+    }
+    paintKinoZoneFloors(c, map, th, cols, rows);   // FIX-2: boards / asphalt / concrete zones
+  } else if (th.style === 'outpost') {
+    // Snow: soft drifts (bright ellipse with a blue shadow), wind streaks, drift speckles.
+    for (let ty = 0; ty < rows; ty++) for (let tx = 0; tx < cols; tx++) {
+      const i = ty * cols + tx, x = tx * TILE, y = ty * TILE;
+      const h = ihash(i * 3 + 1);
+      if (h > 0.8) {
+        const cx = x + 8 + ihash(i * 5) * 24, cy = y + 8 + ihash(i * 5 + 1) * 24;
+        const rx = 12 + ihash(i * 5 + 2) * 14, ry = 4 + ihash(i * 5 + 3) * 4;
+        c.fillStyle = 'rgba(150,175,205,0.22)';
+        c.beginPath(); c.ellipse(cx + 1, cy + 3, rx, ry, -0.15, 0, Math.PI * 2); c.fill();
+        c.fillStyle = 'rgba(255,255,255,0.55)';
+        c.beginPath(); c.ellipse(cx, cy, rx, ry, -0.15, 0, Math.PI * 2); c.fill();
+      } else if (h < 0.08) {
+        c.strokeStyle = 'rgba(150,175,205,0.3)';
+        c.lineWidth = 1;
+        c.beginPath();
+        const sx = x + ihash(i * 7) * 20, sy = y + 6 + ihash(i * 7 + 1) * 28;
+        c.moveTo(sx, sy); c.lineTo(sx + 18 + ihash(i * 7 + 2) * 16, sy - 3);
+        c.stroke();
+      }
+      const n = 3 + Math.floor(ihash(i * 11) * 4);
+      for (let k = 0; k < n; k++) {
+        const u = ihash(i * 13 + k), v = ihash(i * 17 + k * 3);
+        const blue = ihash(i * 19 + k) > 0.55;
+        c.fillStyle = blue ? 'rgba(120,150,185,0.35)' : 'rgba(255,255,255,0.8)';
+        c.fillRect(x + Math.floor(u * 38), y + Math.floor(v * 38), blue ? 1 : 2, blue ? 1 : 2);
+      }
+    }
+  } else if (th.style === 'temple') {
+    // Flagstones: mortar, then one / two / four stones per tile shaded between floor and floorAlt,
+    // moss tufts at the joints and hairline cracks.
+    c.fillStyle = shadeHex(th.floor, 0.58);
+    c.fillRect(0, 0, W, H);
+    for (let ty = 0; ty < rows; ty++) for (let tx = 0; tx < cols; tx++) {
+      const i = ty * cols + tx, x = tx * TILE, y = ty * TILE;
+      const p = ihash(i * 5 + 2);
+      const stone = (sx, sy, sw, sh, k) => {
+        c.fillStyle = mixHex(th.floor, th.floorAlt, ihash(i * 9 + k), 0.9 + ihash(i * 23 + k) * 0.2);
+        c.fillRect(sx + 1, sy + 1, sw - 2, sh - 2);
+        c.fillStyle = 'rgba(255,255,230,0.06)';
+        c.fillRect(sx + 1, sy + 1, sw - 2, 1);
+      };
+      if (p < 0.4) stone(x, y, TILE, TILE, 0);
+      else if (p < 0.7) {
+        if (ihash(i * 3) > 0.5) { stone(x, y, TILE, TILE / 2, 0); stone(x, y + TILE / 2, TILE, TILE / 2, 1); }
+        else { stone(x, y, TILE / 2, TILE, 0); stone(x + TILE / 2, y, TILE / 2, TILE, 1); }
+      } else {
+        const hw = TILE / 2;
+        stone(x, y, hw, hw, 0); stone(x + hw, y, hw, hw, 1); stone(x, y + hw, hw, hw, 2); stone(x + hw, y + hw, hw, hw, 3);
+      }
+      if (ihash(i * 29) > 0.5) {
+        const nm = 1 + Math.floor(ihash(i * 31) * 3);
+        c.fillStyle = rgbaHex(hintsOf(th).moss, 0.4);
+        c.beginPath();
+        for (let k = 0; k < nm; k++) {
+          const side = Math.floor(ihash(i * 37 + k) * 4);
+          const u = 4 + ihash(i * 41 + k) * 32;
+          const mx = side < 2 ? x + u : x + (side === 2 ? 1 : TILE - 1);
+          const my = side < 2 ? y + (side === 0 ? 1 : TILE - 1) : y + u;
+          const r = 2.5 + ihash(i * 43 + k) * 4;
+          c.moveTo(mx + r, my); c.arc(mx, my, r, 0, Math.PI * 2);
+        }
+        c.fill();
+      }
+      if (ihash(i * 47) > 0.78) {
+        c.strokeStyle = 'rgba(18,22,16,0.55)';
+        c.lineWidth = 1;
+        c.beginPath();
+        let cx = x + 6 + ihash(i * 53) * 28, cy = y + 6 + ihash(i * 59) * 28;
+        c.moveTo(cx, cy);
+        for (let k = 0; k < 3; k++) {
+          cx += (ihash(i * 61 + k) - 0.5) * 14; cy += (ihash(i * 67 + k) - 0.5) * 14;
+          c.lineTo(Math.max(x + 1, Math.min(x + TILE - 1, cx)), Math.max(y + 1, Math.min(y + TILE - 1, cy)));
+        }
+        c.stroke();
+      }
+    }
+  }
+  c.restore();
+}
+
+// FIX-2 (WO9 QA OUTPOST #9): an open spawn on snow is a dug-up, churned hole (not a UI square):
+// trampled blue-grey snow, a dark frozen-earth hole, a few white clods and claw scrapes at the rim.
+function paintSnowHole(c, x, y, i) {
+  const cx = x + TILE / 2, cy = y + TILE / 2 + 1;
+  c.save();
+  c.fillStyle = 'rgba(120,145,170,0.28)';
+  c.beginPath(); c.ellipse(cx, cy + 1, 17, 12.5, 0, 0, Math.PI * 2); c.fill();
+  c.fillStyle = '#9fb4c8';
+  c.beginPath(); c.ellipse(cx, cy, 14, 10, 0, 0, Math.PI * 2); c.fill();
+  c.fillStyle = '#5f7488';
+  c.beginPath(); c.ellipse(cx, cy + 0.5, 9, 6, 0, 0, Math.PI * 2); c.fill();
+  c.fillStyle = '#2a3440';
+  c.beginPath(); c.ellipse(cx + 0.5, cy + 1.5, 6, 3.6, 0, 0, Math.PI * 2); c.fill();
+  c.fillStyle = 'rgba(60,40,30,0.55)';       // frozen earth specks in the hole
+  c.fillRect(cx - 3, cy + 1, 2, 1); c.fillRect(cx + 2, cy + 2, 1, 1);
+  c.strokeStyle = 'rgba(70,90,110,0.55)';    // claw scrapes out of the hole
+  c.lineWidth = 1;
+  c.beginPath();
+  for (let k = 0; k < 3; k++) {
+    const a = ihash(i * 7 + k) * Math.PI * 2;
+    const r0 = 11, r1 = 15 + ihash(i * 11 + k) * 4;
+    c.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0 * 0.72);
+    c.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1 * 0.72);
+  }
+  c.stroke();
+  c.fillStyle = '#f4f9fd';                    // clods of snow thrown onto the rim
+  for (let k = 0; k < 4; k++) {
+    const a = ihash(i * 13 + k) * Math.PI * 2, r = 12 + ihash(i * 17 + k) * 4;
+    const s = 2 + Math.floor(ihash(i * 19 + k) * 3);
+    c.fillRect(Math.round(cx + Math.cos(a) * r - s / 2), Math.round(cy + Math.sin(a) * r * 0.75 - s / 2), s, s);
+  }
+  c.restore();
+}
+
+// ---- pits ('~', TILE_PIT) ----
+function findPits(map) {
+  const T = map && map.tiles;
+  if (!T) return new Int32Array(0);
+  let n = 0;
+  for (let i = 0; i < T.length; i++) if (T[i] === T_PIT) n++;
+  const out = new Int32Array(n);
+  let k = 0;
+  for (let i = 0; i < T.length; i++) if (T[i] === T_PIT) out[k++] = i;
+  return out;
+}
+
+// Pits are never walls (no brick, no wall edge). OUTPOST: dark blue-cyan ice water with an ice
+// shelf and cracks on every shore; TEMPLE: deep teal water with a stone lip (ripples are drawn
+// per frame by drawTempleWater); anything else: a dark hole with a lip.
+function paintPits(c, map, th, cols) {
+  const pits = findPits(map);
+  if (!pits.length) return;
+  const style = th.style;
+  const H = hintsOf(th);
+  const iceWater = shadeHex(H.iceDeep, 0.6), iceEdge = H.ice, deep = H.waterDeep;
+  const notPit = (tx, ty) => tileAt(map, tx, ty) !== T_PIT;
+  c.save();
+  for (let q = 0; q < pits.length; q++) {
+    const i = pits[q], tx = i % cols, ty = (i / cols) | 0, x = tx * TILE, y = ty * TILE;
+    const up = notPit(tx, ty - 1), dn = notPit(tx, ty + 1), lf = notPit(tx - 1, ty), rt = notPit(tx + 1, ty);
+    if (style === 'outpost') {
+      c.fillStyle = iceWater;
+      c.fillRect(x, y, TILE, TILE);
+      c.fillStyle = 'rgba(4,22,34,0.45)';
+      c.fillRect(x + (lf ? 9 : 0), y + (up ? 9 : 0), TILE - (lf ? 9 : 0) - (rt ? 9 : 0), TILE - (up ? 9 : 0) - (dn ? 9 : 0));
+      c.strokeStyle = 'rgba(160,225,245,0.28)';
+      c.lineWidth = 1;
+      c.beginPath();
+      for (let k = 0; k < 2; k++) {
+        const gx = x + 8 + ihash(i * 7 + k) * 20, gy = y + 10 + ihash(i * 11 + k) * 20;
+        c.moveTo(gx, gy); c.lineTo(gx + 6 + ihash(i * 13 + k) * 6, gy);
+      }
+      c.stroke();
+      if (ihash(i * 17) > 0.7) {  // a small ice floe
+        const fx = x + 10 + ihash(i * 19) * 18, fy = y + 10 + ihash(i * 23) * 18;
+        c.fillStyle = 'rgba(215,238,248,0.85)';
+        c.beginPath(); c.moveTo(fx, fy); c.lineTo(fx + 7, fy + 1); c.lineTo(fx + 5, fy + 5); c.lineTo(fx - 1, fy + 4); c.closePath(); c.fill();
+      }
+      const shelf = (sx, sy, horiz, dir) => {
+        // ice band 5 px along the shore with a jagged water-side edge
+        c.fillStyle = '#d6ecf6';
+        if (horiz) c.fillRect(x, sy, TILE, 5 * dir > 0 ? 5 : -5); else c.fillRect(sx, y, 5 * dir > 0 ? 5 : -5, TILE);
+        c.fillStyle = iceEdge;
+        c.beginPath();
+        for (let k = 0; k < 5; k++) {
+          const u = k * 8 + ihash(i * 29 + k + (horiz ? 0 : 50)) * 3;
+          const d = 3 + ihash(i * 31 + k + (horiz ? 0 : 50)) * 5;
+          if (horiz) { c.moveTo(x + u, sy + 5 * dir); c.lineTo(x + u + 4, sy + (5 + d) * dir); c.lineTo(x + u + 8, sy + 5 * dir); }
+          else { c.moveTo(sx + 5 * dir, y + u); c.lineTo(sx + (5 + d) * dir, y + u + 4); c.lineTo(sx + 5 * dir, y + u + 8); }
+        }
+        c.fill();
+        // cracks running from the shore into the snow / ice
+        c.strokeStyle = 'rgba(40,95,130,0.55)';
+        c.lineWidth = 1;
+        c.beginPath();
+        for (let k = 0; k < 1; k++) {
+          if (ihash(i * 39 + (horiz ? dir : dir * 3)) < 0.5) continue;
+          const u = 6 + ihash(i * 37 + k + (horiz ? 0 : 50)) * 28;
+          let px = horiz ? x + u : sx, py = horiz ? sy : y + u;
+          c.moveTo(px, py);
+          for (let s = 0; s < 3; s++) {
+            const along = (ihash(i * 41 + k * 3 + s) - 0.5) * 7, out = -(3 + ihash(i * 43 + k * 3 + s) * 4) * dir;
+            px += horiz ? along : out; py += horiz ? out : along;
+            c.lineTo(px, py);
+          }
+        }
+        c.stroke();
+      };
+      if (up) shelf(0, y, true, 1);
+      if (dn) shelf(0, y + TILE, true, -1);
+      if (lf) shelf(x, 0, false, 1);
+      if (rt) shelf(x + TILE, 0, false, -1);
+    } else if (style === 'temple') {
+      c.fillStyle = deep;
+      c.fillRect(x, y, TILE, TILE);
+      c.fillStyle = 'rgba(2,20,22,0.4)';                  // depth toward the middle of a channel
+      c.fillRect(x + (lf ? 6 : 0), y + (up ? 6 : 0), TILE - (lf ? 6 : 0) - (rt ? 6 : 0), TILE - (up ? 6 : 0) - (dn ? 6 : 0));
+      c.fillStyle = 'rgba(0,0,0,0.35)';                  // lip shadow on the far side
+      if (up) c.fillRect(x, y, TILE, 7);
+      if (lf) c.fillRect(x, y, 5, TILE);
+      const lip = shadeHex(th.wall, 0.78);
+      c.fillStyle = lip;
+      if (up) c.fillRect(x, y, TILE, 3);
+      if (dn) c.fillRect(x, y + TILE - 3, TILE, 3);
+      if (lf) c.fillRect(x, y, 3, TILE);
+      if (rt) c.fillRect(x + TILE - 3, y, 3, TILE);
+      c.fillStyle = rgbaHex(H.moss, 0.6);                 // algae / lily pads
+      for (let k = 0; k < 1; k++) {
+        if (ihash(i * 53 + k) < 0.8) continue;
+        const px = x + 8 + ihash(i * 59 + k) * 24, py = y + 8 + ihash(i * 61 + k) * 24;
+        c.beginPath(); c.arc(px, py, 2.5 + ihash(i * 67 + k) * 2.5, 0.4, Math.PI * 2 - 0.2); c.fill();
+      }
+    } else {
+      c.fillStyle = '#060607';
+      c.fillRect(x, y, TILE, TILE);
+      c.fillStyle = 'rgba(0,0,0,0.6)';
+      if (up) c.fillRect(x, y, TILE, 8);
+      if (lf) c.fillRect(x, y, 6, TILE);
+      c.fillStyle = style === 'kino' ? rgbaHex(th.wallEdge, 0.55) : '#2c2c32';
+      if (up) c.fillRect(x, y, TILE, 2);
+      if (dn) c.fillRect(x, y + TILE - 2, TILE, 2);
+      if (lf) c.fillRect(x, y, 2, TILE);
+      if (rt) c.fillRect(x + TILE - 2, y, 2, TILE);
+    }
+  }
+  c.restore();
+}
+
+// ---- walls ----
+function paintStyleWalls(c, map, th, cols, rows) {
+  if (!map.tiles) return;
+  const { comp, list } = wallComponents(map, cols, rows);
+  styleNoTorch = new Set();
+  styleNoEdge = new Set();
+  c.save();
+  if (th.style === 'kino') paintKinoWalls(c, map, th, cols, rows, comp, list);
+  else if (th.style === 'outpost') paintOutpostWalls(c, map, th, cols, rows, comp, list);
+  else if (th.style === 'temple') paintTempleWalls(c, map, th, cols, rows);
+  c.restore();
+}
+
+// Optional per-style render hints from the level theme (level4-6.js). loopTheme drops them, so
+// every hint has a default / heuristic fallback. KINO: curtain / seat / lamp colours, grain,
+// stageRows [y0, y1], curtainRow, seatRows. OUTPOST: ice, iceDeep, hutWood, snow. TEMPLE:
+// waterDeep, waterLight, moss, vine, glyph, spores.
+function styleHints(raw, style) {
+  if (!style) return null;
+  const hex = (v, d) => (typeof v === 'string' && hexRgb(v) ? v : d);
+  const row = (v) => (Number.isInteger(v) ? v : null);
+  const rowsOf = (v) => (Array.isArray(v) ? v.filter((n) => Number.isInteger(n)) : null);
+  const h = {
+    curtain: hex(raw.curtain, '#8a1020'), seat: hex(raw.seat, '#4c0a10'), lamp: hex(raw.lamp, '#ffdea0'),
+    grain: Number.isFinite(raw.grain) && raw.grain >= 0 ? Math.min(0.2, raw.grain) : 0.035,
+    curtainRow: row(raw.curtainRow), seatRows: rowsOf(raw.seatRows),
+    stageRows: Array.isArray(raw.stageRows) && raw.stageRows.length === 2 && raw.stageRows.every(Number.isInteger) ? raw.stageRows : null,
+    ice: hex(raw.ice, '#8cc4e8'), iceDeep: hex(raw.iceDeep, '#2f6f9e'), hutWood: hex(raw.hutWood, null),
+    snow: raw.snow !== false,
+    waterDeep: hex(raw.waterDeep, '#123f3a'), waterLight: hex(raw.waterLight, '#3fd6a8'),
+    moss: hex(raw.moss, '#5f8436'), vine: hex(raw.vine, '#3a6428'), glyph: hex(raw.glyph, null),
+    spores: raw.spores !== false,
+    // FIX-2: optional tile hints (KINO floorZones / booth / projector, OUTPOST dish / shed).
+    floorZones: normFloorZones(raw.floorZones),
+    booth: tilePt(raw.booth), projector: tilePt(raw.projector), dish: tilePt(raw.dish), shed: tilePt(raw.shed),
+  };
+  // Pre-built colour strings for the per-frame water pass (no per-frame string building).
+  h.ripple = rgbaHex(shadeHex(h.waterLight, 1.5), 0.42);
+  h.rippleRing = rgbaHex(shadeHex(h.waterLight, 1.7), 0.2);
+  h.sig = [style, h.curtain, h.seat, h.lamp, h.grain, h.curtainRow, h.seatRows && h.seatRows.join(','),
+    h.stageRows && h.stageRows.join(','), h.ice, h.iceDeep, h.hutWood, h.snow, h.waterDeep, h.waterLight,
+    h.moss, h.vine, h.glyph, h.spores,
+    h.floorZones ? h.floorZones.map((z) => `${z.floor}:${z.x0},${z.y0},${z.x1},${z.y1}`).join(';') : '',
+    h.booth, h.projector, h.dish, h.shed].join('/');
+  return h;
+}
+function tilePt(v) {
+  return Array.isArray(v) && v.length === 2 && v.every(Number.isInteger) ? v : null;
+}
+let defaultHints = null;
+function hintsOf(th) {
+  if (th && th.hints) return th.hints;
+  if (!defaultHints) defaultHints = styleHints({}, 'default');
+  return defaultHints;
+}
+
+// Free-standing straight single-tile wall rows (only plain walls): seat rows and the curtain line.
+function isThinRow(info, minLen) {
+  if (info.border || info.other) return false;
+  return Math.min(info.bw, info.bh) === 1 && Math.max(info.bw, info.bh) >= minLen && info.walls === info.bw * info.bh;
+}
+
+// Classifies KINO decor: { curtain: Set, seats: Set, stage: {y0, y1, x0, x1} | null }.
+// Hints: curtainRow / seatRows pick the rows. Fallback (loop themes): free-standing thin rows
+// (>= 6 long); the one nearest the Pack-a-Punch (within 5 tiles) is the curtain line, the rest are
+// seat rows. The wall run directly behind the Pack-a-Punch (if any) is curtained too.
+function kinoDecor(map, th, cols, rows, comp, list, g) {
+  const H = hintsOf(th);
+  const curtain = new Set(), seats = new Set();
+  const hinted = !!(H.seatRows || H.curtainRow != null);
+  const rowComps = list.filter((info) => isThinRow(info, hinted ? 3 : 6));
+  let curtainComps = [];
+  if (H.curtainRow != null) curtainComps = rowComps.filter((info) => info.bh === 1 && info.y0 === H.curtainRow);
+  else if (g) {
+    let best = null, bd = Infinity;
+    for (const info of rowComps) {
+      const dx = Math.max(info.x0 - g.tx, 0, g.tx - info.x1), dy = Math.max(info.y0 - g.ty, 0, g.ty - info.y1);
+      const d = Math.max(dx, dy);
+      if (d < bd) { bd = d; best = info; }
+    }
+    if (best && bd <= 5) curtainComps = [best];
+  }
+  for (const info of rowComps) {
+    if (curtainComps.indexOf(info) >= 0) continue;
+    if (H.seatRows && !(info.bh === 1 && H.seatRows.indexOf(info.y0) >= 0)) continue;
+    for (let y = info.y0; y <= info.y1; y++) for (let x = info.x0; x <= info.x1; x++) seats.add(y * cols + x);
+  }
+  let cx0 = cols, cx1 = -1;
+  for (const info of curtainComps) {
+    for (let y = info.y0; y <= info.y1; y++) for (let x = info.x0; x <= info.x1; x++) curtain.add(y * cols + x);
+    cx0 = Math.min(cx0, info.x0); cx1 = Math.max(cx1, info.x1);
+  }
+  // Wall run right behind the Pack-a-Punch (a stage backed by a wall).
+  if (g) {
+    const fx = g.front.dx, fy = g.front.dy, bx = g.tx - fx, by = g.ty - fy;
+    const ax = fy ? 1 : 0, ay = fy ? 0 : 1;
+    if (tileAt(map, bx, by) === T_WALL) {
+      for (const s of [-1, 1]) {
+        for (let k = s < 0 ? 0 : 1; k <= 12; k++) {
+          const tx = bx + ax * s * k, ty = by + ay * s * k;
+          if (tileAt(map, tx, ty) !== T_WALL || !isOpenish(tileAt(map, tx + fx, ty + fy))) break;
+          curtain.add(ty * cols + tx);
+        }
+      }
+    }
+  }
+  // Stage floor (wood boards): the hinted rows across the curtain line's span (+-3 tiles).
+  let stage = null;
+  if (H.stageRows && cx1 >= cx0) stage = { y0: H.stageRows[0], y1: H.stageRows[1], x0: cx0 - 3, x1: cx1 + 3 };
+  return { curtain, seats, stage };
+}
+
+function paintKinoWalls(c, map, th, cols, rows, comp, list) {
+  const T = map.tiles;
+  let g = null;
+  try { g = papGeom(map); } catch (_) { g = null; }
+  const { curtain: curtains, seats, stage } = kinoDecor(map, th, cols, rows, comp, list, g);
+  const H = hintsOf(th);
+  if (stage) paintStageBoards(c, map, stage, cols);
+  // FIX-2 (WO9 QA KINO #2 / #7): floor zones (painted in the floor pass), zone walls, props,
+  // ticket booth, projection booth, stair treads.
+  const zg = kinoZoneGrid(H, cols, rows);
+  const props = kinoPropKinds(map, H, cols, rows, comp, list, zg, seats, curtains);
+  paintKinoStairs(c, map, th, cols, rows, zg);
+  let seatLast = -1;
+  if (H.seatRows && H.seatRows.length) seatLast = Math.max(...H.seatRows);
+  const faceZone = (tx, ty) => {
+    let best = 0;
+    const chk = (x, y) => {
+      if (x < 0 || y < 0 || x >= cols || y >= rows || !isOpenish(tileAt(map, x, y))) return;
+      const z = zg[y * cols + x];
+      if (z === 2 || (z === 3 && best !== 2) || (z === 1 && !best)) best = z;
+    };
+    chk(tx, ty - 1); chk(tx, ty + 1); chk(tx - 1, ty); chk(tx + 1, ty);
+    return best;
+  };
+  const panel = shadeHex(th.wall, 1.18), dark = shadeHex(th.wall, 0.7);
+  for (let ty = 0; ty < rows; ty++) for (let tx = 0; tx < cols; tx++) {
+    const i = ty * cols + tx;
+    if (T[i] !== T_WALL) continue;
+    const x = tx * TILE, y = ty * TILE;
+    const pk = comp[i] >= 0 && !seats.has(i) && !curtains.has(i) ? props.get(comp[i]) : undefined;
+    if (pk) {
+      styleNoTorch.add(i);
+      if (pk !== 'booth') styleNoEdge.add(i);
+      if (pk === 'booth') paintKinoBoothTile(c, map, x, y, tx, ty, i, th);
+      else if (pk === 'projector' || pk === 'cabinet') paintKinoMachineTile(c, x, y, i);
+      else paintKinoPropTile(c, map, x, y, tx, ty, i, pk, list[comp[i]]);
+      continue;
+    }
+    const fz = seats.has(i) || curtains.has(i) ? 0 : faceZone(tx, ty);
+    if (fz === 2) { styleNoEdge.add(i); paintKinoBrickTile(c, x, y, ty, i); continue; }
+    if (fz === 3) { styleNoEdge.add(i); paintKinoCinderTile(c, x, y, ty, i); continue; }
+    if (seats.has(i)) {
+      styleNoTorch.add(i);
+      const info = list[comp[i]];
+      const horiz = info.bw >= info.bh;
+      // Seats face the stage (the Pack-a-Punch) when there is one, else up / left.
+      let face;
+      if (horiz) face = g && g.cy > (info.y0 + info.y1 + 1) * TILE / 2 ? Math.PI : 0;
+      else face = g && g.cx > (info.x0 + info.x1 + 1) * TILE / 2 ? Math.PI / 2 : -Math.PI / 2;
+      paintSeatTile(c, x, y, face, th, i, H.seat);
+      continue;
+    }
+    if (curtains.has(i)) { styleNoTorch.add(i); continue; } // painted below
+    // Dark wood panelling: inset panel, 3 vertical boards with grain, gold trim on open sides.
+    c.fillStyle = dark;
+    c.fillRect(x, y, TILE, TILE);
+    c.fillStyle = panel;
+    c.fillRect(x + 2, y + 2, TILE - 4, TILE - 4);
+    c.fillStyle = 'rgba(0,0,0,0.45)';
+    c.fillRect(x + 14, y + 2, 1, TILE - 4); c.fillRect(x + 27, y + 2, 1, TILE - 4);
+    c.fillStyle = 'rgba(255,210,150,0.07)';
+    for (let k = 0; k < 3; k++) {
+      const gx = x + 4 + k * 13 + Math.floor(ihash(i * 3 + k) * 7);
+      c.fillRect(gx, y + 4 + Math.floor(ihash(i * 5 + k) * 10), 1, 12 + Math.floor(ihash(i * 7 + k) * 12));
+    }
+    const os = openSides(map, tx, ty);
+    if (os && fz === 1) {
+      // Dressing rooms: plain wood (no gold trim), the odd make-up mirror with bulbs.
+      if (ihash(i * 97) > 0.72) {
+        const s = [0, 1, 2, 3].find((k) => os & (1 << k));
+        const mx = s < 2 ? x + 14 : (s === 2 ? x + 1 : x + TILE - 7), my = s < 2 ? (s === 0 ? y + 1 : y + TILE - 7) : y + 14;
+        const mw = s < 2 ? 12 : 6, mh = s < 2 ? 6 : 12;
+        c.fillStyle = '#c8d4dc';
+        c.fillRect(mx, my, mw, mh);
+        c.fillStyle = 'rgba(255,255,255,0.6)';
+        c.fillRect(mx + 1, my + 1, Math.max(1, mw / 3), 1);
+        c.fillStyle = '#ffe6a0';
+        if (s < 2) { c.fillRect(mx - 3, my + 2, 2, 2); c.fillRect(mx + mw + 1, my + 2, 2, 2); }
+        else { c.fillRect(mx + 2, my - 3, 2, 2); c.fillRect(mx + 2, my + mh + 1, 2, 2); }
+      }
+    } else if (os) {
+      c.fillStyle = rgbaHex(th.accent, 0.85);
+      if (os & 1) c.fillRect(x, y + 3, TILE, 2);
+      if (os & 2) c.fillRect(x, y + TILE - 5, TILE, 2);
+      if (os & 4) c.fillRect(x + 3, y, 2, TILE);
+      if (os & 8) c.fillRect(x + TILE - 5, y, 2, TILE);
+      c.fillStyle = rgbaHex(th.accent, 0.95);           // brass studs on the trim
+      if (os & 1) c.fillRect(x + 19, y + 2, 3, 4);
+      if (os & 2) c.fillRect(x + 19, y + TILE - 6, 3, 4);
+      if (os & 4) c.fillRect(x + 2, y + 19, 4, 3);
+      if (os & 8) c.fillRect(x + TILE - 6, y + 19, 4, 3);
+    }
+  }
+  for (const i of curtains) {
+    const tx = i % cols, ty = (i / cols) | 0;
+    // Front (+y in the local frame: gold fringe) faces away from the Pack-a-Punch, toward the
+    // audience; a wall run behind the machine faces the machine's front.
+    let fdx = 0, fdy = 1;
+    if (g) {
+      const vx = tx - g.tx, vy = ty - g.ty;
+      // Along a horizontal run the curtain faces up/down, along a vertical run left/right.
+      const horizRun = curtains.has(i - 1) || curtains.has(i + 1) ||
+        (!curtains.has(i - cols) && !curtains.has(i + cols) && Math.abs(vy) >= Math.abs(vx));
+      if (horizRun) { fdx = 0; fdy = vy >= 0 ? 1 : -1; } else { fdx = vx >= 0 ? 1 : -1; fdy = 0; }
+      if (fdx === -g.front.dx && fdy === -g.front.dy) { fdx = g.front.dx; fdy = g.front.dy; }
+    }
+    paintCurtainTile(c, tx * TILE, ty * TILE, Math.atan2(fdy, fdx) - Math.PI / 2, th, i, H.curtain);
+  }
+  for (const [id, pk] of props) {
+    const info = list[id];
+    if (!info) continue;
+    if (pk === 'projector') paintKinoProjector(c, info, seatLast >= 0 ? seatLast < info.y0 : true);
+    else if (pk === 'cabinet') paintKinoCabinet(c, info, th);
+  }
+}
+
+// Stage floor: warm wooden boards across the stage rows (plain floor tiles only).
+function paintStageBoards(c, map, st, cols) {
+  for (let ty = st.y0; ty <= st.y1; ty++) for (let tx = st.x0; tx <= st.x1; tx++) {
+    if (tileAt(map, tx, ty) !== T_FLOOR) continue;
+    paintBoardTile(c, tx * TILE, ty * TILE, ty * cols + tx, true);
+  }
+}
+
+// ---- FIX-2 (WO9 QA KINO #2 / #7): KINO floor zones, zone walls and props, booth, projector, stairs ----
+const KINO_ZONE = { boards: 1, asphalt: 2, concrete: 3 };
+// theme.floorZones: [{ x0, y0, x1, y1 (inclusive tiles), floor: 'boards' | 'asphalt' | 'concrete' }]
+// (`kind` is accepted as an alias of `floor`). Normalised; bad entries are dropped.
+function normFloorZones(v) {
+  if (!Array.isArray(v)) return null;
+  const out = [];
+  for (const z of v) {
+    if (!z || typeof z !== 'object') continue;
+    const f = typeof z.floor === 'string' ? z.floor : z.kind;
+    if (!KINO_ZONE[f] || ![z.x0, z.y0, z.x1, z.y1].every(Number.isInteger)) continue;
+    out.push({ x0: Math.min(z.x0, z.x1), y0: Math.min(z.y0, z.y1), x1: Math.max(z.x0, z.x1), y1: Math.max(z.y0, z.y1), floor: f });
+  }
+  return out.length ? out : null;
+}
+// Per-tile zone code (0 none, 1 boards, 2 asphalt, 3 concrete); a later zone wins on overlap.
+function kinoZoneGrid(H, cols, rows) {
+  const g = new Int8Array(cols * rows);
+  if (!H.floorZones) return g;
+  for (const z of H.floorZones) {
+    const code = KINO_ZONE[z.floor];
+    for (let ty = Math.max(0, z.y0); ty <= Math.min(rows - 1, z.y1); ty++) {
+      for (let tx = Math.max(0, z.x0); tx <= Math.min(cols - 1, z.x1); tx++) g[ty * cols + tx] = code;
+    }
+  }
+  return g;
+}
+
+// Worn floorboards (stage, dressing rooms): 4 planks per tile with joints and grain.
+function paintBoardTile(c, x, y, i, warm) {
+  c.fillStyle = warm ? '#3a2412' : '#2e2016';
+  c.fillRect(x, y, TILE, TILE);
+  for (let k = 0; k < 4; k++) {
+    c.fillStyle = warm ? mixHex('#6a4424', '#7a5230', ihash(i * 4 + k), 1) : mixHex('#5a4030', '#6a4c34', ihash(i * 4 + k), 1);
+    c.fillRect(x, y + k * 10 + 1, TILE, 8);
+    c.fillStyle = 'rgba(0,0,0,0.35)';
+    const j = Math.floor(ihash(i * 9 + k) * 30) + 5;
+    c.fillRect(x + j, y + k * 10 + 1, 1, 8);
+    if (!warm && ihash(i * 13 + k) > 0.7) {
+      c.fillStyle = 'rgba(255,230,190,0.08)';
+      c.fillRect(x + Math.floor(ihash(i * 15 + k) * 20), y + k * 10 + 3, 14, 1);
+    }
+  }
+}
+
+// Zone floors, painted over the carpet in the floor pass (before arena shading and spawn marks).
+function paintKinoZoneFloors(c, map, th, cols, rows) {
+  const H = hintsOf(th);
+  if (!H.floorZones) return;
+  const zg = kinoZoneGrid(H, cols, rows);
+  for (let ty = 0; ty < rows; ty++) for (let tx = 0; tx < cols; tx++) {
+    const i = ty * cols + tx, z = zg[i];
+    if (!z) continue;
+    const x = tx * TILE, y = ty * TILE;
+    if (z === 1) { paintBoardTile(c, x, y, i, false); continue; }
+    if (z === 2) {
+      // Alley asphalt: dark with grit, hairline cracks, the odd rain puddle and oil stain.
+      c.fillStyle = '#2a2a2e';
+      c.fillRect(x, y, TILE, TILE);
+      for (let k = 0; k < 7; k++) {
+        c.fillStyle = k & 1 ? 'rgba(0,0,0,0.35)' : 'rgba(170,170,180,0.14)';
+        c.fillRect(x + Math.floor(ihash(i * 11 + k) * 38), y + Math.floor(ihash(i * 13 + k) * 38), 2, 1);
+      }
+      const h = ihash(i * 17);
+      if (h > 0.9) {
+        const px = x + 10 + ihash(i * 19) * 20, py = y + 10 + ihash(i * 23) * 20, rx = 9 + ihash(i * 29) * 8;
+        c.fillStyle = '#1b2330';
+        c.beginPath(); c.ellipse(px, py, rx, rx * 0.55, ihash(i * 31) * 2, 0, Math.PI * 2); c.fill();
+        c.strokeStyle = 'rgba(150,180,215,0.28)';
+        c.lineWidth = 1;
+        c.beginPath(); c.ellipse(px - 1, py - 1, rx * 0.7, rx * 0.3, ihash(i * 31) * 2, 3.6, 5.4); c.stroke();
+      } else if (h < 0.08) {
+        c.fillStyle = 'rgba(8,8,12,0.55)';
+        c.beginPath(); c.ellipse(x + 20, y + 20, 8 + ihash(i * 37) * 6, 5, ihash(i * 41) * 3, 0, Math.PI * 2); c.fill();
+      }
+      if (ihash(i * 43) > 0.72) {
+        c.strokeStyle = 'rgba(0,0,0,0.6)';
+        c.lineWidth = 1;
+        c.beginPath();
+        let cx = x + ihash(i * 47) * TILE, cy = y + ihash(i * 53) * TILE;
+        c.moveTo(cx, cy);
+        for (let k = 0; k < 3; k++) {
+          cx += (ihash(i * 59 + k) - 0.5) * 18; cy += (ihash(i * 61 + k) - 0.5) * 18;
+          c.lineTo(Math.max(x, Math.min(x + TILE, cx)), Math.max(y, Math.min(y + TILE, cy)));
+        }
+        c.stroke();
+      }
+      continue;
+    }
+    // Backstage concrete: 2x2-tile slabs with seams, speckle and stains.
+    c.fillStyle = mixHex('#4a4640', '#524d46', ihash(((ty >> 1) * cols + (tx >> 1)) * 5), 1);
+    c.fillRect(x, y, TILE, TILE);
+    c.fillStyle = 'rgba(0,0,0,0.4)';
+    if (!(tx & 1)) c.fillRect(x, y, 1, TILE);
+    if (!(ty & 1)) c.fillRect(x, y, TILE, 1);
+    c.fillStyle = 'rgba(255,255,255,0.05)';
+    if (!(tx & 1)) c.fillRect(x + 1, y, 1, TILE);
+    if (!(ty & 1)) c.fillRect(x, y + 1, TILE, 1);
+    for (let k = 0; k < 5; k++) {
+      c.fillStyle = k & 1 ? 'rgba(0,0,0,0.25)' : 'rgba(230,220,200,0.1)';
+      c.fillRect(x + Math.floor(ihash(i * 67 + k) * 38), y + Math.floor(ihash(i * 71 + k) * 38), 1, 1);
+    }
+    if (ihash(i * 73) > 0.88) {
+      c.fillStyle = 'rgba(30,24,18,0.3)';
+      c.beginPath(); c.ellipse(x + 12 + ihash(i * 79) * 16, y + 12 + ihash(i * 83) * 16, 9, 6, ihash(i * 89) * 3, 0, Math.PI * 2); c.fill();
+    }
+  }
+}
+
+// Brick course for walls facing the alley (asphalt): staggered dark-red bricks, mortar, grime.
+function paintKinoBrickTile(c, x, y, ty, i) {
+  c.fillStyle = '#3a1a12';
+  c.fillRect(x, y, TILE, TILE);
+  for (let r = 0; r < 4; r++) {
+    const off = ((r + ty * 4) & 1) ? 10 : 0;
+    for (let bx = -10; bx < TILE; bx += 20) {
+      const x0 = Math.max(x, x + bx + off), x1 = Math.min(x + TILE, x + bx + off + 19);
+      if (x1 - x0 < 2) continue;
+      c.fillStyle = mixHex('#5a2a1e', '#6e3624', ihash(i * 7 + r * 5 + bx), 1);
+      c.fillRect(x0, y + r * 10 + 1, x1 - x0, 8);
+      c.fillStyle = 'rgba(255,200,170,0.08)';
+      c.fillRect(x0, y + r * 10 + 1, x1 - x0, 1);
+    }
+  }
+  c.fillStyle = 'rgba(0,0,0,0.22)';
+  c.fillRect(x, y + TILE - 12, TILE, 12);
+}
+
+// Grey cinder blocks for walls facing the backstage vault (concrete).
+function paintKinoCinderTile(c, x, y, ty, i) {
+  c.fillStyle = '#2c2a28';
+  c.fillRect(x, y, TILE, TILE);
+  for (let r = 0; r < 2; r++) {
+    const off = ((r + ty * 2) & 1) ? 13 : 0;
+    for (let bx = -13; bx < TILE; bx += 26) {
+      const x0 = Math.max(x, x + bx + off), x1 = Math.min(x + TILE, x + bx + off + 25);
+      if (x1 - x0 < 2) continue;
+      c.fillStyle = mixHex('#57534c', '#646058', ihash(i * 5 + r * 3 + bx), 1);
+      c.fillRect(x0, y + r * 20 + 1, x1 - x0, 18);
+      c.fillStyle = 'rgba(255,255,255,0.07)';
+      c.fillRect(x0, y + r * 20 + 1, x1 - x0, 1);
+    }
+  }
+}
+
+// Free-standing props inside a zone (no gold trim): bins (alley), crates / scenery flats (vault),
+// costume racks / crates (dressing rooms).
+function paintKinoPropTile(c, map, x, y, tx, ty, i, kind, info) {
+  const horiz = info.bw >= info.bh;
+  if (kind === 'bin') {
+    c.fillStyle = '#1c2220';
+    c.fillRect(x, y, TILE, TILE);
+    c.fillStyle = '#34403a';
+    c.fillRect(x + 2, y + 2, TILE - 4, TILE - 4);
+    c.fillStyle = '#48564e';                                  // lid
+    c.fillRect(x + 4, y + 4, TILE - 8, TILE - 12);
+    c.fillStyle = 'rgba(0,0,0,0.45)';
+    c.fillRect(x + 4, y + TILE / 2 - 2, TILE - 8, 2);         // lid seam
+    c.fillRect(x + 4, y + TILE - 9, TILE - 8, 1);             // hinge
+    c.fillStyle = '#6a7a70';
+    c.fillRect(x + 15, y + 7, 10, 2);                          // handle
+    c.fillStyle = 'rgba(180,200,190,0.12)';
+    c.fillRect(x + 4, y + 4, TILE - 8, 1);
+    if (ihash(i * 3) > 0.5) { c.fillStyle = 'rgba(210,200,170,0.5)'; c.fillRect(x + 6 + Math.floor(ihash(i * 5) * 20), y + TILE - 7, 6, 3); }
+    return;
+  }
+  if (kind === 'rack') {
+    // Costume rack: a chrome rail along the run, garments hanging across it.
+    c.fillStyle = '#1a1210';
+    c.fillRect(x, y, TILE, TILE);
+    const cols4 = ['#7a1a2a', '#23305a', '#2e5a3a', '#8a6a24', '#4a2a5a', '#6a6a70'];
+    c.save();
+    c.translate(x + TILE / 2, y + TILE / 2);
+    if (!horiz) c.rotate(Math.PI / 2);
+    for (let k = 0; k < 5; k++) {
+      c.fillStyle = cols4[Math.floor(ihash(i * 7 + k) * cols4.length)];
+      const gx = -18 + k * 8;
+      c.fillRect(gx, -14, 6, 28);
+      c.fillStyle = 'rgba(255,255,255,0.12)';
+      c.fillRect(gx, -14, 1, 28);
+    }
+    c.fillStyle = '#c8ccd2';
+    c.fillRect(-TILE / 2, -1, TILE, 2);
+    c.restore();
+    return;
+  }
+  if (kind === 'flat') {
+    // Scenery flat: painted canvas (sky / hills) in a wooden batten frame.
+    c.fillStyle = '#3a2a1a';
+    c.fillRect(x, y, TILE, TILE);
+    c.fillStyle = '#4e6a7a';
+    c.fillRect(x + 3, y + 3, TILE - 6, TILE - 6);
+    c.fillStyle = '#5a7a4a';
+    c.beginPath(); c.moveTo(x + 3, y + 26); c.quadraticCurveTo(x + 14 + ihash(i) * 12, y + 12, x + TILE - 3, y + 24); c.lineTo(x + TILE - 3, y + TILE - 3); c.lineTo(x + 3, y + TILE - 3); c.closePath(); c.fill();
+    c.fillStyle = 'rgba(0,0,0,0.25)';
+    c.fillRect(x + 3, y + 3, TILE - 6, TILE - 6 > 0 ? 2 : 0);
+    c.fillStyle = '#6a4a2a';
+    if (horiz) { c.fillRect(x, y, TILE, 3); c.fillRect(x, y + TILE - 3, TILE, 3); }
+    else { c.fillRect(x, y, 3, TILE); c.fillRect(x + TILE - 3, y, 3, TILE); }
+    return;
+  }
+  // crate: plain wood with a frame and cross bracing
+  c.fillStyle = '#2a1c10';
+  c.fillRect(x, y, TILE, TILE);
+  c.fillStyle = mixHex('#6a4a2a', '#7a5832', ihash(i * 3), 1);
+  c.fillRect(x + 2, y + 2, TILE - 4, TILE - 4);
+  c.fillStyle = 'rgba(0,0,0,0.3)';
+  for (let k = 1; k < 4; k++) c.fillRect(x + 2, y + k * 9 + 2, TILE - 4, 1);
+  c.strokeStyle = '#4a321c';
+  c.lineWidth = 3;
+  c.strokeRect(x + 3.5, y + 3.5, TILE - 7, TILE - 7);
+  c.beginPath(); c.moveTo(x + 5, y + 5); c.lineTo(x + TILE - 5, y + TILE - 5); c.stroke();
+  c.fillStyle = 'rgba(20,14,8,0.8)';
+  c.fillRect(x + 5, y + 5, 2, 2); c.fillRect(x + TILE - 7, y + 5, 2, 2); c.fillRect(x + 5, y + TILE - 7, 2, 2); c.fillRect(x + TILE - 7, y + TILE - 7, 2, 2);
+}
+
+// Ticket booth tile: wood base, a lighter counter strip and a brass grille over dark glass on the
+// sides facing open floor.
+function paintKinoBoothTile(c, map, x, y, tx, ty, i, th) {
+  c.fillStyle = shadeHex(th.wall, 0.7);
+  c.fillRect(x, y, TILE, TILE);
+  c.fillStyle = shadeHex(th.wall, 1.3);
+  c.fillRect(x + 2, y + 2, TILE - 4, TILE - 4);
+  const os = openSides(map, tx, ty);
+  const brass = th.accent;
+  for (let s = 0; s < 4; s++) {
+    if (!(os & (1 << s))) continue;
+    c.save();
+    c.translate(x + TILE / 2, y + TILE / 2);
+    c.rotate(s === 0 ? Math.PI : s === 1 ? 0 : s === 2 ? Math.PI / 2 : -Math.PI / 2);
+    // local frame: +y faces the open side
+    c.fillStyle = '#8a6038';                                   // counter strip
+    c.fillRect(-TILE / 2, TILE / 2 - 8, TILE, 6);
+    c.fillStyle = 'rgba(255,230,180,0.35)';
+    c.fillRect(-TILE / 2, TILE / 2 - 8, TILE, 1);
+    c.fillStyle = '#141a20';                                   // glass
+    c.fillRect(-TILE / 2 + 3, TILE / 2 - 20, TILE - 6, 11);
+    c.fillStyle = 'rgba(255,220,150,0.18)';
+    c.fillRect(-TILE / 2 + 3, TILE / 2 - 20, TILE - 6, 3);
+    c.fillStyle = brass;                                       // brass grille bars
+    for (let u = -TILE / 2 + 5; u < TILE / 2 - 3; u += 5) c.fillRect(u, TILE / 2 - 20, 1, 11);
+    c.fillRect(-TILE / 2 + 3, TILE / 2 - 21, TILE - 6, 1);
+    c.restore();
+  }
+}
+
+// Projection booth machines: the projector (metal body, two film reels, a lens and a faint beam
+// toward the auditorium) and reel cabinets (film cans on a metal cabinet).
+function paintKinoMachineTile(c, x, y, i) {
+  c.fillStyle = '#18181c';
+  c.fillRect(x, y, TILE, TILE);
+  c.fillStyle = '#34343c';
+  c.fillRect(x + 2, y + 2, TILE - 4, TILE - 4);
+  c.fillStyle = 'rgba(255,255,255,0.08)';
+  c.fillRect(x + 2, y + 2, TILE - 4, 1);
+}
+function paintKinoProjector(c, info, up) {
+  const x0 = info.x0 * TILE, y0 = info.y0 * TILE, w = info.bw * TILE, h = info.bh * TILE;
+  const cx = x0 + w / 2, cy = y0 + h / 2;
+  const dir = up ? -1 : 1;
+  // beam (drawn first so the body sits on top)
+  c.save();
+  c.globalCompositeOperation = 'lighter';
+  const lx = cx, ly = up ? y0 : y0 + h;
+  for (let k = 0; k < 3; k++) {
+    c.fillStyle = `rgba(255,236,190,${0.05 - k * 0.012})`;
+    const len = 46 + k * 16, spread = 14 + k * 10;
+    c.beginPath(); c.moveTo(lx - 4, ly); c.lineTo(lx - spread, ly + dir * len); c.lineTo(lx + spread, ly + dir * len); c.lineTo(lx + 4, ly); c.closePath(); c.fill();
+  }
+  c.restore();
+  // reels
+  const R = Math.min(12, h / 2 - 5);
+  for (const ox of [-w / 4, w / 4]) {
+    const rx = cx + ox, ry = cy - dir * 2;
+    c.fillStyle = '#0e0e10';
+    c.beginPath(); c.arc(rx, ry, R + 1.5, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#6a6a74';
+    c.beginPath(); c.arc(rx, ry, R, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#1e1e22';
+    for (let k = 0; k < 3; k++) {
+      const a = k * (Math.PI * 2 / 3) + 0.3;
+      c.beginPath(); c.arc(rx + Math.cos(a) * R * 0.55, ry + Math.sin(a) * R * 0.55, R * 0.28, 0, Math.PI * 2); c.fill();
+    }
+    c.fillStyle = '#b8b8c0';
+    c.beginPath(); c.arc(rx, ry, 2, 0, Math.PI * 2); c.fill();
+  }
+  // lens barrel + glass
+  c.fillStyle = '#26262c';
+  c.fillRect(lx - 5, up ? ly - 2 : ly - 6, 10, 8);
+  c.fillStyle = '#cfe4ff';
+  c.beginPath(); c.arc(lx, ly, 4, 0, Math.PI * 2); c.fill();
+  c.fillStyle = '#ffffff';
+  c.beginPath(); c.arc(lx - 1, ly - 1, 1.5, 0, Math.PI * 2); c.fill();
+}
+function paintKinoCabinet(c, info, th) {
+  for (let ty = info.y0; ty <= info.y1; ty++) for (let tx = info.x0; tx <= info.x1; tx++) {
+    const x = tx * TILE, y = ty * TILE;
+    c.fillStyle = 'rgba(0,0,0,0.5)';
+    c.fillRect(x + 19, y + 4, 2, TILE - 8);
+    for (const [ox, oy] of [[10, 12], [30, 28]]) {
+      c.fillStyle = '#8a8a94';
+      c.beginPath(); c.arc(x + ox, y + oy, 7, 0, Math.PI * 2); c.fill();
+      c.strokeStyle = '#2a2a30';
+      c.lineWidth = 1;
+      c.beginPath(); c.arc(x + ox, y + oy, 4, 0, Math.PI * 2); c.stroke();
+    }
+    c.fillStyle = rgbaHex(th.accent, 0.6);
+    c.fillRect(x + 8, y + TILE - 6, 8, 2);
+  }
+}
+
+// Stair treads: floor tiles on a stepped diagonal (wall on one horizontal side and one vertical
+// side, the diagonal neighbour continuing the staircase is also such a tile).
+function paintKinoStairs(c, map, th, cols, rows, zg) {
+  const T = map.tiles;
+  const wall = (x, y) => { const k = tileAt(map, x, y); return k === T_WALL || k === T_WALLBUY || k === T_PERK; };
+  const cand = new Int8Array(cols * rows);
+  for (let ty = 1; ty < rows - 1; ty++) for (let tx = 1; tx < cols - 1; tx++) {
+    const i = ty * cols + tx;
+    if (T[i] !== T_FLOOR || zg[i]) continue;
+    // corner orientation: bit set per (horizontal wall side, vertical wall side)
+    let o = 0;
+    if (wall(tx - 1, ty) && wall(tx, ty - 1)) o |= 1;   // NW corner, diagonal NE-SW
+    if (wall(tx + 1, ty) && wall(tx, ty - 1)) o |= 2;   // NE corner, diagonal NW-SE
+    if (wall(tx - 1, ty) && wall(tx, ty + 1)) o |= 4;   // SW corner, diagonal NW-SE
+    if (wall(tx + 1, ty) && wall(tx, ty + 1)) o |= 8;   // SE corner, diagonal NE-SW
+    cand[i] = o;
+  }
+  const out = [];
+  for (let ty = 1; ty < rows - 1; ty++) for (let tx = 1; tx < cols - 1; tx++) {
+    const o = cand[ty * cols + tx];
+    if (!o) continue;
+    const at = (x, y) => cand[y * cols + x];
+    let ok = false;
+    if (o & 1) ok = ok || !!(at(tx + 1, ty - 1) & 1) || !!(at(tx - 1, ty + 1) & 1);
+    if (o & 2) ok = ok || !!(at(tx - 1, ty - 1) & 2) || !!(at(tx + 1, ty + 1) & 2);
+    if (o & 4) ok = ok || !!(at(tx - 1, ty - 1) & 4) || !!(at(tx + 1, ty + 1) & 4);
+    if (o & 8) ok = ok || !!(at(tx + 1, ty - 1) & 8) || !!(at(tx - 1, ty + 1) & 8);
+    if (ok) out.push(ty * cols + tx);
+  }
+  for (const i of out) {
+    const x = (i % cols) * TILE, y = ((i / cols) | 0) * TILE;
+    for (let k = 0; k < 5; k++) {
+      const yy = y + k * 8;
+      c.fillStyle = 'rgba(0,0,0,0.38)';
+      c.fillRect(x, yy + 5, TILE, 3);
+      c.fillStyle = rgbaHex(th.accent, 0.45);                  // brass nosing
+      c.fillRect(x, yy + 4, TILE, 1);
+    }
+  }
+}
+
+// Classifies KINO free-standing masses for the zone / booth / projection-booth painters:
+// Map(component id -> 'bin' | 'crate' | 'flat' | 'rack' | 'booth' | 'projector' | 'cabinet').
+function kinoPropKinds(map, H, cols, rows, comp, list, zg, seats, curtains) {
+  const out = new Map();
+  const free = [];
+  for (const info of list) {
+    if (info.border) continue;
+    let special = false;
+    for (let y = info.y0; y <= info.y1 && !special; y++) for (let x = info.x0; x <= info.x1; x++) {
+      const i = y * cols + x;
+      if (comp[i] === info.id && (seats.has(i) || curtains.has(i))) { special = true; break; }
+    }
+    if (!special) free.push(info);
+  }
+  const compAt = (p) => (Array.isArray(p) && p.length === 2 && tileAt(map, p[0], p[1]) != null ? comp[p[1] * cols + p[0]] : -1);
+  for (const info of free) {
+    const cx = (info.x0 + info.x1) >> 1, cy = (info.y0 + info.y1) >> 1;
+    const z = zg[cy * cols + cx];
+    if (!z) continue;
+    const thin = Math.min(info.bw, info.bh) === 1 && Math.max(info.bw, info.bh) >= 3;
+    out.set(info.id, z === 2 ? 'bin' : z === 3 ? (thin ? 'flat' : 'crate') : (thin ? 'rack' : 'crate'));
+  }
+  // Ticket booth: hint, else the free mass nearest the player start (within 6 tiles, >= 3 wide).
+  let booth = compAt(H.booth);
+  if (booth < 0 && map.playerStart) {
+    const sx = Math.floor(map.playerStart.x / TILE), sy = Math.floor(map.playerStart.y / TILE);
+    let bd = 7;
+    for (const info of free) {
+      if (out.has(info.id) || Math.max(info.bw, info.bh) < 3 || Math.min(info.bw, info.bh) < 2) continue;
+      const d = Math.max(Math.max(info.x0 - sx, 0, sx - info.x1), Math.max(info.y0 - sy, 0, sy - info.y1));
+      if (d < bd) { bd = d; booth = info.id; }
+    }
+  }
+  if (booth >= 0) out.set(booth, 'booth');
+  // Projection booth: small free masses 3-10 rows behind the last seat row; the widest (or the
+  // `projector` hint) is the projector, the rest are reel cabinets.
+  const seatRows = H.seatRows && H.seatRows.length ? H.seatRows : null;
+  const last = seatRows ? Math.max(...seatRows) : -1;
+  let sx0 = cols, sx1 = -1;
+  for (const i of seats) { const x = i % cols; if (x < sx0) sx0 = x; if (x > sx1) sx1 = x; }
+  if (last >= 0 && sx1 >= sx0) {
+    const band = free.filter((info) => !out.has(info.id) && info.y0 >= last + 3 && info.y1 <= last + 10 &&
+      info.bw * info.bh <= 8 && info.x1 >= sx0 && info.x0 <= sx1);
+    let proj = compAt(H.projector);
+    if (proj < 0 && band.length) proj = band.reduce((a, b) => (b.bw * b.bh > a.bw * a.bh ? b : a)).id;
+    for (const info of band) out.set(info.id, info.id === proj ? 'projector' : 'cabinet');
+    if (proj >= 0 && !out.has(proj)) out.set(proj, 'projector');
+  }
+  return out;
+}
+
+// Two theatre seats per tile in a local frame facing -y (backs at +y): cushion, raised back
+// with a lit top, dark wood armrests.
+function paintSeatTile(c, x, y, face, th, seed, seatHex) {
+  c.save();
+  c.translate(x + TILE / 2, y + TILE / 2);
+  c.rotate(face);
+  const H = TILE / 2;
+  c.fillStyle = shadeHex(th.floor, 0.55);   // aisle carpet in the shadow of the seats
+  c.fillRect(-H, -H, TILE, TILE);
+  for (let k = 0; k < 2; k++) {
+    const sx = -H + k * H;
+    const f = 0.92 + ihash(seed * 2 + k) * 0.16;
+    c.fillStyle = mixHex('#7a141c', '#7a141c', 0, f);
+    c.fillRect(sx + 3, -H + 8, H - 6, 18);                 // cushion
+    c.fillStyle = 'rgba(0,0,0,0.3)';
+    c.fillRect(sx + 3, -H + 8, H - 6, 2);
+    c.fillStyle = mixHex(seatHex || '#4c0a10', seatHex || '#4c0a10', 0, f);
+    c.fillRect(sx + 2, H - 14, H - 4, 10);                  // seat back
+    c.fillStyle = '#b3323b';
+    c.fillRect(sx + 3, H - 14, H - 6, 2);                   // lit top of the back
+    c.fillStyle = rgbaHex(th.accent, 0.8);
+    c.fillRect(sx + H / 2 - 1, H - 7, 2, 2);                // brass seat number plate
+  }
+  c.fillStyle = '#24140c';
+  c.fillRect(-H, -H + 6, 2, TILE - 10); c.fillRect(-1, -H + 6, 2, TILE - 10); c.fillRect(H - 2, -H + 6, 2, TILE - 10);
+  c.restore();
+}
+
+// Red velvet curtain seen from above: pleats (light / dark bands across the run), a dark valance
+// at the back and a gold fringe with tassels on the stage side (+y in the local frame).
+function paintCurtainTile(c, x, y, rot, th, seed, curtainHex) {
+  c.save();
+  c.translate(x + TILE / 2, y + TILE / 2);
+  c.rotate(rot);
+  const H = TILE / 2;
+  const base = curtainHex || '#8a1020';
+  c.fillStyle = shadeHex(base, 0.62);
+  c.fillRect(-H, -H, TILE, TILE);
+  for (let k = 0; k < 5; k++) {
+    const u = -H + k * 8;
+    c.fillStyle = base;
+    c.fillRect(u + 1, -H + 6, 4, TILE - 6);
+    c.fillStyle = shadeHex(base, 1.45);
+    c.fillRect(u + 2, -H + 6, 1, TILE - 8);
+    c.fillStyle = shadeHex(base, 0.35);
+    c.fillRect(u + 6, -H + 6, 1, TILE - 6);
+  }
+  c.fillStyle = '#2a0408';
+  c.fillRect(-H, -H, TILE, 6);                               // valance / back
+  c.fillStyle = rgbaHex(th.accent, 0.9);
+  c.fillRect(-H, H - 3, TILE, 2);                            // gold fringe
+  for (let k = 0; k < 4; k++) c.fillRect(-H + 4 + k * 10, H - 2, 2, 2 + Math.floor(ihash(seed + k) * 2));
+  c.restore();
+}
+
+// OUTPOST walls. Per connected mass: free-standing hollow shapes are buildings (wooden huts, or
+// concrete when they hold a perk machine / Pack-a-Punch: radar ring, command bunker); small solid
+// free blocks (<= 3x3) are fuel tanks. Everything else is grey-blue rock, except single-tile-thick
+// lines (floor / ice / gate on both sides), which are orange hazard fences.
+function paintOutpostWalls(c, map, th, cols, rows, comp, list) {
+  const T = map.tiles;
+  const H = hintsOf(th);
+  const machines = new Set();
+  for (let i = 0; i < T.length; i++) if ((T[i] === T_PERK || T[i] === T_PAP) && comp[i] >= 0) machines.add(comp[i]);
+  const kindOf = (info) => {
+    if (info.border) return 'rock';
+    const area = info.bw * info.bh, n = info.walls + info.other;
+    if (Math.min(info.bw, info.bh) >= 3 && Math.max(info.bw, info.bh) <= 12 && n / area < 0.72) return machines.has(info.id) ? 'bunker' : 'hut';
+    if (info.bw <= 3 && info.bh <= 3 && info.bw >= 2 && info.bh >= 2 && n / area >= 0.85) return info.other ? 'tank' : 'ice';
+    return 'rock';
+  };
+  const kinds = list.map(kindOf);
+  const glassGroups = outpostSpecialKinds(map, H, cols, rows, comp, list, kinds, machines);
+  const open = (code) => code === T_FLOOR || code === T_OPEN || code === T_ARENA || code === T_PIT || code === T_DOOR;
+  const rock = shadeHex(th.wall, 0.92);
+  const wood = H.hutWood || shadeHex(th.doorWood, 1.15);
+  const concrete = mixHex(th.wall, '#9aa6b2', 0.45, 1);
+  for (let ty = 0; ty < rows; ty++) for (let tx = 0; tx < cols; tx++) {
+    const i = ty * cols + tx;
+    if (T[i] !== T_WALL) continue;
+    const x = tx * TILE, y = ty * TILE;
+    let kind = comp[i] >= 0 ? kinds[comp[i]] : 'rock';
+    let horiz = true;
+    if (kind === 'rock') {
+      const ud = open(tileAt(map, tx, ty - 1)) && open(tileAt(map, tx, ty + 1));
+      const lr = open(tileAt(map, tx - 1, ty)) && open(tileAt(map, tx + 1, ty));
+      if (ud || lr) { kind = 'fence'; horiz = ud; }
+    }
+    if (kind === 'fence') {
+      styleNoTorch.add(i);
+      c.fillStyle = th.floor;
+      c.fillRect(x, y, TILE, TILE);
+      c.fillStyle = 'rgba(90,115,140,0.2)';
+      c.fillRect(x, y, TILE, TILE);
+      c.save();
+      c.translate(x + TILE / 2, y + TILE / 2);
+      if (!horiz) c.rotate(Math.PI / 2);
+      const h = TILE / 2;
+      // chain-link mesh across the whole tile (the blocked area), then the orange hazard rail
+      c.strokeStyle = 'rgba(70,85,100,0.45)';
+      c.lineWidth = 1;
+      c.beginPath();
+      for (let k = -h - 16; k < h + 16; k += 6) { c.moveTo(k, -8); c.lineTo(k + 16, 8); c.moveTo(k + 16, -8); c.lineTo(k, 8); }
+      c.stroke();
+      c.fillStyle = 'rgba(40,60,80,0.25)';
+      c.fillRect(-h, 1, TILE, 6);                              // shadow on the snow
+      c.fillStyle = th.accent;
+      c.fillRect(-h, -4, TILE, 7);                             // orange rail
+      c.save();
+      c.beginPath(); c.rect(-h, -4, TILE, 7); c.clip();
+      c.fillStyle = '#1b1712';
+      c.beginPath();
+      for (let k = -h - 10; k < h + 10; k += 10) { c.moveTo(k, 3); c.lineTo(k + 4, 3); c.lineTo(k + 11, -4); c.lineTo(k + 7, -4); }
+      c.fill();
+      c.restore();
+      c.fillStyle = 'rgba(255,255,255,0.35)';
+      c.fillRect(-h, -4, TILE, 1);
+      c.fillStyle = '#3b444e';                                 // posts at both tile ends
+      c.fillRect(-h, -9, 4, 16); c.fillRect(h - 4, -9, 4, 16);
+      c.fillStyle = '#eef5fb';                                 // snow caps on the posts
+      c.fillRect(-h, -9, 4, 2); c.fillRect(h - 4, -9, 4, 2);
+      c.restore();
+    } else if (kind === 'glass') {
+      styleNoTorch.add(i);
+      paintGlassPaneTile(c, map, x, y, tx, ty, i);
+    } else if (kind === 'hut' || kind === 'bunker' || kind === 'shed' || kind === 'plinth' || kind === 'minidish') {
+      styleNoTorch.add(i);
+      const lr = isSolidCode(tileAt(map, tx - 1, ty)) || isSolidCode(tileAt(map, tx + 1, ty));
+      if (kind === 'hut' || kind === 'shed') {
+        // Wooden hut wall: planks along the run, dark seams, nails, frost on the upper edge.
+        c.fillStyle = shadeHex(wood, 0.6);
+        c.fillRect(x, y, TILE, TILE);
+        for (let k = 0; k < 4; k++) {
+          c.fillStyle = mixHex(wood, wood, 0, 0.82 + ihash(i * 4 + k) * 0.3);
+          if (lr) c.fillRect(x, y + k * 10 + 1, TILE, 8); else c.fillRect(x + k * 10 + 1, y, 8, TILE);
+        }
+        c.fillStyle = 'rgba(20,12,6,0.8)';
+        if (lr) { c.fillRect(x + 3, y + 4, 2, 2); c.fillRect(x + TILE - 5, y + 24, 2, 2); }
+        else { c.fillRect(x + 4, y + 3, 2, 2); c.fillRect(x + 24, y + TILE - 5, 2, 2); }
+      } else {
+        // Concrete: poured panels with a lit top edge, form-tie dots and a hazard-orange stripe.
+        c.fillStyle = shadeHex(concrete, 0.7);
+        c.fillRect(x, y, TILE, TILE);
+        c.fillStyle = mixHex(concrete, concrete, 0, 0.94 + ihash(i * 3) * 0.1);
+        c.fillRect(x + 1, y + 1, TILE - 2, TILE - 2);
+        c.fillStyle = 'rgba(255,255,255,0.18)';
+        c.fillRect(x + 1, y + 1, TILE - 2, 1);
+        c.fillStyle = 'rgba(30,38,48,0.45)';
+        c.fillRect(x + 8, y + 8, 2, 2); c.fillRect(x + 30, y + 8, 2, 2); c.fillRect(x + 8, y + 30, 2, 2); c.fillRect(x + 30, y + 30, 2, 2);
+        const os = openSides(map, tx, ty);
+        c.fillStyle = rgbaHex(th.accent, 0.8);
+        if (os & 1) c.fillRect(x, y + 2, TILE, 3);
+        if (os & 2) c.fillRect(x, y + TILE - 5, TILE, 3);
+        if (os & 4) c.fillRect(x + 2, y, 3, TILE);
+        if (os & 8) c.fillRect(x + TILE - 5, y, 3, TILE);
+      }
+      if (kind !== 'plinth' && kind !== 'minidish' && !isSolidCode(tileAt(map, tx, ty - 1))) {
+        c.fillStyle = 'rgba(235,245,252,0.85)';
+        c.fillRect(x, y, TILE, 3);
+      }
+    } else if (kind === 'ice') {
+      // Ice column: pale blue-white block with bright facets and a cold rim.
+      styleNoTorch.add(i);
+      c.fillStyle = '#9fc9e4';
+      c.fillRect(x, y, TILE, TILE);
+      c.fillStyle = '#c6e3f4';
+      c.beginPath(); c.moveTo(x, y); c.lineTo(x + TILE, y); c.lineTo(x + 8 + ihash(i) * 20, y + 18 + ihash(i * 3) * 12); c.closePath(); c.fill();
+      c.fillStyle = '#7fb0d2';
+      c.beginPath(); c.moveTo(x, y + TILE); c.lineTo(x + TILE, y + TILE); c.lineTo(x + 12 + ihash(i * 5) * 16, y + 20); c.closePath(); c.fill();
+      c.strokeStyle = 'rgba(255,255,255,0.7)';
+      c.lineWidth = 1;
+      c.beginPath(); c.moveTo(x + 6, y + 6 + ihash(i * 7) * 10); c.lineTo(x + 16 + ihash(i * 9) * 12, y + 4); c.stroke();
+    } else if (kind === 'tank') {
+      styleNoTorch.add(i);
+      c.fillStyle = th.floor;                                  // the cylinder is drawn per block below
+      c.fillRect(x, y, TILE, TILE);
+      c.fillStyle = 'rgba(90,115,140,0.25)';
+      c.fillRect(x, y, TILE, TILE);
+    } else {
+      // Grey-blue rock: two or three lit boulder facets, dark cracks, snow caps on top edges.
+      c.fillStyle = rock;
+      c.fillRect(x, y, TILE, TILE);
+      const nb = 2 + Math.floor(ihash(i * 3) * 2);
+      for (let k = 0; k < nb; k++) {
+        const bx = x + 6 + ihash(i * 5 + k) * 28, by = y + 6 + ihash(i * 7 + k) * 28;
+        const r = 7 + ihash(i * 11 + k) * 8;
+        c.fillStyle = mixHex(th.wall, th.wallEdge, ihash(i * 13 + k) * 0.35, 1.0);
+        c.beginPath(); c.ellipse(bx, by, r, r * 0.8, ihash(i * 17 + k) * 3, 0, Math.PI * 2); c.fill();
+        c.fillStyle = 'rgba(220,235,250,0.22)';
+        c.beginPath(); c.ellipse(bx - r * 0.3, by - r * 0.3, r * 0.5, r * 0.35, 0.3, 0, Math.PI * 2); c.fill();
+      }
+      c.strokeStyle = 'rgba(20,28,38,0.55)';
+      c.lineWidth = 1;
+      c.beginPath();
+      const cx0 = x + 4 + ihash(i * 19) * 32, cy0 = y + 4 + ihash(i * 23) * 32;
+      c.moveTo(cx0, cy0); c.lineTo(cx0 + (ihash(i * 29) - 0.5) * 16, cy0 + (ihash(i * 31) - 0.5) * 16);
+      c.stroke();
+      if (!isSolidCode(tileAt(map, tx, ty - 1)) || ihash(i * 37) > 0.72) {
+        c.fillStyle = 'rgba(240,248,255,0.9)';
+        c.beginPath();
+        c.moveTo(x, y);
+        c.lineTo(x + TILE, y);
+        for (let k = 4; k >= 0; k--) c.lineTo(x + k * 10, y + 3 + ihash(i * 41 + k) * 5);
+        c.closePath();
+        c.fill();
+      }
+    }
+  }
+  // Fuel tanks: one steel cylinder (seen from above) per tank block, orange hazard band, frost cap.
+  for (let k = 0; k < list.length; k++) {
+    if (kinds[k] !== 'tank') continue;
+    const info = list[k];
+    const cx = (info.x0 + info.bw / 2) * TILE, cy = (info.y0 + info.bh / 2) * TILE;
+    const R = Math.min(info.bw, info.bh) * TILE / 2 - 3;
+    c.fillStyle = 'rgba(30,45,60,0.35)';
+    c.beginPath(); c.arc(cx + 3, cy + 4, R, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#7d8b99';
+    c.beginPath(); c.arc(cx, cy, R, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#9aa8b5';
+    c.beginPath(); c.arc(cx - R * 0.12, cy - R * 0.12, R * 0.78, 0, Math.PI * 2); c.fill();
+    c.strokeStyle = th.accent;
+    c.lineWidth = 5;
+    c.beginPath(); c.arc(cx, cy, R - 4, 0, Math.PI * 2); c.stroke();
+    c.strokeStyle = '#2c343d';
+    c.lineWidth = 1.5;
+    c.beginPath(); c.arc(cx, cy, R, 0, Math.PI * 2); c.stroke();
+    c.fillStyle = '#56626e';                                  // hatch
+    c.beginPath(); c.arc(cx, cy, R * 0.22, 0, Math.PI * 2); c.fill();
+    c.fillStyle = 'rgba(240,248,255,0.75)';                   // frost cap
+    c.beginPath(); c.ellipse(cx - R * 0.3, cy - R * 0.35, R * 0.35, R * 0.18, -0.5, 0, Math.PI * 2); c.fill();
+  }
+  // FIX-2 (WO9 QA OUTPOST #6 / #7): greenhouse dome interiors, sheds, radar dishes.
+  for (const g of glassGroups) paintGlassDome(c, map, g, cols);
+  for (let k = 0; k < list.length; k++) {
+    if (kinds[k] === 'shed') paintShedRoof(c, map, list[k], wood);
+    else if (kinds[k] === 'plinth' || kinds[k] === 'minidish') {
+      const info = list[k];
+      const hint = H.dish && kinds[k] === 'plinth' ? H.dish : null;
+      const cx = hint ? (hint[0] + 0.5) * TILE : (info.x0 + info.bw / 2) * TILE;
+      const cy = hint ? (hint[1] + 0.5) * TILE : (info.y0 + info.bh / 2) * TILE;
+      const R = kinds[k] === 'plinth' ? Math.min(62, Math.min(info.bw, info.bh) * TILE / 2 - 6) : Math.min(info.bw, info.bh) * TILE / 2 - 3;
+      paintRadarDish(c, cx, cy, R, th, info.id);
+    }
+  }
+}
+
+// FIX-2 (WO9 QA OUTPOST #6 / #7): re-classifies OUTPOST wall masses in place (kinds[]):
+// - 'glass': hollow buildings (hut / bunker) whose bounding boxes touch within 2 tiles are merged
+//   (a doorway row splits the dome in two); a merged group >= 8 x 5 with cut (octagonal) corners
+//   is the greenhouse dome, whatever machine it holds. Other merged groups holding a machine get
+//   one material (bunker). Returns the dome groups.
+// - 'plinth': a free solid blob 4-6 x 3-6 with all four bbox corners open (the dish plinth), or
+//   the mass holding the optional `dish: [tx, ty]` hint tile.
+// - 'minidish': a 2-3 x 2-3 pure block that does not touch the boss arena (arena ones stay ice).
+// - 'shed': a 'tank' block with no other tank within 7 tiles (fuel tanks stand in rows), or the
+//   mass holding the optional `shed: [tx, ty]` hint tile.
+function outpostSpecialKinds(map, H, cols, rows, comp, list, kinds, machines) {
+  const solidAt = (x, y) => { const c = tileAt(map, x, y); return c != null && c !== T_FLOOR && c !== T_OPEN && c !== T_ARENA && c !== T_PIT && c !== T_BOX; };
+  const compAt = (p) => (Array.isArray(p) && p.length === 2 && tileAt(map, p[0], p[1]) != null ? comp[p[1] * cols + p[0]] : -1);
+  // Glass domes.
+  const hollow = [];
+  for (let k = 0; k < list.length; k++) if (kinds[k] === 'hut' || kinds[k] === 'bunker') hollow.push(k);
+  const parent = new Map(hollow.map((k) => [k, k]));
+  const find = (k) => { while (parent.get(k) !== k) k = parent.get(k); return k; };
+  for (let a = 0; a < hollow.length; a++) for (let b = a + 1; b < hollow.length; b++) {
+    const A = list[hollow[a]], B = list[hollow[b]];
+    const gx = Math.max(A.x0 - B.x1, B.x0 - A.x1) - 1, gy = Math.max(A.y0 - B.y1, B.y0 - A.y1) - 1;
+    if (gx <= 2 && gy <= 2 && (gx < 0 || gy < 0)) parent.set(find(hollow[a]), find(hollow[b]));
+  }
+  const groups = new Map();
+  for (const k of hollow) { const r = find(k); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(k); }
+  const domes = [];
+  for (const members of groups.values()) {
+    let x0 = cols, y0 = rows, x1 = -1, y1 = -1;
+    for (const k of members) { const I = list[k]; x0 = Math.min(x0, I.x0); y0 = Math.min(y0, I.y0); x1 = Math.max(x1, I.x1); y1 = Math.max(y1, I.y1); }
+    const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+    const cut = !solidAt(x0, y0) && !solidAt(x1, y0) && !solidAt(x0, y1) && !solidAt(x1, y1);
+    if (Math.max(bw, bh) >= 8 && Math.min(bw, bh) >= 5 && cut) {
+      for (const k of members) kinds[k] = 'glass';
+      domes.push({ x0, y0, x1, y1, bw, bh });
+    } else if (members.length > 1 && members.some((k) => machines.has(k))) {
+      for (const k of members) kinds[k] = 'bunker';
+    }
+  }
+  // Dish plinth / small dish / shed.
+  const dishComp = compAt(H.dish), shedComp = compAt(H.shed);
+  const nearArena = (I) => {
+    if (!map.arenaTiles || !map.arenaTiles.size) return false;
+    for (let y = I.y0 - 1; y <= I.y1 + 1; y++) for (let x = I.x0 - 1; x <= I.x1 + 1; x++) {
+      if (x >= 0 && y >= 0 && x < cols && y < rows && map.arenaTiles.has(y * cols + x)) return true;
+    }
+    return false;
+  };
+  const tanks = [];
+  for (let k = 0; k < list.length; k++) {
+    const I = list[k];
+    if (I.border) continue;
+    const fill = (I.walls + I.other) / (I.bw * I.bh);
+    if (k === dishComp) { kinds[k] = 'plinth'; continue; }
+    if (k === shedComp) { kinds[k] = 'shed'; continue; }
+    if (kinds[k] === 'rock' && I.bw >= 4 && I.bw <= 6 && I.bh >= 3 && I.bh <= 6 && fill >= 0.72 &&
+        !solidAt(I.x0, I.y0) && !solidAt(I.x1, I.y0) && !solidAt(I.x0, I.y1) && !solidAt(I.x1, I.y1)) kinds[k] = 'plinth';
+    else if (kinds[k] === 'ice' && !nearArena(I)) kinds[k] = 'minidish';
+    else if (kinds[k] === 'tank') tanks.push(k);
+  }
+  if (shedComp < 0) {
+    for (const k of tanks) {
+      const A = list[k];
+      const paired = tanks.some((j) => j !== k && Math.max(list[j].x0 - A.x1, A.x0 - list[j].x1, list[j].y0 - A.y1, A.y0 - list[j].y1) <= 7);
+      if (!paired) kinds[k] = 'shed';
+    }
+  }
+  return domes;
+}
+
+// Greenhouse glass wall tile: pale cyan panes, white mullions every 10 px, a diagonal glint and
+// frost along a snow-facing top edge.
+function paintGlassPaneTile(c, map, x, y, tx, ty, i) {
+  c.fillStyle = '#8fb9cc';
+  c.fillRect(x, y, TILE, TILE);
+  c.fillStyle = '#bfe6f5';
+  c.fillRect(x + 1, y + 1, TILE - 2, TILE - 2);
+  c.fillStyle = 'rgba(80,170,110,0.28)';            // plants behind the glass
+  if (ihash(i * 3) > 0.4) c.fillRect(x + 4 + Math.floor(ihash(i * 5) * 20), y + 6 + Math.floor(ihash(i * 7) * 20), 10, 8);
+  c.fillStyle = '#f4fbff';
+  for (let k = 10; k < TILE; k += 10) { c.fillRect(x + k, y, 1, TILE); c.fillRect(x, y + k, TILE, 1); }
+  c.fillStyle = 'rgba(255,255,255,0.55)';
+  c.beginPath(); c.moveTo(x + 4, y + 20); c.lineTo(x + 20, y + 4); c.lineTo(x + 24, y + 4); c.lineTo(x + 8, y + 20); c.closePath(); c.fill();
+  c.strokeStyle = '#6e98ad';
+  c.lineWidth = 1;
+  c.strokeRect(x + 0.5, y + 0.5, TILE - 1, TILE - 1);
+  if (!isSolidCode(tileAt(map, tx, ty - 1))) {
+    c.fillStyle = 'rgba(244,251,255,0.9)';
+    c.fillRect(x, y, TILE, 3);
+    c.fillStyle = 'rgba(244,251,255,0.45)';
+    c.fillRect(x, y + 3, TILE, 3);
+  }
+}
+
+// Greenhouse interior: planting beds (green sprouts) on the floor inside the dome, then faint
+// glass-dome ribs (an inscribed ellipse + a meridian ellipse) and a sheen over the footprint.
+function paintGlassDome(c, map, g, cols) {
+  c.save();
+  for (let ty = g.y0 + 1; ty < g.y1; ty++) for (let tx = g.x0 + 1; tx < g.x1; tx++) {
+    if (tileAt(map, tx, ty) !== T_FLOOR) continue;
+    const i = ty * cols + tx, x = tx * TILE, y = ty * TILE;
+    c.fillStyle = 'rgba(150,215,190,0.22)';
+    c.fillRect(x, y, TILE, TILE);
+    for (let k = 0; k < 5; k++) {
+      const px = x + 3 + Math.floor(ihash(i * 17 + k) * 32), py = y + 3 + Math.floor(ihash(i * 19 + k) * 32);
+      c.fillStyle = k & 1 ? 'rgba(62,140,70,0.8)' : 'rgba(96,170,84,0.75)';
+      c.fillRect(px, py, 3, 2); c.fillRect(px + 1, py - 1, 1, 4);
+    }
+  }
+  const cx = (g.x0 + g.bw / 2) * TILE, cy = (g.y0 + g.bh / 2) * TILE, rx = g.bw * TILE / 2 - 6, ry = g.bh * TILE / 2 - 6;
+  c.strokeStyle = 'rgba(255,255,255,0.3)';
+  c.lineWidth = 2;
+  c.beginPath();
+  c.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+  c.moveTo(cx + rx * 0.5, cy); c.ellipse(cx, cy, rx * 0.5, ry, 0, 0, Math.PI * 2);
+  c.stroke();
+  c.fillStyle = 'rgba(210,240,255,0.12)';
+  c.beginPath(); c.ellipse(cx - rx * 0.25, cy - ry * 0.3, rx * 0.45, ry * 0.3, -0.3, 0, Math.PI * 2); c.fill();
+  c.restore();
+}
+
+// Storage shed: plank walls (painted per tile) under a corrugated metal roof whose ribs run
+// across the whole block, a ridge, rust and snow. The window tile is left alone (barricade).
+function paintShedRoof(c, map, I, wood) {
+  c.save();
+  const x0 = I.x0 * TILE, y0 = I.y0 * TILE, w = I.bw * TILE, h = I.bh * TILE;
+  c.beginPath();
+  for (let ty = I.y0; ty <= I.y1; ty++) for (let tx = I.x0; tx <= I.x1; tx++) {
+    const code = tileAt(map, tx, ty);
+    if (code === T_WALL || code === T_POCKET) c.rect(tx * TILE, ty * TILE, TILE, TILE);
+  }
+  c.clip();
+  c.fillStyle = '#6f7a84';
+  c.fillRect(x0 + 5, y0 + 5, w - 10, h - 10);
+  for (let x = x0 + 5; x < x0 + w - 5; x += 6) {
+    c.fillStyle = '#8d99a4'; c.fillRect(x, y0 + 5, 3, h - 10);
+    c.fillStyle = '#58626b'; c.fillRect(x + 3, y0 + 5, 1, h - 10);
+  }
+  c.fillStyle = 'rgba(120,60,30,0.35)';                       // rust streaks
+  c.fillRect(x0 + 12, y0 + h * 0.5, 3, h * 0.4 - 5); c.fillRect(x0 + w - 24, y0 + h * 0.6, 2, h * 0.3 - 5);
+  c.fillStyle = '#3c444c';                                    // ridge
+  c.fillRect(x0 + 5, y0 + h / 2 - 2, w - 10, 4);
+  c.fillStyle = 'rgba(244,250,255,0.92)';                     // snow on the roof
+  c.fillRect(x0 + 5, y0 + 5, w - 10, 4);
+  c.beginPath(); c.ellipse(x0 + w * 0.35, y0 + h / 2 - 3, w * 0.22, 4, 0, 0, Math.PI * 2); c.fill();
+  c.strokeStyle = shadeHex(wood, 0.5);
+  c.lineWidth = 2;
+  c.strokeRect(x0 + 5, y0 + 5, w - 10, h - 10);
+  c.restore();
+}
+
+// Radar dish seen from above on its plinth: shadow, a white-grey bowl with rings and ribs, a
+// feed horn on three struts offset from the centre, a red beacon on the rim, frost.
+function paintRadarDish(c, cx, cy, R, th, seed) {
+  if (!(R > 6)) return;
+  c.save();
+  const a = -0.7 + ihash(seed * 7) * 0.4;
+  c.fillStyle = 'rgba(30,45,60,0.35)';
+  c.beginPath(); c.ellipse(cx + R * 0.12, cy + R * 0.16, R, R * 0.92, 0, 0, Math.PI * 2); c.fill();
+  c.fillStyle = '#b8c4cf';
+  c.beginPath(); c.arc(cx, cy, R, 0, Math.PI * 2); c.fill();
+  c.fillStyle = '#e4ecf2';
+  c.beginPath(); c.arc(cx - R * 0.08, cy - R * 0.08, R * 0.9, 0, Math.PI * 2); c.fill();
+  c.strokeStyle = 'rgba(90,110,130,0.45)';
+  c.lineWidth = 1;
+  c.beginPath();
+  for (const f of [0.3, 0.55, 0.78]) { c.moveTo(cx + R * f, cy); c.arc(cx, cy, R * f, 0, Math.PI * 2); }
+  for (let k = 0; k < 6; k++) { const b = (k / 6) * Math.PI * 2; c.moveTo(cx + Math.cos(b) * R * 0.3, cy + Math.sin(b) * R * 0.3); c.lineTo(cx + Math.cos(b) * R * 0.9, cy + Math.sin(b) * R * 0.9); }
+  c.stroke();
+  c.strokeStyle = '#4a5866';
+  c.lineWidth = 2;
+  c.beginPath(); c.arc(cx, cy, R, 0, Math.PI * 2); c.stroke();
+  const hx = cx + Math.cos(a) * R * 0.35, hy = cy + Math.sin(a) * R * 0.35;
+  c.strokeStyle = '#56626e';
+  c.lineWidth = Math.max(1.5, R * 0.05);
+  c.beginPath();
+  for (let k = 0; k < 3; k++) { const b = a + Math.PI + (k - 1) * 1.2; c.moveTo(cx + Math.cos(b) * R * 0.85, cy + Math.sin(b) * R * 0.85); c.lineTo(hx, hy); }
+  c.stroke();
+  c.fillStyle = '#39434d';
+  const hs = Math.max(4, R * 0.16);
+  c.fillRect(hx - hs / 2, hy - hs / 2, hs, hs);
+  c.fillStyle = th.accent;
+  c.fillRect(hx - hs / 2, hy - hs / 2, hs, Math.max(1, hs * 0.3));
+  const bx = cx + Math.cos(a - 1.8) * R * 0.92, by = cy + Math.sin(a - 1.8) * R * 0.92;
+  c.fillStyle = 'rgba(255,60,40,0.35)';
+  c.beginPath(); c.arc(bx, by, Math.max(3, R * 0.12), 0, Math.PI * 2); c.fill();
+  c.fillStyle = '#ff3a2a';
+  c.beginPath(); c.arc(bx, by, Math.max(1.5, R * 0.05), 0, Math.PI * 2); c.fill();
+  c.fillStyle = 'rgba(248,252,255,0.8)';
+  c.beginPath(); c.ellipse(cx - R * 0.35, cy - R * 0.62, R * 0.4, R * 0.12, -0.35, 0, Math.PI * 2); c.fill();
+  c.restore();
+}
+
+function paintTempleWalls(c, map, th, cols, rows) {
+  const T = map.tiles;
+  const H = hintsOf(th);
+  const glyphInk = shadeHex(th.wall, 0.42), band = shadeHex(th.wall, 0.72), lit = H.glyph || shadeHex(th.wall, 1.25);
+  for (let ty = 0; ty < rows; ty++) for (let tx = 0; tx < cols; tx++) {
+    const i = ty * cols + tx;
+    if (T[i] !== T_WALL) continue;
+    const x = tx * TILE, y = ty * TILE;
+    // Sandstone ashlar: two courses per tile, staggered joints, per-block shade and chipped corners.
+    c.fillStyle = shadeHex(th.wall, 0.62);
+    c.fillRect(x, y, TILE, TILE);
+    for (let r = 0; r < 2; r++) {
+      const off = ((r + ty) & 1) ? 13 : 0;
+      const yy = y + r * 20;
+      for (let bx = -13; bx < TILE; bx += 26) {
+        const x0 = Math.max(x, x + bx + off), x1 = Math.min(x + TILE, x + bx + off + 26);
+        if (x1 - x0 < 2) continue;
+        c.fillStyle = mixHex(th.wall, th.wallEdge, ihash(i * 7 + r * 3 + bx) * 0.3, 0.88 + ihash(i * 11 + r + bx) * 0.2);
+        c.fillRect(x0 + 1, yy + 1, x1 - x0 - 2, 18);
+        c.fillStyle = 'rgba(255,240,200,0.12)';
+        c.fillRect(x0 + 1, yy + 1, x1 - x0 - 2, 1);
+      }
+    }
+    // Carved glyph band on every side that faces open floor.
+    const os = openSides(map, tx, ty);
+    if (os) {
+      for (let s = 0; s < 4; s++) {
+        if (!(os & (1 << s))) continue;
+        const horiz = s < 2;
+        const bx = s === 3 ? x + TILE - 9 : x + (s === 2 ? 2 : 0);
+        const by = s === 1 ? y + TILE - 9 : y + (s === 0 ? 2 : 0);
+        const bw = horiz ? TILE : 7, bh = horiz ? 7 : TILE;
+        c.fillStyle = band;
+        c.fillRect(bx, by, bw, bh);
+        c.fillStyle = 'rgba(0,0,0,0.3)';
+        if (horiz) c.fillRect(bx, by, bw, 1); else c.fillRect(bx, by, 1, bh);
+        c.strokeStyle = glyphInk;
+        c.lineWidth = 1;
+        c.beginPath();
+        for (let k = 0; k < 4; k++) {
+          const gx = horiz ? bx + 5 + k * 10 : bx + 3.5, gy = horiz ? by + 3.5 : by + 5 + k * 10;
+          const kind = Math.floor(ihash(i * 13 + s * 5 + k) * 4);
+          if (kind === 0) { c.moveTo(gx + 2.5, gy); c.arc(gx, gy, 2.5, 0, Math.PI * 2); }
+          // FIX-2 (WO9 QA TEMPLE #6): an eye and a stepped pyramid (the old T bar / zigzag read as letters).
+          else if (kind === 1) { c.moveTo(gx - 3, gy); c.quadraticCurveTo(gx, gy - 3, gx + 3, gy); c.quadraticCurveTo(gx, gy + 3, gx - 3, gy); c.moveTo(gx + 0.8, gy); c.arc(gx, gy, 0.8, 0, Math.PI * 2); }
+          else if (kind === 2) { c.moveTo(gx - 3, gy + 2.5); c.lineTo(gx - 3, gy + 0.5); c.lineTo(gx - 1, gy + 0.5); c.lineTo(gx - 1, gy - 1.5); c.lineTo(gx + 1, gy - 1.5); c.lineTo(gx + 1, gy + 0.5); c.lineTo(gx + 3, gy + 0.5); c.lineTo(gx + 3, gy + 2.5); }
+          else { c.rect(gx - 2.5, gy - 2.5, 5, 5); c.moveTo(gx + 0.5, gy); c.arc(gx, gy, 0.5, 0, Math.PI * 2); }
+        }
+        c.stroke();
+        c.fillStyle = rgbaHex(lit, 0.35);
+        if (horiz) c.fillRect(bx, by + bh - 1, bw, 1); else c.fillRect(bx + bw - 1, by, 1, bh);
+      }
+    }
+  }
+}
+
+// Hanging vines (TEMPLE, after the wall edges): leafy clumps on floor-facing wall edges, strands
+// dangling onto the floor below south faces.
+function paintVines(c, map, th, cols, rows) {
+  const T = map.tiles;
+  if (!T) return;
+  const H = hintsOf(th);
+  const clump = rgbaHex(shadeHex(H.vine, 1.05), 0.92), leaf = shadeHex(H.moss, 1.1);
+  c.save();
+  for (let ty = 0; ty < rows; ty++) for (let tx = 0; tx < cols; tx++) {
+    const i = ty * cols + tx;
+    if (T[i] !== T_WALL) continue;
+    const os = openSides(map, tx, ty);
+    if (!os || ihash(i * 71) < 0.45) continue;
+    const x = tx * TILE, y = ty * TILE;
+    // clumps along one open edge
+    const s = [0, 1, 2, 3].find((k) => os & (1 << k));
+    c.fillStyle = clump;
+    c.beginPath();
+    for (let k = 0; k < 4; k++) {
+      const u = 4 + ihash(i * 73 + k) * 32, r = 2.5 + ihash(i * 79 + k) * 3;
+      const px = s < 2 ? x + u : (s === 2 ? x + 2 : x + TILE - 2);
+      const py = s < 2 ? (s === 0 ? y + 2 : y + TILE - 2) : y + u;
+      c.moveTo(px + r, py); c.arc(px, py, r, 0, Math.PI * 2);
+    }
+    c.fill();
+    if (os & 2) {
+      const n = 1 + Math.floor(ihash(i * 83) * 3);
+      for (let k = 0; k < n; k++) {
+        const sx = x + 5 + ihash(i * 89 + k) * 30, len = 8 + ihash(i * 97 + k) * 16;
+        const sw = (ihash(i * 101 + k) - 0.5) * 8;
+        c.strokeStyle = H.vine;
+        c.lineWidth = 1.5;
+        c.beginPath();
+        c.moveTo(sx, y + TILE - 2);
+        c.quadraticCurveTo(sx + sw, y + TILE + len * 0.5, sx + sw * 0.4, y + TILE + len);
+        c.stroke();
+        c.fillStyle = leaf;
+        for (let l = 4; l < len; l += 5) {
+          const lx = sx + sw * (l / len) * 0.8 + ((l / 5) & 1 ? 2.5 : -2.5), ly = y + TILE + l;
+          c.beginPath(); c.ellipse(lx, ly, 2.2, 1.3, (l / 5) & 1 ? 0.6 : -0.6, 0, Math.PI * 2); c.fill();
+        }
+      }
+    }
+  }
+  c.restore();
+}
+
+// ---- dynamic: lamps, water, overlays ----
+const wo9Glows = {};
+function wo9Glow(kind) {
+  if (wo9Glows[kind] !== undefined || typeof document === 'undefined') return wo9Glows[kind] || null;
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  const lc = kind === 'lamp' && lampGlowHex ? hexRgb(lampGlowHex) : null;
+  const rgb = kind === 'ice' ? '190,235,255' : kind === 'teal' ? '63,214,168' : lc ? lc.join(',') : '255,222,160';
+  grad.addColorStop(0, `rgba(${rgb},0.9)`);
+  grad.addColorStop(kind === 'lamp' ? 0.2 : 0.35, `rgba(${rgb},0.42)`);
+  grad.addColorStop(1, `rgba(${rgb},0)`);
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
+  wo9Glows[kind] = c;
+  return c;
+}
+function blitWo9Glow(kind, x, y, r, alpha) {
+  const gl = wo9Glow(kind);
+  if (!gl || !(alpha > 0) || !(r > 0)) return;
+  ctx.globalAlpha = alpha > 1 ? 1 : alpha;
+  ctx.drawImage(gl, x - r, y - r, r * 2, r * 2);
+}
+
+// KINO wall lamps (theme.torch): steady warm amber-white glow, brass sconce, frosted bulb.
+let lampGlowHex = null;
+function drawKinoLamps(view, now, theme) {
+  const hx = theme && theme.hints ? theme.hints.lamp : null;
+  if (hx && hx !== lampGlowHex) { lampGlowHex = hx; wo9Glows.lamp = undefined; }
+  const list = staticLayer && staticLayer.torches;
+  if (!list || !list.length) return;
+  ctx.save();
+  for (let i = 0; i < list.length; i++) {
+    const tc = list[i];
+    if (!inView(view, tc.x, tc.y, 70)) continue;
+    const br = 0.92 + 0.05 * Math.sin(now * 1.3 + tc.seed);
+    ctx.globalCompositeOperation = 'lighter';
+    blitWo9Glow('lamp', tc.x + tc.dx * 10, tc.y + tc.dy * 10, 56 * br, 0.32 * br);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#6a4a1c';
+    ctx.fillRect(tc.x - 5, tc.y - 5, 10, 10);
+    ctx.fillStyle = '#c99a42';
+    ctx.fillRect(tc.x - 4, tc.y - 4, 8, 8);
+    ctx.fillStyle = '#fff3d6';
+    ctx.beginPath();
+    ctx.arc(tc.x + tc.dx * 4, tc.y + tc.dy * 4, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// TEMPLE water: slow deterministic ripple highlights (from game time) on the visible pit tiles,
+// batched into two paths.
+function drawTempleWater(view, t, theme) {
+  const H = hintsOf(theme);
+  const pits = staticLayer && staticLayer.pits;
+  if (!pits || !pits.length) return;
+  const cols = staticLayer.cols;
+  const x0 = Math.floor(view.x / TILE) - 1, y0 = Math.floor(view.y / TILE) - 1;
+  const x1 = Math.ceil((view.x + view.w) / TILE) + 1, y1 = Math.ceil((view.y + view.h) / TILE) + 1;
+  ctx.save();
+  ctx.lineWidth = 1.2;
+  ctx.strokeStyle = H.ripple;
+  ctx.beginPath();
+  let any = false;
+  for (let q = 0; q < pits.length; q++) {
+    const i = pits[q], tx = i % cols, ty = (i / cols) | 0;
+    if (tx < x0 || tx > x1 || ty < y0 || ty > y1) continue;
+    any = true;
+    const x = tx * TILE, y = ty * TILE;
+    for (let k = 0; k < 2; k++) {
+      const s = ihash(i * 5 + k);
+      const f = fract(t * 0.22 + s);
+      const len = 3 + 11 * Math.sin(Math.PI * f);
+      const xx = x + 4 + ihash(i * 7 + k) * (TILE - 20) + f * 6;
+      const yy = y + 6 + ihash(i * 11 + k) * (TILE - 12);
+      const bump = 1.6 * Math.sin(t * 1.3 + s * 6.28);
+      ctx.moveTo(xx, yy);
+      ctx.quadraticCurveTo(xx + len / 2, yy - bump, xx + len, yy);
+    }
+  }
+  if (any) ctx.stroke();
+  // Occasional concentric rings (a drip), fainter.
+  ctx.strokeStyle = H.rippleRing;
+  ctx.beginPath();
+  for (let q = 0; q < pits.length; q++) {
+    const i = pits[q];
+    if (ihash(i * 13) < 0.86) continue;
+    const tx = i % cols, ty = (i / cols) | 0;
+    if (tx < x0 || tx > x1 || ty < y0 || ty > y1) continue;
+    const f = fract(t * 0.3 + ihash(i * 17));
+    const r = 2 + 13 * f;
+    const cx = tx * TILE + 12 + ihash(i * 19) * 16, cy = ty * TILE + 12 + ihash(i * 23) * 16;
+    ctx.moveTo(cx + r, cy); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+// KINO film grain: one pre-rendered 128 px noise tile as a pattern, static on screen (no flicker).
+let grainPattern = null, grainCtx = null;
+function getGrainPattern() {
+  if (grainPattern && grainCtx === ctx) return grainPattern;
+  if (typeof document === 'undefined' || !ctx) return null;
+  try {
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const g = c.getContext('2d');
+    const img = g.createImageData(128, 128);
+    const d = img.data;
+    for (let i = 0; i < 128 * 128; i++) {
+      const h = ihash(i * 2654435761 + 17);
+      const v = h > 0.5 ? 255 : 0;
+      d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v;
+      d[i * 4 + 3] = Math.round(Math.abs(h - 0.5) * 2 * 110);
+    }
+    g.putImageData(img, 0, 0);
+    grainPattern = ctx.createPattern(c, 'repeat');
+    grainCtx = ctx;
+  } catch (_) { grainPattern = null; }
+  return grainPattern;
+}
+
+const WO9_GRAIN_ALPHA = 0.28;
+// Screen-space style overlays after the ambient tint.
+function drawStyleOverlay(theme, W, H, view, zoom, now) {
+  const st = theme.style;
+  if (st === 'kino') {
+    const pat = getGrainPattern();
+    if (pat) {
+      const gs = theme.hints ? theme.hints.grain : 0.035;
+      ctx.globalAlpha = Math.min(0.6, WO9_GRAIN_ALPHA * gs / 0.035);
+      ctx.fillStyle = pat;
+      ctx.fillRect(0, 0, W, H);
+      ctx.globalAlpha = 1;
+    }
+  } else if (st === 'outpost') { if (hintsOf(theme).snow) drawSnowfall(W, H, view, zoom, now); }
+  else if (st === 'temple') { if (hintsOf(theme).spores) drawSpores(W, H, view, zoom, now); }
+}
+
+// Light snowfall: flakes on three depths drifting down and with the wind; under
+// prefers-reduced-motion a sparse static field. Positions from wall time (no allocation).
+function drawSnowfall(W, H, view, zoom, now) {
+  const rm = prefersReducedMotion();
+  const N = rm ? 36 : 120;
+  const tt = rm ? 0 : now;
+  const ox = rm ? 0 : -view.x * zoom, oy = rm ? 0 : -view.y * zoom;
+  ctx.fillStyle = '#ffffff';
+  for (let i = 0; i < N; i++) {
+    const depth = 0.3 + ihash(i * 3 + 1) * 0.7;
+    const size = 1 + depth * 2.2;
+    const x = fract((ihash(i * 3) * W + tt * (8 + 26 * depth) + Math.sin(tt * 0.7 + i) * 10 * depth + ox * depth * 0.6) / (W + 20)) * (W + 20) - 10;
+    const y = fract((ihash(i * 3 + 2) * H + tt * (16 + 44 * depth) + oy * depth * 0.6) / (H + 20)) * (H + 20) - 10;
+    ctx.globalAlpha = 0.35 + 0.45 * depth;
+    ctx.fillStyle = '#5f7a96';
+    ctx.fillRect(x + 1, y + 1, size, size);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(x, y, size, size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// Very subtle drifting spores (green-gold motes); static and fewer under reduced motion.
+function drawSpores(W, H, view, zoom, now) {
+  const rm = prefersReducedMotion();
+  const N = rm ? 10 : 26;
+  const tt = rm ? 0 : now;
+  const ox = rm ? 0 : -view.x * zoom * 0.4, oy = rm ? 0 : -view.y * zoom * 0.4;
+  ctx.fillStyle = '#e2ef8c';
+  for (let i = 0; i < N; i++) {
+    const sp = 0.5 + ihash(i * 5 + 3);
+    const x = fract((ihash(i * 5) * W + Math.sin(tt * 0.3 * sp + i * 1.7) * 30 + tt * 4 + ox * sp) / W) * W;
+    const y = fract((ihash(i * 5 + 1) * H - tt * 7 * sp + oy * sp) / H) * H;
+    const a = 0.16 + 0.12 * Math.sin(tt * 0.9 + i * 2.1);
+    ctx.globalAlpha = a * 0.4;
+    ctx.fillRect(x - 1.5, y - 1.5, 4, 4);
+    ctx.globalAlpha = a;
+    ctx.fillRect(x, y, 1.5, 1.5);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ---- boss abilities (frost / tide) ----
+function rayBlocks(code) { return isSolidCode(code) || code === T_DOOR || code === T_STAIRS; }
+// Distance from (x, y) along angle a to the first ray-blocking tile, capped at max (10 px steps).
+function rayReach(map, x, y, a, max) {
+  const dx = Math.cos(a), dy = Math.sin(a);
+  for (let d = 6; d <= max; d += 10) {
+    if (rayBlocks(tileAt(map, Math.floor((x + dx * d) / TILE), Math.floor((y + dy * d) / TILE)))) return Math.max(0, d - 6);
+  }
+  return max;
+}
+const CONE_RAYS = 17;
+const coneReach = new Float32Array(CONE_RAYS);
+const TIDE_RAYS = 72;
+const tideReach = new Float32Array(TIDE_RAYS);
+const DASH_ICE = [8, 6], NO_DASH = [];
+
+function frostCfgR() {
+  const F = CFG.BOSS && CFG.BOSS.frost;
+  return F || { telegraph: 0.6, range: 260, halfAngle: 0.5, slowSeconds: 2 };
+}
+function tideCfgR() {
+  const T = CFG.BOSS && CFG.BOSS.tide;
+  return T || { telegraph: 0.8, maxRadius: 420, band: 28 };
+}
+function frostAngle(state, z) {
+  const f = z.frost;
+  if (Number.isFinite(f.angle) && (f.phase === 'telegraph' || f.phase === 'breath')) return f.angle;
+  const p = state.player;
+  return p ? Math.atan2(p.y - z.y, p.x - z.x) : 0;
+}
+// Cone outline from radius r0 to min(len, wall reach) per ray.
+function conePath(x, y, ang, half, r0, len) {
+  ctx.beginPath();
+  for (let k = 0; k < CONE_RAYS; k++) {
+    const a = ang - half + (2 * half * k) / (CONE_RAYS - 1);
+    const d = Math.max(r0, Math.min(len, coneReach[k]));
+    if (k === 0) ctx.moveTo(x + Math.cos(a) * r0, y + Math.sin(a) * r0);
+    ctx.lineTo(x + Math.cos(a) * d, y + Math.sin(a) * d);
+  }
+  ctx.arc(x, y, r0, ang + half, ang - half, true);
+  ctx.closePath();
+}
+
+// Floor-level pass before the zombies: frost cone preview / breath cone, tide ring.
+function drawBossAbilitiesFloor(state, view, t) {
+  const zs = state.zombies;
+  if (!Array.isArray(zs)) return;
+  for (let n = 0; n < zs.length; n++) {
+    const z = zs[n];
+    if (!z || z.kind !== 'boss' || z.mode === 'dying') continue;
+    try {
+      if (z.frost && (z.frost.phase === 'telegraph' || z.frost.phase === 'breath')) drawFrostCone(state, z, view, t);
+      if (z.tide && (z.tide.phase === 'telegraph' || z.tide.phase === 'wave')) drawTideFloor(state, z, view, t);
+    } catch (_) { /* never break the frame */ }
+  }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function frostTelegraphBoost(state) {
+  return themeOf(state).style === 'outpost' ? 1.6 : 1;
+}
+
+function drawFrostCone(state, z, view, t) {
+  const F = frostCfgR();
+  const f = z.frost, map = state.map;
+  const R = F.range > 0 ? F.range : 260, half = F.halfAngle > 0 ? F.halfAngle : 0.5;
+  if (!inView(view, z.x, z.y, R + 40)) return;
+  const ang = frostAngle(state, z);
+  const r0 = (z.radius || 34) * 0.6;
+  for (let k = 0; k < CONE_RAYS; k++) coneReach[k] = rayReach(map, z.x, z.y, ang - half + (2 * half * k) / (CONE_RAYS - 1), R);
+  ctx.save();
+  if (f.phase === 'telegraph') {
+    const tel = F.telegraph > 0 ? F.telegraph : 0.6;
+    const prog = Math.max(0, Math.min(1, (f.t || 0) / tel));
+    conePath(z.x, z.y, ang, half, r0, R);
+    ctx.fillStyle = '#9fd8ff';
+    // FIX-2 (WO9 QA OUTPOST #5): brighter telegraph fill on the light OUTPOST look.
+    const boost = frostTelegraphBoost(state);
+    ctx.globalAlpha = Math.min(0.5, (0.08 + 0.12 * prog) * boost);
+    ctx.fill();
+    ctx.globalAlpha = 0.55 + 0.35 * prog;
+    ctx.strokeStyle = '#d8f4ff';
+    ctx.lineWidth = 2;
+    ctx.setLineDash(DASH_ICE);
+    ctx.lineDashOffset = -t * 40;
+    ctx.stroke();
+    ctx.setLineDash(NO_DASH);
+    // Filling sweep: how close the breath is.
+    conePath(z.x, z.y, ang, half, r0, r0 + (R - r0) * prog);
+    ctx.fillStyle = '#c8ecff';
+    ctx.globalAlpha = Math.min(0.5, 0.18 * boost);
+    ctx.fill();
+  } else {
+    const dur = 0.35;
+    const prog = Math.max(0, Math.min(1, (f.t || 0) / dur));
+    const I = prog < 0.2 ? 0.5 + prog * 2.5 : 1 - (prog - 0.2) * 0.75;
+    const len = r0 + (R - r0) * Math.min(1, 0.35 + prog * 2.2);
+    conePath(z.x, z.y, ang, half, r0, len);
+    ctx.fillStyle = '#bfe6ff';
+    ctx.globalAlpha = 0.34 * I;
+    ctx.fill();
+    ctx.globalCompositeOperation = 'lighter';
+    conePath(z.x, z.y, ang, half * 0.55, r0, len * 0.9);
+    ctx.fillStyle = '#eaf8ff';
+    ctx.globalAlpha = 0.22 * I;
+    ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+    // Ice particles streaming out, cut at the walls.
+    for (let k = 0; k < 40; k++) {
+      const u = ihash(k * 3 + 1) * 2 - 1;
+      const a = ang + u * half * 0.95;
+      const ri = Math.min(CONE_RAYS - 1, Math.max(0, Math.round((u + 1) * 0.5 * (CONE_RAYS - 1))));
+      const reach = Math.min(len, coneReach[ri]);
+      const d = r0 + fract(ihash(k * 3 + 2) + prog * 1.6) * (len - r0);
+      if (d > reach) continue;
+      const px = z.x + Math.cos(a) * d, py = z.y + Math.sin(a) * d;
+      const s = 1.5 + ihash(k * 7) * 2.5;
+      ctx.globalAlpha = 0.85 * I;
+      ctx.fillStyle = k & 1 ? '#ffffff' : '#bfe8ff';
+      ctx.fillRect(px - s / 2, py - s / 2, s, s);
+      if (k % 5 === 0) { ctx.fillRect(px - s * 1.5, py - 0.5, s * 3, 1); ctx.fillRect(px - 0.5, py - s * 1.5, 1, s * 3); }
+    }
+  }
+  ctx.restore();
+}
+
+function drawTideFloor(state, z, view, t) {
+  const T = tideCfgR();
+  const w = z.tide, map = state.map;
+  const maxR = T.maxRadius > 0 ? T.maxRadius : 420, band = T.band > 0 ? T.band : 28;
+  const r = z.radius || 34;
+  ctx.save();
+  if (w.phase === 'telegraph') {
+    if (!inView(view, z.x, z.y, maxR + band)) { ctx.restore(); return; }
+    const tel = T.telegraph > 0 ? T.telegraph : 0.8;
+    const prog = Math.max(0, Math.min(1, (w.t || 0) / tel));
+    // Dark water welling up under the boss.
+    ctx.fillStyle = '#0f4a46';
+    ctx.globalAlpha = 0.25 + 0.25 * prog;
+    ctx.beginPath(); ctx.arc(z.x, z.y, r * (1.2 + 0.6 * prog), 0, Math.PI * 2); ctx.fill();
+    // Faint reach circle (where the wave will stop). FIX-2 (WO9 QA TEMPLE #2): at the real hit
+    // reach (maxRadius + 0.6 band: a centre hit up to maxRadius + band always overlaps the line)
+    // and cut per ray at walls / pillars like the wave ring itself.
+    const reachR = maxR + band * 0.6;
+    for (let k = 0; k < TIDE_RAYS; k++) tideReach[k] = rayReach(map, z.x, z.y, (k / TIDE_RAYS) * Math.PI * 2, reachR + 4);
+    ctx.globalAlpha = 0.12 + 0.18 * prog;
+    ctx.strokeStyle = '#6ff0d0';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash(DASH_ICE);
+    ctx.lineDashOffset = t * 30;
+    const da0 = (Math.PI * 2) / TIDE_RAYS;
+    ctx.beginPath();
+    let openArc = false;
+    for (let k = 0; k < TIDE_RAYS; k++) {
+      if (tideReach[k] >= reachR - 2) {
+        const a0 = (k - 0.5) * da0, a1 = (k + 0.5) * da0;
+        if (!openArc) ctx.moveTo(z.x + Math.cos(a0) * reachR, z.y + Math.sin(a0) * reachR);
+        ctx.arc(z.x, z.y, reachR, a0, a1);
+        openArc = true;
+      } else openArc = false;
+    }
+    ctx.stroke();
+    ctx.setLineDash(NO_DASH);
+  } else {
+    const R = w.radius || 0;
+    const cx = Number.isFinite(w.x) ? w.x : z.x, cy = Number.isFinite(w.y) ? w.y : z.y;
+    if (R <= 0 || !inView(view, cx, cy, R + band)) { ctx.restore(); return; }
+    const fade = 1 - 0.8 * Math.pow(Math.min(1, R / maxR), 3);
+    for (let k = 0; k < TIDE_RAYS; k++) tideReach[k] = rayReach(map, cx, cy, (k / TIDE_RAYS) * Math.PI * 2, R + 4);
+    const da = (Math.PI * 2) / TIDE_RAYS;
+    const ringPath = (rad) => {
+      ctx.beginPath();
+      let open = false;
+      for (let k = 0; k < TIDE_RAYS; k++) {
+        const ok = tideReach[k] >= Math.min(rad, R) - 2;
+        if (ok) {
+          const a0 = (k - 0.5) * da, a1 = (k + 0.5) * da;
+          if (!open) ctx.moveTo(cx + Math.cos(a0) * rad, cy + Math.sin(a0) * rad);
+          ctx.arc(cx, cy, rad, a0, a1);
+          open = true;
+        } else open = false;
+      }
+    };
+    ringPath(R);
+    ctx.lineCap = 'butt';
+    ctx.strokeStyle = '#1f9a86';
+    ctx.globalAlpha = 0.28 * fade;
+    ctx.lineWidth = band * 1.2;
+    ctx.stroke();
+    ctx.strokeStyle = '#3fd6a8';
+    ctx.globalAlpha = 0.85 * fade;
+    ctx.lineWidth = 6;
+    ctx.stroke();
+    ctx.strokeStyle = '#eafff8';
+    ctx.globalAlpha = 0.8 * fade;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // Trailing ripple
+    if (R > 40) {
+      ringPath(R * 0.78);
+      ctx.strokeStyle = '#6ff0d0';
+      ctx.globalAlpha = 0.25 * fade;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    // Foam flecks on the crest
+    ctx.fillStyle = '#ffffff';
+    ctx.globalAlpha = 0.85 * fade;
+    const nf = Math.min(90, Math.max(16, Math.round(R / 5)));
+    for (let k = 0; k < nf; k++) {
+      const a = ((k + ihash(k * 7) * 0.8) / nf) * Math.PI * 2;
+      const ri = Math.floor(((a / (Math.PI * 2)) * TIDE_RAYS + 0.5)) % TIDE_RAYS;
+      if (tideReach[ri] < R - 2) continue;
+      const rr = R + 2 + ihash(k * 11 + Math.floor(t * 8)) * 6;
+      const s = 1.5 + ihash(k * 13) * 2;
+      ctx.fillRect(cx + Math.cos(a) * rr - s / 2, cy + Math.sin(a) * rr - s / 2, s, s);
+    }
+  }
+  ctx.restore();
+}
+
+// After the zombies: icy glow + frost mist (frost telegraph / breath), water swirl (tide telegraph).
+function drawBossAbilitiesFx(state, view, t) {
+  const zs = state.zombies;
+  if (!Array.isArray(zs)) return;
+  for (let n = 0; n < zs.length; n++) {
+    const z = zs[n];
+    if (!z || z.kind !== 'boss' || z.mode === 'dying' || !inView(view, z.x, z.y, 160)) continue;
+    const r = z.radius || 34;
+    ctx.save();
+    try {
+      const f = z.frost;
+      if (f && (f.phase === 'telegraph' || f.phase === 'breath')) {
+        const F = frostCfgR();
+        const tel = F.telegraph > 0 ? F.telegraph : 0.6;
+        const prog = f.phase === 'telegraph' ? Math.max(0, Math.min(1, (f.t || 0) / tel)) : 1;
+        const pulse = 0.5 + 0.5 * Math.sin(t * (14 + prog * 26));
+        ctx.globalCompositeOperation = 'lighter';
+        blitWo9Glow('ice', z.x, z.y, r * (1.6 + 0.5 * prog), 0.35 + 0.35 * prog * pulse);
+        ctx.globalCompositeOperation = 'source-over';
+        const ang = frostAngle(state, z);
+        const mx = z.x + Math.cos(ang) * r * 0.8, my = z.y + Math.sin(ang) * r * 0.8;
+        ctx.fillStyle = '#e6f7ff';
+        for (let k = 0; k < 7; k++) {
+          const u = fract(t * 1.4 + ihash(k * 5));
+          const a = ang + (ihash(k * 9) - 0.5) * 1.4;
+          ctx.globalAlpha = 0.6 * (1 - u);
+          const s = 2 + u * 5;
+          ctx.fillRect(mx + Math.cos(a) * u * 16 - s / 2, my + Math.sin(a) * u * 16 - s / 2, s, s);
+        }
+        if (f.phase === 'telegraph') {
+          ctx.globalAlpha = 0.6 + 0.4 * pulse;
+          ctx.strokeStyle = pulse > 0.5 ? '#bfe8ff' : '#ffffff';
+          ctx.lineWidth = 3;
+          ctx.beginPath(); ctx.arc(z.x, z.y, r + 4 + prog * 6, 0, Math.PI * 2); ctx.stroke();
+        }
+      }
+      const w = z.tide;
+      if (w && w.phase === 'telegraph') {
+        const T = tideCfgR();
+        const tel = T.telegraph > 0 ? T.telegraph : 0.8;
+        const prog = Math.max(0, Math.min(1, (w.t || 0) / tel));
+        ctx.globalCompositeOperation = 'lighter';
+        blitWo9Glow('teal', z.x, z.y, r * (1.8 + 0.4 * prog), 0.3 + 0.3 * prog);
+        ctx.globalCompositeOperation = 'source-over';
+        // Three spiral arms of water circling the boss, tightening as the wave nears.
+        ctx.lineCap = 'round';
+        for (let pass = 0; pass < 2; pass++) {
+          ctx.strokeStyle = pass ? '#eafff8' : '#3fd6a8';
+          ctx.lineWidth = pass ? 1.2 : 3.5;
+          ctx.globalAlpha = pass ? 0.75 : 0.8;
+          ctx.beginPath();
+          for (let j = 0; j < 3; j++) {
+            for (let s = 0; s <= 10; s++) {
+              const rr = r * (0.95 + (1.5 - 0.6 * prog) * (s / 10)) + (pass ? 2 : 0);
+              const a = t * (4 + 4 * prog) + j * 2.094 + s * 0.32;
+              const px = z.x + Math.cos(a) * rr, py = z.y + Math.sin(a) * rr;
+              if (s === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+            }
+          }
+          ctx.stroke();
+        }
+        ctx.fillStyle = '#bff8ea';
+        for (let k = 0; k < 10; k++) {
+          const a = -t * 3 + k * 0.628;
+          const rr = r * (1.3 + 0.3 * Math.sin(t * 5 + k));
+          ctx.globalAlpha = 0.7;
+          ctx.fillRect(z.x + Math.cos(a) * rr - 1.5, z.y + Math.sin(a) * rr - 1.5, 3, 3);
+        }
+      }
+    } catch (_) { /* never break the frame */ }
+    ctx.restore();
+  }
+}
+
+// ---- frost-slowed player ----
+function frostSlowAmount(p) {
+  if (!p || p.down || !(p.slowT > 0)) return 0;
+  const F = frostCfgR();
+  const S = F.slowSeconds > 0 ? F.slowSeconds : 2;
+  return Math.max(0.35, Math.min(1, p.slowT / S));
+}
+function drawPlayerFrost(state, now) {
+  const p = state.player;
+  const k = frostSlowAmount(p);
+  if (!k) return;
+  const rm = prefersReducedMotion();
+  const R = (p.radius || 14);
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  blitWo9Glow('ice', p.x, p.y, R * 2.4, 0.4 * k);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 0.8 * k;
+  ctx.strokeStyle = '#bfe8ff';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.ellipse(p.x, p.y + 2, R + 6, R + 4, 0, 0, Math.PI * 2); ctx.stroke();
+  // Frost film over the body.
+  ctx.fillStyle = '#bfe8ff';
+  ctx.globalAlpha = 0.22 * k;
+  ctx.beginPath(); ctx.arc(p.x, p.y, R + 1, 0, Math.PI * 2); ctx.fill();
+  // Six ice crystals (6-point stars) circling slowly: dark outline pass, then bright.
+  ctx.globalAlpha = 0.9 * k;
+  const spin = rm ? 0 : now * 0.9;
+  for (let pass = 0; pass < 2; pass++) {
+  ctx.strokeStyle = pass ? '#f2fbff' : 'rgba(30,70,110,0.7)';
+  ctx.lineWidth = pass ? 1.4 : 3;
+  ctx.beginPath();
+  for (let j = 0; j < 6; j++) {
+    const a = spin + j * 1.047;
+    const cx = p.x + Math.cos(a) * (R + 10), cy = p.y + Math.sin(a) * (R + 8);
+    const s = 3.5 + (j & 1) * 1.5;
+    for (let m = 0; m < 3; m++) {
+      const b = m * 1.047 + a;
+      const dx = Math.cos(b) * s, dy = Math.sin(b) * s;
+      ctx.moveTo(cx - dx, cy - dy); ctx.lineTo(cx + dx, cy + dy);
+    }
+  }
+  ctx.stroke();
+  }
+  ctx.restore();
+}
+let frostVignette = null;
+function drawFrostVignette(state, W, H) {
+  const k = frostSlowAmount(state.player);
+  if (!k || !ctx) return;
+  if (!frostVignette) {
+    frostVignette = ctx.createRadialGradient(0, 0, 0.55, 0, 0, 1.3);
+    frostVignette.addColorStop(0, 'rgba(180,225,255,0)');
+    frostVignette.addColorStop(0.5, 'rgba(170,220,255,0.14)');
+    frostVignette.addColorStop(1, 'rgba(220,245,255,0.55)');
+  }
+  fillUnitVignette(frostVignette, W, H, k);
 }
 
 function drawDebugWorld(state, view) {

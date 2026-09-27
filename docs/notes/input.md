@@ -65,3 +65,16 @@ None.
   untouched and green.
 - Verified in Chrome (`?debug=1&touch=1`): KeyV keydown -> `melee` true, false after `endFrame()`;
   Digit3 -> `slot === 3`.
+
+## WO9 (Agent G) - level select
+- `getInput().levelSelect`: edge, true for the frame `Shift+KeyM` is first pressed (`LEVEL_SELECT.key`
+  / `requireShift` from config). Plain M never sets it; Shift+M sets no other edge (Shift still
+  counts as `sprint` while held).
+- input.js imports `levelselect.js` (namespace, guarded). While `isLevelSelectOpen()`: keydowns are
+  not recorded as held and set no edge except `levelSelect`; `getInput()` returns a neutral snapshot
+  (no move / fire / reload / interact / swap / sprint / start / restart / pause / debugKey / slot /
+  wheel / melee / touch aim), keeping only `mouseX/mouseY` and `levelSelect`. Keyups still release
+  held keys. The overlay's own keys (arrows, digits, Enter, Space, Esc, Tab) are stopped before
+  input.js sees them (window capture listener in levelselect.js).
+- Tests: `tests/levelselect.test.js` (levelSelect boolean + cleared by endFrame).
+- Verified in Chrome with real key presses (see levelselect.md).

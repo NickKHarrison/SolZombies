@@ -183,6 +183,12 @@ const CANONICAL_EVENTS = [
   // WO8 3 (purchase:made / purchase:denied also gain kind 'pap')
   'pap:start',       // { weaponId, slot }                              shop.js
   'pap:done',        // { weaponId }  (when the upgraded gun is taken)  shop.js
+  // WO9 3.3 / 3.4
+  'levelselect:open',  // {}                                            main.js (or levelselect.js)
+  'levelselect:close', // {}                                            main.js (or levelselect.js)
+  'level:teleport',    // { from, to }                                  main.js
+  'boss:frost',        // { x, y, angle }  (frost telegraph start)      zombie.js / boss.js
+  'boss:tide',         // { x, y }         (tide telegraph start)       zombie.js / boss.js
 ];
 
 test('3.2 events.js: exports', () => {
@@ -370,6 +376,8 @@ const PURE_FILES = [
   'boss', 'level', 'levels/levels', 'levels/level1', 'levels/level2',
   // WO7: new pure modules (scores.js only touches globalThis.localStorage, guarded)
   'sprites/zombie', 'scores', 'levels/level3',
+  // WO9: new level data modules
+  'levels/level4', 'levels/level5', 'levels/level6',
 ];
 
 for (const name of PURE_FILES) {
@@ -824,4 +832,71 @@ test('WO8 new exports', async () => {
   // shop.js (B)
   for (const f of ['startPap', 'takePap', 'updatePap']) need(shop, 'shop', f, F);
   assert.deepEqual(missing, [], `missing WO8 exports:\n  ${missing.join('\n  ')}`);
+});
+
+// ---------------------------------------------------------------------------------------------
+// WO9 (levels 4-6, level select)
+// ---------------------------------------------------------------------------------------------
+
+test('WO9 config: LEVEL_SELECT, BOSS.frost, BOSS.tide (3.1); DOORS unchanged', () => {
+  assert.deepEqual(config.LEVEL_SELECT, { key: 'KeyM', requireShift: true, thumbScale: 3, bannerSeconds: 2.5, minPoints: 400 });
+  assert.deepEqual(config.BOSS.frost, { every: 6, telegraph: 0.8, range: 260, halfAngle: 0.5, damage: 30, slowMult: 0.55, slowSeconds: 2 });
+  assert.deepEqual(config.BOSS.tide, { every: 7, telegraph: 0.8, speed: 320, maxRadius: 420, damage: 40, knockback: 120, band: 28 });
+  assert.deepEqual(config.DOORS, { megaCost: 250, megaCostPerLevel: 250 });
+  // 1.1: mega door 1000 / 1250 / 1500 on levels 4 / 5 / 6 (index 3 / 4 / 5)
+  assert.deepEqual([3, 4, 5].map((i) => config.DOORS.megaCost + config.DOORS.megaCostPerLevel * i), [1000, 1250, 1500]);
+});
+
+test('WO9 state.js: stats.practice = false', () => {
+  const s = stateMod.createEmptyState(1);
+  assert.equal(s.stats.practice, false);
+});
+
+test('WO9 level defs: six levels, ids / names / bosses / abilities per 1.2-1.4', async () => {
+  const { LEVELS } = await import('../src/levels/levels.js');
+  assert.equal(LEVELS.length, 6);
+  assert.deepEqual(LEVELS.map((d) => d.id), ['bunker', 'catacombs', 'lab', 'kino', 'outpost', 'temple']);
+  assert.deepEqual(LEVELS.map((d) => d.name), ['BUNKER', 'CATACOMBS', 'LABORATORY', 'KINO', 'OUTPOST', 'TEMPLE']);
+  assert.deepEqual(LEVELS.slice(3).map((d) => d.boss), [
+    { name: 'THE PROJECTIONIST', tint: '#d9b25a', ability: 'charge' },
+    { name: 'THE WENDIGO', tint: '#bfe8ff', ability: 'frost' },
+    { name: 'THE DROWNED KING', tint: '#3fd6a8', ability: 'tide' },
+  ]);
+  for (let i = 1; i < LEVELS.length; i++) {
+    assert.ok(LEVELS[i].difficulty.healthMult > LEVELS[i - 1].difficulty.healthMult, `level ${i + 1} harder than level ${i}`);
+  }
+});
+
+// Exports added by Agents D, G and INT in WO9 Phase 1/2 (Section 3). EXPECTED TO FAIL until they
+// land. Every import is guarded, so a module that fails to load is reported instead of thrown.
+// levelselect.js is a DOM module: importing it must not touch the DOM at load time.
+test('WO9 new exports', async () => {
+  const missing = [];
+  const load = async (name) => {
+    try { return await import(`../src/${name}.js`); } catch (err) { missing.push(`${name}.js failed to import: ${err && err.message}`); return {}; }
+  };
+  const map = await load('map');
+  const levelselect = await load('levelselect');
+  const level = await load('level');
+  const input = await load('input');
+  const touch = await load('touch');
+  const need = (mod, label, name, kind) => {
+    if (kindOf(mod[name]) !== kind) missing.push(`${label}.${name} (${kind})`);
+  };
+  // map.js (D)
+  need(map, 'map', 'TILE_PIT', 'number');
+  if (map.TILE_PIT !== undefined && map.TILE_PIT !== 12) missing.push('map.TILE_PIT === 12');
+  // levelselect.js (G)
+  for (const f of ['initLevelSelect', 'openLevelSelect', 'closeLevelSelect', 'isLevelSelectOpen', 'levelThumbnail']) need(levelselect, 'levelselect', f, F);
+  // touch.js (G)
+  need(touch, 'touch', 'onLevelsButton', F);
+  // input.js (G): getInput().levelSelect field (boolean edge)
+  if (kindOf(input.getInput) === F) {
+    let inp = null;
+    try { inp = input.getInput(); } catch (err) { missing.push(`input.getInput() threw: ${err && err.message}`); }
+    if (inp && typeof inp.levelSelect !== 'boolean') missing.push('input.getInput().levelSelect (boolean)');
+  } else missing.push('input.getInput (function)');
+  // level.js (INT)
+  need(level, 'level', 'teleportTo', F);
+  assert.deepEqual(missing, [], `missing WO9 exports:\n  ${missing.join('\n  ')}`);
 });

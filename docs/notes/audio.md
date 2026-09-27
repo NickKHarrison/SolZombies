@@ -197,3 +197,63 @@
   - `npm test`: 513/518 pass. The 5 failures are in WO8 new exports, the three levels' PaP
     placement tests and the WO7 tier-3 weapon defs. Those files belong to agents still working
     (weapons/map/shop/levels), not audio.
+
+## WO9 (Agent H): level ambiences, frost/tide, teleport, level-select blips
+- **Ambience manager** (replaces the WO7 `labHum` code; the lab hum is now one of its entries).
+  `startAmbience(id)` / `stopAmbience(fade)` keep at most one looping ambience. Each ambience gets
+  its own gain into the world bus. Levels: lab 0.035, kino 0.04, outpost 0.045, temple 0.05, so
+  all sit well under the other buses. It fades in over 1.5 s and out over 0.3 s. `level:start`
+  stops the current ambience and then starts the new level's one. The level is picked by name
+  (`/LABORATORY|KINO|OUTPOST|TEMPLE/i`), so loop names like "KINO — FLOODED" get their base
+  ambience. With no name, the index is used (`index % 6` -> lab/kino/outpost/temple for 2..5).
+  BUNKER and CATACOMBS have no ambience. The ambience is stopped on `level:descend`, `game:over`,
+  `game:restart` and every `initAudio()` re-init. Teleports reach it through `level:start`, which
+  `startLevel` emits.
+- Occasional one-shots come from a `setInterval` ticker (250 ms, 0.6 s look-ahead) that schedules
+  onto the ambience's own gain, so stopping the ambience cuts them too. The ticker is cleared on
+  stop. A slot that has fallen more than 1 s behind (a throttled background tab) is re-seeded
+  instead of firing in a burst. Long noise loops use a lazily built 3 s noise buffer, so they do
+  not repeat audibly every second.
+  - **KINO**: a theatre-organ chord (per note: a sine, an octave triangle and a quiet 3rd
+    harmonic) through a 1.1 kHz lowpass with a 5.6 Hz tremulant. It glides through
+    Dm -> Bb -> Gm -> A every 11-15 s. Every 14-28 s a film-projector clatter plays: 1.5-3 s of
+    20-24 Hz sprocket clicks (high-passed plus band-passed ticks, with a fade at each end) over a
+    46 Hz motor whir and a band-passed whirr.
+  - **OUTPOST**: wind with two parts. A broad band-passed noise body (420 Hz, slow 0.061 Hz level
+    LFO) and a resonant Q 9 "howl" band near 780 Hz, drifted by two LFOs at 0.09 and 0.037 Hz.
+    Every 4-9 s a gust raises the level to 1.5-2.1x and lifts the howl to 950-1250 Hz, then
+    settles back.
+  - **TEMPLE**: a low-passed lapping water bed (360 Hz) under drips every 0.5-2.6 s. Each drip is
+    a rising sine plink at 0.9-1.7 kHz plus a fainter echo 0.16-0.24 s later. Every 9-16 s,
+    3-4 distant slow drums (sine 76->42 Hz plus a low noise skin, through a 420 Hz lowpass) play,
+    with the last hit accented.
+- New `playSfx` names and events:
+  - `frostBreath` (`boss:frost`, boss bus, rate limit 0.3 s): an icy inhale that swells over
+    `BOSS.frost.telegraph` (band-passed air rising 700->2600 Hz, a high air band, a glassy
+    1.8->3.4 kHz sine and a faint throat voice). Then a breath hiss (high-passed noise plus a mid
+    band) with 7 crystalline tinkles.
+  - `tideRoar` (`boss:tide`, boss bus, rate limit 0.3 s): low-passed noise opening 220->1400 Hz
+    over `BOSS.tide.telegraph`, with a 38->62 Hz sub swell and a gurgle. Then a broad crashing
+    wash (a lowpass sweeping 2.6 kHz->300 Hz over 1.4 s, a hiss, a rolling mid band).
+  - `teleport` (`level:teleport`, world bus plus a ui shimmer): a noise whoosh sweeping up
+    300->4200 Hz, then back down, a rising 180->1500 Hz sine, a landing thump and a 4-note sine
+    sparkle.
+  - `uiOpen` / `uiClose` (`levelselect:open` / `levelselect:close`, ui bus, a shared 50 ms rate
+    limit): quiet rising 660->990 Hz and falling 990->620 Hz sine blip pairs.
+- `config.js` `BOSS` is now imported. Its telegraph times are clamped to 0.2-1.5 s, with defaults
+  of 0.6 and 0.8 s.
+- Verification:
+  - `node --check src/audio.js` passes.
+  - Importing in Node without `window`, then calling `initAudio` x2, the new `playSfx` names and
+    `setMuted`, is silent and does not throw.
+  - Fake-AudioContext smoke test: BUNKER builds 0 ambience nodes. LABORATORY, KINO, OUTPOST,
+    TEMPLE and the loop names "KINO — FLOODED" / "TEMPLE — ASHEN" each build their ambience, and
+    starting one stops the previous one. Game over, restart, re-init and descend each stop it; a
+    second game over stops nothing. The five new events build 34/19/18/4/4 nodes.
+  - Chrome (port 8308, `?debug=1`): through `__game.modules.events`, emitted `game:start`, then
+    `level:start` with all 6 names plus two loop names and a nameless index. Then emitted
+    `boss:frost`, `boss:tide`, `level:teleport`, `levelselect:open`/`close`, `game:over` and
+    `game:restart`. There were no console errors.
+  - `npm test`: 581/582 pass. The one failure, `WO9 new exports`, is caused by
+    `touch.onLevelsButton` and `level.teleportTo`, which agents G and INT have not landed yet.
+    It is not caused by audio.

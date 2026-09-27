@@ -5,8 +5,8 @@
 import { ZOMBIE, TILE, BOSS } from './config.js';
 import { emit } from './events.js';
 import { nextId, dist, norm, clamp } from './math.js';
-import { tearBoard, barricadeOpen, resolveCircle, isWalkable, inArena } from './map.js';
-import { getFlowDir } from './pathfinding.js';
+import { tearBoard, barricadeOpen, resolveCircle, isWalkable, inArena, raycastWalls } from './map.js';
+import { getFlowDir, buildFlowField, distanceAt } from './pathfinding.js';
 import { damagePlayer } from './player.js';
 
 // Tunables live in config.js ZOMBIE block (moved by integrator).
@@ -161,12 +161,14 @@ export function playerTargetable(p) {
   return !!p && !p.down && !(p.downT > 0) && !(p.invulnT > 0);
 }
 
-// WO7: boss ability from the level def ('charge' default | 'acid'); unknown values -> 'charge'.
+// WO7/WO9: boss ability from the level def ('charge' default | 'acid' | 'frost' | 'tide');
+// unknown values -> 'charge'.
+const BOSS_ABILITIES = ['charge', 'acid', 'frost', 'tide'];
 export function bossAbilityOf(state, opts) {
   const o = opts && opts.ability;
   const def = state && state.level && state.level.def && state.level.def.boss;
   const a = o || (def && def.ability);
-  return a === 'acid' ? 'acid' : 'charge';
+  return BOSS_ABILITIES.includes(a) ? a : 'charge';
 }
 
 // WO5: reach grows/shrinks with the body (boss radius 34, minion 10); a normal zombie keeps
@@ -339,6 +341,9 @@ export function spawnZombie(state, spawnPoint, opts = {}) {
     // WO7: per-level ability. An acid boss keeps an idle z.charge (render-safe) but never charges.
     z.ability = bossAbilityOf(state, opts);
     if (z.ability === 'acid') z.acid = { timer: acidCfg().every, phase: 'idle', t: 0 };
+    // WO9: frost / tide state (render reads phase, t, angle / radius; tide x, y = wave centre).
+    if (z.ability === 'frost') z.frost = { timer: frostCfg().every, phase: 'idle', t: 0, angle: 0, hit: false };
+    if (z.ability === 'tide') z.tide = { timer: tideCfg().every, phase: 'idle', t: 0, radius: 0, x: z.x, y: z.y, hit: false };
   }
   state.zombies.push(z);
   emit('zombie:spawned', { zombie: z, kind });
@@ -387,6 +392,8 @@ export function killZombie(state, z, cause = 'weapon') {
   z.kvx = 0; z.kvy = 0; z.stun = 0;
   if (z.charge) { z.charge.phase = 'idle'; z.charge.t = 0; }
   if (z.acid) { z.acid.phase = 'idle'; z.acid.t = 0; }
+  if (z.frost) { z.frost.phase = 'idle'; z.frost.t = 0; }
+  if (z.tide) { z.tide.phase = 'idle'; z.tide.t = 0; z.tide.radius = 0; }
   pushBlood(state, z.x, z.y, true);
   if (z.kind === 'boss' && state && Array.isArray(state.effects)) {
     // WO5: bigger pool + flash for the 2 s boss death.
@@ -511,6 +518,231 @@ function updateTearing(state, z, dt, owners) {
   else { z.vx = 0; z.vy = 0; }
 }
 
+// ---------------------------------------------------------------------------
+// WO9 FIX-3 (QA outpost #1, temple #1): navigation for large zombies (radius > TILE/2, i.e. the
+// boss, radius 34). The shared flow field is built for radius-14 movers and routes through 1-tile
+// (40 px) lanes a 68 px body cannot pass, where map.resolveCircle pins it for good.
+//  1. Clearance flow ("fat flow"): large zombies follow a flow field built on a copy of the tile
+//     grid in which every walkable tile with no point of its 3x3 half-tile lattice (corners, edge
+//     midpoints, centre) where the circle fits is treated as a wall. 2-wide lanes stay open (the
+//     shared edge midpoint fits), 1-wide gaps close. Cached per (state.flow, map, radius). Falls
+//     back to the shared flow where the fat field has no route.
+//  2. Watchdog: a chasing large zombie that moves < UNSTICK.minMove px over UNSTICK.span s
+//     (not attacking / telegraphing / pressed against the player) escalates:
+//     stage 1 'steer' along the best probed direction (flow of a neighbouring tile, perpendicular
+//     slide or direct pursuit); stage 2 'seek' the nearest half-tile lattice point where its circle
+//     fits; stage 3+ 'nudge' straight to that point (direct displacement, last resort). The stage
+//     decays to 0 after UNSTICK.calm s of chasing without a new detection.
+// ---------------------------------------------------------------------------
+
+export const UNSTICK = Object.freeze({ span: 0.75, minMove: 4, steer: 0.6, seek: 0.9, nudge: 2, calm: 2, search: 3 });
+
+export function isLargeZombie(z) { return !!z && (z.radius || 0) > TILE / 2; }
+
+// True if a circle (x, y, r) overlaps no tile that is blocking for zombies (map.isWalkable).
+export function circleFits(m, x, y, r) {
+  if (!m || !m.tiles || !(m.cols > 0) || !(m.rows > 0)) return true;
+  const ctx = Math.floor(x / TILE), cty = Math.floor(y / TILE);
+  if (!isWalkable(m, ctx, cty, true)) return false;
+  const reach = Math.max(1, Math.ceil(r / TILE));
+  const rr = (r - 1e-6) * (r - 1e-6);
+  for (let ty = cty - reach; ty <= cty + reach; ty++) {
+    for (let tx = ctx - reach; tx <= ctx + reach; tx++) {
+      if (isWalkable(m, tx, ty, true)) continue;
+      const rx = tx * TILE, ry = ty * TILE;
+      const dx = x - clamp(x, rx, rx + TILE), dy = y - clamp(y, ry, ry + TILE);
+      if (dx * dx + dy * dy < rr) return false;
+    }
+  }
+  return true;
+}
+
+// Uint8Array (cols x rows): 1 where a circle of radius r fits on at least one point of the tile's
+// half-tile lattice. Cached per map + radius; recomputed when the tile grid changed (doors).
+const fatMaskCache = new WeakMap();
+export function fatMask(m, r) {
+  const c = fatMaskCache.get(m);
+  const n = m.cols * m.rows;
+  if (c && c.r === r && c.tiles.length === n && c.tiles.every((v, i) => v === m.tiles[i])) return c.mask;
+  const mask = new Uint8Array(n);
+  const H = TILE / 2;
+  for (let ty = 0; ty < m.rows; ty++) {
+    for (let tx = 0; tx < m.cols; tx++) {
+      if (!isWalkable(m, tx, ty, true)) continue;
+      let ok = false;
+      for (let a = 0; a <= 2 && !ok; a++) {
+        for (let b = 0; b <= 2 && !ok; b++) ok = circleFits(m, tx * TILE + a * H, ty * TILE + b * H, r);
+      }
+      if (ok) mask[ty * m.cols + tx] = 1;
+    }
+  }
+  fatMaskCache.set(m, { r, tiles: Uint8Array.from(m.tiles), mask });
+  return mask;
+}
+
+// Clearance flow field toward the shared flow's target, rebuilt whenever state.flow is replaced.
+const fatFlowCache = new WeakMap();
+function fatFlowFor(state, r) {
+  const m = state.map, base = state.flow;
+  if (!m || !m.tiles || !(m.cols > 0) || !(m.rows > 0) || !base) return null;
+  if (!Number.isFinite(base.targetX) || !Number.isFinite(base.targetY)) return null;
+  const c = fatFlowCache.get(state);
+  if (c && c.base === base && c.map === m && c.r === r) return c.flow;
+  const mask = fatMask(m, r);
+  const tiles = Uint8Array.from(m.tiles);
+  for (let i = 0; i < tiles.length; i++) {
+    if (!mask[i] && isWalkable(m, i % m.cols, (i / m.cols) | 0, true)) tiles[i] = 1;
+  }
+  const flow = buildFlowField({ cols: m.cols, rows: m.rows, tiles }, base.targetX, base.targetY);
+  fatFlowCache.set(state, { base, map: m, r, flow });
+  return flow;
+}
+
+// Direction for a large zombie: fat flow at its position; on a tile the fat field does not cover,
+// head for the centre of the neighbouring fat tile closest to the target; else the shared flow.
+function largeFlowDir(state, z) {
+  const ff = fatFlowFor(state, z.radius);
+  if (ff) {
+    const d = getFlowDir(ff, z.x, z.y);
+    if (d.x || d.y) return d;
+    const tx = Math.floor(z.x / TILE), ty = Math.floor(z.y / TILE);
+    const own = tx >= 0 && ty >= 0 && tx < ff.cols && ty < ff.rows ? ff.dist[ty * ff.cols + tx] : -1;
+    if (own < 0) {
+      let best = Infinity, bx = 0, by = 0;
+      for (let oy = -1; oy <= 1; oy++) {
+        for (let ox = -1; ox <= 1; ox++) {
+          const nx = tx + ox, ny = ty + oy;
+          if ((!ox && !oy) || nx < 0 || ny < 0 || nx >= ff.cols || ny >= ff.rows) continue;
+          const nd = ff.dist[ny * ff.cols + nx];
+          if (nd < 0 || nd >= best) continue;
+          best = nd; bx = (nx + 0.5) * TILE; by = (ny + 0.5) * TILE;
+        }
+      }
+      if (best < Infinity) return norm(bx - z.x, by - z.y);
+    }
+  }
+  return state.flow ? getFlowDir(state.flow, z.x, z.y) : { x: 0, y: 0 };
+}
+
+function unstickOf(z) {
+  return z.unstick || (z.unstick = { ax: z.x, ay: z.y, t: 0, stage: 0, calm: 0, mode: null, modeT: 0,
+    dx: 0, dy: 0, gx: 0, gy: 0, count: 0 });
+}
+
+// Restart the watchdog window (attacking, telegraphing, touching the player: standing still is
+// intended). An escape in progress is cancelled.
+export function resetUnstick(z) {
+  const u = z && z.unstick;
+  if (!u) return;
+  u.ax = z.x; u.ay = z.y; u.t = 0; u.mode = null; u.modeT = 0;
+}
+
+// Best escape direction: candidates are the flow directions (fat and shared) at the centres of
+// the 8 neighbouring tiles, the two perpendiculars of `dir` and direct pursuit. Each is probed
+// with one short resolveCircle step; among those that actually move (> 2 px along themselves) the
+// one landing closest to the target (flow distance) wins, ties by the larger gain. Null if none.
+function escapeDir(state, z, dir) {
+  const m = state.map, p = state.player;
+  const fat = fatFlowFor(state, z.radius);
+  const flow = fat || state.flow;
+  const cands = [];
+  const tx = Math.floor(z.x / TILE), ty = Math.floor(z.y / TILE);
+  for (let oy = -1; oy <= 1; oy++) {
+    for (let ox = -1; ox <= 1; ox++) {
+      if (!ox && !oy) continue;
+      const cx = (tx + ox + 0.5) * TILE, cy = (ty + oy + 0.5) * TILE;
+      for (const f of [fat, state.flow]) {
+        if (!f) continue;
+        const d = getFlowDir(f, cx, cy);
+        if (d.x || d.y) cands.push(d);
+      }
+    }
+  }
+  if (dir && (dir.x || dir.y)) cands.push({ x: -dir.y, y: dir.x }, { x: dir.y, y: -dir.x });
+  if (p) { const d = norm(p.x - z.x, p.y - z.y); if (d.x || d.y) cands.push(d); }
+  const step = Math.max(8, (z.speed || 0) * 0.15);
+  let best = null, bestScore = -Infinity;
+  for (const c of cands) {
+    const nx = z.x + c.x * step, ny = z.y + c.y * step;
+    const q = m ? resolveCircle(m, nx, ny, z.radius, true) : { x: nx, y: ny };
+    const gain = (q.x - z.x) * c.x + (q.y - z.y) * c.y;
+    if (!(gain > 2)) continue;
+    const dd = flow ? distanceAt(flow, q.x, q.y) : 0;
+    const score = gain - TILE * (Number.isFinite(dd) ? dd : 1e3);
+    if (score > bestScore) { bestScore = score; best = c; }
+  }
+  return best;
+}
+
+// Nearest point of the half-tile lattice within UNSTICK.search tiles where the circle fits (at
+// least minD px away, so a zombie already on a lattice point moves). Null if none.
+export function nearestFitPoint(m, x, y, r, minD = UNSTICK.minMove) {
+  if (!m || !m.tiles) return null;
+  const H = TILE / 2, R = UNSTICK.search * 2;
+  const ix = Math.round(x / H), iy = Math.round(y / H);
+  let best = null, bestD = Infinity;
+  for (let j = iy - R; j <= iy + R; j++) {
+    for (let i = ix - R; i <= ix + R; i++) {
+      const px = i * H, py = j * H;
+      const d = Math.hypot(px - x, py - y);
+      if (d < minD || d >= bestD) continue;
+      if (!circleFits(m, px, py, r)) continue;
+      best = { x: px, y: py }; bestD = d;
+    }
+  }
+  return best;
+}
+
+// Runs before the chase move. Returns the direction to use this frame (`dir` when no escape is
+// running), or null when the frame was handled here (nudge).
+function unstickSteer(state, z, dt, dir) {
+  const u = unstickOf(z);
+  if (!u.mode) return dir;
+  u.modeT -= dt;
+  if (u.mode === 'steer') {
+    if (u.modeT <= 0) { resetUnstick(z); return dir; }
+    return { x: u.dx, y: u.dy };
+  }
+  const dx = u.gx - z.x, dy = u.gy - z.y, d = Math.hypot(dx, dy);
+  if (d < 2 || u.modeT <= 0) {
+    if (u.mode === 'nudge' && d < 2 * TILE) settle(state, z, u.gx, u.gy);
+    resetUnstick(z);
+    return dir;
+  }
+  if (u.mode === 'seek') return { x: dx / d, y: dy / d };
+  // nudge: straight displacement toward a spot the circle fits (may graze a corner on the way).
+  const s = Math.min(d, Math.max(z.speed || 0, 60) * dt);
+  z.vx = (dx / d) * (s / Math.max(dt, 1e-6)); z.vy = (dy / d) * (s / Math.max(dt, 1e-6));
+  z.x += (dx / d) * s; z.y += (dy / d) * s;
+  return null;
+}
+
+// Runs after the chase move: the stuck watchdog.
+function unstickWatch(state, z, dt, dir) {
+  const u = unstickOf(z);
+  if (u.mode) return;
+  u.t += dt;
+  u.calm += dt;
+  if (u.stage > 0 && u.calm >= UNSTICK.calm) u.stage = 0;
+  if (Math.hypot(z.x - u.ax, z.y - u.ay) >= UNSTICK.minMove) { u.ax = z.x; u.ay = z.y; u.t = 0; return; }
+  if (u.t < UNSTICK.span) return;
+  // Stuck: escalate.
+  u.count++;
+  u.calm = 0;
+  u.stage++;
+  u.t = 0;
+  if (u.stage === 1) {
+    const e = escapeDir(state, z, dir);
+    if (e) { u.mode = 'steer'; u.modeT = UNSTICK.steer; u.dx = e.x; u.dy = e.y; return; }
+    u.stage = 2;
+  }
+  const g = nearestFitPoint(state.map, z.x, z.y, z.radius);
+  if (!g) { u.ax = z.x; u.ay = z.y; return; }
+  u.gx = g.x; u.gy = g.y;
+  u.mode = u.stage === 2 ? 'seek' : 'nudge';
+  u.modeT = u.stage === 2 ? UNSTICK.seek : UNSTICK.nudge;
+}
+
 function updateChasing(state, z, dt) {
   const p = state.player;
   if (playerTargetable(p) && inAttackRange(z, p)) {
@@ -519,17 +751,29 @@ function updateChasing(state, z, dt) {
     z.vx = 0; z.vy = 0;
     return;
   }
-  let dir = state.flow ? getFlowDir(state.flow, z.x, z.y) : { x: 0, y: 0 };
+  // WO9 FIX-3: large zombies (the boss) follow the clearance flow field, see UNSTICK above.
+  const large = isLargeZombie(z);
+  let dir = large ? largeFlowDir(state, z) : state.flow ? getFlowDir(state.flow, z.x, z.y) : { x: 0, y: 0 };
   if (!(dir.x || dir.y) && p) {
     // No flow (not built yet, or on the player's own tile): head straight for the player.
     dir = norm(p.x - z.x, p.y - z.y);
   }
   // Do not push into the player's body.
   let speed = z.speed;
-  if (p && dist(z.x, z.y, p.x, p.y) <= z.radius + p.radius) speed = 0;
+  const touching = !!p && dist(z.x, z.y, p.x, p.y) <= z.radius + p.radius;
+  if (touching) speed = 0;
+  if (large) {
+    if (touching || !(dir.x || dir.y)) { resetUnstick(z); if (z.unstick) z.unstick.stage = 0; }
+    else {
+      const d = unstickSteer(state, z, dt, dir);
+      if (!d) return; // nudged this frame
+      dir = d;
+    }
+  }
   const sep = separation(state, z);
   const v = blockByContacts(state, z, dir.x * speed, dir.y * speed);
   moveAndCollide(state, z, v.x + sep.x, v.y + sep.y, dt);
+  if (large && !touching) unstickWatch(state, z, dt, dir);
 }
 
 // Crowd contact (playtest.md #1): a chasing zombie does not advance into a zombie it is already
@@ -554,6 +798,7 @@ function blockByContacts(state, z, vx, vy) {
 function updateAttacking(state, z, dt) {
   const p = state.player;
   z.vx = 0; z.vy = 0;
+  resetUnstick(z); // WO9 FIX-3: standing still to swing is not stuck
   // WO7: a downed / reviving / invulnerable player cancels any swing (no damage) and the zombie
   // goes back to chasing.
   if (!playerTargetable(p)) { z.mode = 'chasing'; z.attackTimer = 0; return; }
@@ -709,6 +954,168 @@ function updateBossAcid(state, z, dt) {
   }
   a.phase = 'idle';
   return false;
+}
+
+// WO9: per-ability dispatch. Returns true when the ability owns the frame (normal AI skipped).
+function updateBossAbility(state, z, dt) {
+  switch (z.ability) {
+    case 'acid': return updateBossAcid(state, z, dt);
+    case 'frost': return updateBossFrost(state, z, dt);
+    case 'tide': return updateBossTide(state, z, dt);
+    default: return updateBossCharge(state, z, dt);
+  }
+}
+
+// True when no ray-blocking tile lies between (ax, ay) and (bx, by). Pits ('~') never block
+// (map.raycastWalls passes through them). Bare maps without a tile grid never block.
+export function clearShot(m, ax, ay, bx, by) {
+  if (!m || !m.tiles || !(m.cols > 0) || !(m.rows > 0)) return true;
+  const d = Math.hypot(bx - ax, by - ay);
+  if (!(d > 1e-6)) return true;
+  return !(raycastWalls(m, ax, ay, bx - ax, by - ay, d) < d);
+}
+
+// ---------------------------------------------------------------------------
+// WO9 frost boss (THE WENDIGO): idle (hunt + melee) -> telegraph (still, boss:frost, cone aimed
+// at the player and locked) -> breath (still, FROST_BREATH s, hits at most once) -> idle.
+// ---------------------------------------------------------------------------
+
+const FROST_DEFAULTS = { every: 6, telegraph: 0.8, range: 260, halfAngle: 0.5, damage: 30, slowMult: 0.55, slowSeconds: 2 };
+export const FROST_BREATH = 0.35;
+export function frostCfg() { return { ...FROST_DEFAULTS, ...(BOSS.frost || {}) }; }
+
+// Player circle vs the breath cone from (x, y) along `angle`: the player's nearest edge is within
+// F.range, the player's circle overlaps the sector (halfAngle widened by the player's angular
+// radius asin(r / d)) and nothing ray-blocking lies between the boss and the player's centre.
+export function inFrostCone(m, x, y, angle, p, F = frostCfg()) {
+  if (!p) return false;
+  const pr = p.radius || 14;
+  const dx = p.x - x, dy = p.y - y;
+  const d = Math.hypot(dx, dy);
+  if (d - pr > F.range) return false;
+  if (d > pr) {
+    let da = Math.atan2(dy, dx) - angle;
+    da = Math.atan2(Math.sin(da), Math.cos(da));
+    if (Math.abs(da) > F.halfAngle + Math.asin(Math.min(1, pr / d))) return false;
+  }
+  return clearShot(m, x, y, p.x, p.y);
+}
+
+function updateBossFrost(state, z, dt) {
+  const F = frostCfg();
+  const f = z.frost || (z.frost = { timer: F.every, phase: 'idle', t: 0, angle: 0, hit: false });
+  const p = state.player;
+  if (f.phase === 'idle') {
+    // The cooldown pauses while the player is down / in the revive pause / invulnerable.
+    if (!playerTargetable(p)) return false;
+    if (f.timer > 0) f.timer -= dt;
+    const busy = z.mode === 'attacking' && z.attackTimer > 0;
+    if (f.timer <= 0 && !busy) {
+      f.phase = 'telegraph'; f.t = 0; f.hit = false;
+      const dx = p.x - z.x, dy = p.y - z.y;
+      f.angle = (dx || dy) ? Math.atan2(dy, dx) : (z.knockAngle || 0);
+      z.mode = 'chasing'; z.attackTimer = 0; z.vx = 0; z.vy = 0;
+      emit('boss:frost', { x: z.x, y: z.y, angle: f.angle });
+      return true;
+    }
+    return false;
+  }
+  f.t += dt;
+  z.vx = 0; z.vy = 0;
+  if (f.phase === 'telegraph') {
+    if (f.t >= F.telegraph) { f.phase = 'breath'; f.t = 0; f.hit = false; frostHit(state, z, f, F); }
+    return true;
+  }
+  if (f.phase === 'breath') {
+    frostHit(state, z, f, F);
+    if (f.t >= FROST_BREATH) { f.phase = 'idle'; f.t = 0; f.timer = F.every; }
+    return true;
+  }
+  f.phase = 'idle';
+  return false;
+}
+
+// One hit per breath: slow (not while `invulnerable`, god mode) + damage.
+function frostHit(state, z, f, F) {
+  const p = state.player;
+  if (f.hit || !playerTargetable(p)) return;
+  if (!inFrostCone(state.map, z.x, z.y, f.angle, p, F)) return;
+  f.hit = true;
+  if (!p.invulnerable) p.slowT = Math.max(Number(p.slowT) || 0, F.slowSeconds);
+  damagePlayer(state, F.damage);
+}
+
+// ---------------------------------------------------------------------------
+// WO9 tide boss (THE DROWNED KING): idle (hunt + melee) -> telegraph (still, boss:tide) ->
+// wave (ring centred on the boss's position at the end of the telegraph, radius += speed x dt
+// up to maxRadius; the boss hunts again meanwhile) -> idle. At most one hit per wave.
+// ---------------------------------------------------------------------------
+
+const TIDE_DEFAULTS = { every: 7, telegraph: 0.8, speed: 320, maxRadius: 420, damage: 40, knockback: 120, band: 28 };
+export function tideCfg() { return { ...TIDE_DEFAULTS, ...(BOSS.tide || {}) }; }
+
+function updateBossTide(state, z, dt) {
+  const T = tideCfg();
+  const w = z.tide || (z.tide = { timer: T.every, phase: 'idle', t: 0, radius: 0, x: z.x, y: z.y, hit: false });
+  const p = state.player;
+  if (w.phase === 'idle') {
+    if (!playerTargetable(p)) return false;
+    if (w.timer > 0) w.timer -= dt;
+    const busy = z.mode === 'attacking' && z.attackTimer > 0;
+    if (w.timer <= 0 && !busy) {
+      w.phase = 'telegraph'; w.t = 0; w.radius = 0; w.hit = false; w.x = z.x; w.y = z.y;
+      z.mode = 'chasing'; z.attackTimer = 0; z.vx = 0; z.vy = 0;
+      emit('boss:tide', { x: z.x, y: z.y });
+      return true;
+    }
+    return false;
+  }
+  w.t += dt;
+  if (w.phase === 'telegraph') {
+    z.vx = 0; z.vy = 0;
+    if (w.t >= T.telegraph) { w.phase = 'wave'; w.t = 0; w.radius = 0; w.hit = false; w.x = z.x; w.y = z.y; }
+    return true;
+  }
+  if (w.phase === 'wave') {
+    const r0 = w.radius;
+    w.radius = Math.min(T.maxRadius, r0 + T.speed * dt);
+    tideHit(state, w, r0, T);
+    if (w.radius >= T.maxRadius) { w.phase = 'idle'; w.t = 0; w.radius = 0; w.timer = T.every; }
+    return false;
+  }
+  w.phase = 'idle';
+  return false;
+}
+
+// True when the ring sweeping from radius r0 to r1 this frame passes within `band` of a point at
+// distance d (|d - radius| < band for some radius in [r0, r1]; frame-rate independent).
+export function tideBandHits(d, r0, r1, band) {
+  return d > r0 - band && d < r1 + band;
+}
+
+function tideHit(state, w, r0, T) {
+  const p = state.player;
+  if (w.hit || !playerTargetable(p)) return;
+  const dx = p.x - w.x, dy = p.y - w.y;
+  const d = Math.hypot(dx, dy);
+  if (!tideBandHits(d, r0, w.radius, T.band)) return;
+  if (!clearShot(state.map, w.x, w.y, p.x, p.y)) return;
+  w.hit = true;
+  damagePlayer(state, T.damage);
+  // Knockback radially away from the wave centre, sub-stepped and wall-safe via resolveCircle.
+  let ux, uy;
+  if (d > 1e-6) { ux = dx / d; uy = dy / d; } else { ux = Math.cos(p.angle || 0); uy = Math.sin(p.angle || 0); }
+  const k = T.knockback;
+  const steps = Math.max(1, Math.ceil(k / (TILE / 2)));
+  for (let i = 0; i < steps; i++) {
+    let nx = p.x + (ux * k) / steps, ny = p.y + (uy * k) / steps;
+    if (state.map) {
+      const r = resolveCircle(state.map, nx, ny, p.radius || 14);
+      nx = r.x; ny = r.y;
+    }
+    if (Number.isFinite(nx) && Number.isFinite(ny)) { p.x = nx; p.y = ny; }
+  }
+  pushShake(state, 0.35, 8);
 }
 
 // Pushes A.globs acid globs into state.acidGlobs (NOT state.bullets: weapons.updateBullets would
@@ -895,7 +1302,8 @@ export function updateZombies(state, dt) {
       z.inside = true;
       if (z.mode === 'tearing') { z.mode = 'chasing'; z.tearTimer = 0; }
       if (z.kind === 'boss') {
-        if (z.ability === 'acid' ? updateBossAcid(state, z, dt) : updateBossCharge(state, z, dt)) continue;
+        // WO9 FIX-3: an ability frame (telegraph / breath / charge dash) restarts the stuck watchdog.
+        if (updateBossAbility(state, z, dt)) { resetUnstick(z); continue; }
         // Zombie Blood does not fool the boss.
         if (z.mode === 'wandering') z.mode = 'chasing';
         switch (z.mode) {

@@ -28,6 +28,11 @@
   --perk-h: 0cqh;
   --perk-row-h: 6.4cqh;          /* bottle 5.8cqh + 0.6cqh gap above the vitals */
   --hud-shadow: 0 0 0.4em rgba(0, 0, 0, 0.9), 0 0.08em 0.1em rgba(0, 0, 0, 0.9);
+  /* WO9 FIX-4: 1px-ish dark outline + soft halo for the corner readouts (vitals, points) so
+     they read on bright floors (OUTPOST snow). Harmless on dark levels. */
+  --hud-outline: 0.06em 0 0 rgba(0, 0, 0, 0.85), -0.06em 0 0 rgba(0, 0, 0, 0.85),
+    0 0.06em 0 rgba(0, 0, 0, 0.85), 0 -0.06em 0 rgba(0, 0, 0, 0.85),
+    0 0.1em 0.2em rgba(0, 0, 0, 0.85), 0 0 0.4em rgba(0, 0, 0, 0.6);
 }
 
 html, body {
@@ -120,6 +125,7 @@ html, body {
 .hud-points-value {
   color: var(--hud-points);
   font-weight: 800;
+  text-shadow: var(--hud-outline);  /* WO9 FIX-4 */
   font-size: 6vmin;
   font-size: 6.5cqh;
   letter-spacing: 0.02em;
@@ -542,6 +548,8 @@ html, body {
 .hud-vital-label {
   font-size: 2cqh;               /* = .hud-weapon-secondary */
   color: var(--hud-dim);
+  /* WO9 FIX-4 (QA OUTPOST #3): a firmer dark edge so HEALTH/KILLS stay legible on bright floors. */
+  text-shadow: var(--hud-outline);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   min-height: 1.1em;
@@ -550,6 +558,7 @@ html, body {
 .hud-vital-value {
   font-size: 5cqh;               /* = .hud-weapon-ammo */
   font-weight: 800;
+  text-shadow: var(--hud-outline);  /* WO9 FIX-4 */
   font-variant-numeric: tabular-nums;
   color: var(--hud-text);
 }
@@ -1235,3 +1244,145 @@ html, body {
 #hud.mobile .hud-vital-label,
 #hud.mobile .hud-level { font-size: max(10px, 2cqh); }
 #hud.mobile .hud-perk-uses { font-size: max(9px, 1.3cqh); min-width: max(12px, 1.9cqh); height: max(12px, 1.9cqh); }
+
+/* ---------- WO9 (Agent I): LEVELS button, level-select phase, practice line, slow status ---------- */
+
+/* Pause-screen LEVELS button (desktop click / touch tap). #hud * is pointer-events:none, so the
+   button opts back in; data-action="levels" is the touch.js / levelselect contract hook. */
+#hud .screen-btn { pointer-events: auto; }
+.screen-btn {
+  margin-top: 1cqh;
+  min-width: 26cqh;
+  min-height: 7cqh;
+  padding: 1.2cqh 4cqh;
+  border: 0.3cqh solid rgba(255, 201, 60, 0.75);
+  border-radius: 1cqh;
+  background: linear-gradient(180deg, rgba(60, 20, 18, 0.92) 0%, rgba(25, 8, 8, 0.92) 100%);
+  color: var(--hud-gold, #ffc93c);
+  font-family: inherit;
+  font-size: 3.2cqh;
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  text-indent: 0.22em;           /* balance the trailing letter-spacing */
+  text-shadow: var(--hud-shadow);
+  box-shadow: 0 0 1.6cqh rgba(0, 0, 0, 0.8), inset 0 0.3cqh 0 rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.screen-btn:hover,
+.screen-btn:focus-visible {
+  outline: none;
+  border-color: #ffe08a;
+  color: #fff3c4;
+  box-shadow: 0 0 2.2cqh rgba(255, 170, 40, 0.55), inset 0 0.3cqh 0 rgba(255, 255, 255, 0.18);
+}
+.screen-btn:active { transform: scale(0.96); }
+.screen-hint {
+  font-size: 2.2cqh;
+  letter-spacing: 0.08em;
+  color: var(--hud-dim);
+}
+#hud.mobile .screen-btn { font-size: max(14px, 3.2cqh); min-height: max(40px, 9cqh); min-width: max(120px, 28cqh); }
+
+/* While paused on touch the stick zones go away, so a tap on LEVELS reaches the button (the zones
+   are full-height halves above #hud); the PAUSE button still shows (see the WO6 rule above). */
+#hud[data-phase="paused"] ~ #touch .tj-zone { display: none; }
+
+/* Level select open (phase 'levelselect'; the overlay itself is levelselect.js): the centre
+   screen is hidden by hud.js, gameplay widgets dim, prompts/banners and touch controls step aside. */
+#hud[data-phase="levelselect"] .hud-points,
+#hud[data-phase="levelselect"] .hud-round,
+#hud[data-phase="levelselect"] .hud-weapon,
+#hud[data-phase="levelselect"] .hud-powerups,
+#hud[data-phase="levelselect"] .hud-boss,
+#hud[data-phase="levelselect"] .hud-facebox,
+#hud[data-phase="levelselect"] .hud-vitals,
+#hud[data-phase="levelselect"] .hud-perks,
+#hud[data-phase="levelselect"] .hud-down {
+  opacity: 0.3;
+}
+#hud[data-phase="levelselect"] .hud-screen,
+#hud[data-phase="levelselect"] .hud-prompt { display: none; }
+#hud[data-phase="levelselect"] .hud-vital-health.crit .hud-vital-value,
+#hud[data-phase="levelselect"] .hud-down-text { animation: none; }
+#hud[data-phase="levelselect"] ~ #touch .tbtn,
+#hud[data-phase="levelselect"] ~ #touch .tj-zone { display: none; }
+
+/* Game over after a teleport: replaces the rank line. */
+.screen-rank .rank-practice {
+  font-size: 3.6cqh;
+  color: #9fd8ff;
+  letter-spacing: 0.08em;
+  text-shadow: 0 0 1.2cqh rgba(40, 140, 255, 0.7), 0 0.1em 0.1em #000;
+}
+#hud.mobile .screen-rank .rank-practice { font-size: max(13px, 3.6cqh); }
+
+/* Frost slow: ice crystal + SLOWED in the HEALTH label row, value gets a cold glow. The badge is
+   taken out of flow (the label row keeps its 1.1em min-height), so the wider text can never widen
+   the HEALTH cell and push KILLS sideways (touch floor font 10px would otherwise add ~11px). */
+.hud-vital-health { position: relative; }
+.hud-slow {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  color: #9fe6ff;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-shadow: 0 0 0.8cqh rgba(60, 180, 255, 0.9), var(--hud-shadow);
+  animation: hud-slow-pulse 0.9s ease-in-out infinite alternate;
+}
+.hud-slow-icon {
+  width: 1.25em;
+  height: 1.25em;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 0.5cqh rgba(80, 190, 255, 0.9));
+}
+.hud-vital-health.slowed .hud-vital-value {
+  text-shadow: 0 0 1.2cqh rgba(80, 190, 255, 0.85), var(--hud-shadow);
+}
+@keyframes hud-slow-pulse {
+  from { opacity: 1; }
+  to { opacity: 0.6; }
+}
+#hud[data-phase="paused"] .hud-slow,
+#hud[data-phase="gameover"] .hud-slow { animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  .hud-slow { animation: none; }
+}
+#hud.mobile .hud-slow { gap: 0.2em; letter-spacing: 0.02em; }
+#hud.mobile .hud-slow-icon { width: 1.1em; height: 1.1em; }
+
+/* ---------- WO9 FIX-4 (QA OUTPOST #3): bright-level contrast ----------
+   hud.js mirrors the level theme style onto #stage[data-level-style] (and #hud). On the white
+   OUTPOST snow the white-on-transparent sticks, buttons and dim labels vanish, so bright levels
+   get dark rings/backings and lighter labels. Other levels keep the default look. */
+#stage[data-level-style="outpost"] .hud-vital-label { color: #d0d6dc; }
+#stage[data-level-style="outpost"] .tj-base {
+  border-color: rgba(20, 35, 55, 0.7);
+  background: radial-gradient(circle, rgba(20, 35, 55, 0.1) 0 55%, rgba(20, 35, 55, 0.28) 100%);
+  box-shadow: 0 0 0 0.3cqh rgba(255, 255, 255, 0.35), inset 0 0 1.5cqh rgba(20, 35, 55, 0.35);
+}
+#stage[data-level-style="outpost"] .tj-knob {
+  border-color: rgba(20, 35, 55, 0.9);
+  background: radial-gradient(circle at 40% 35%, rgba(255, 255, 255, 0.75), rgba(110, 130, 155, 0.6) 70%);
+  box-shadow: 0 0 1.2cqh rgba(20, 35, 55, 0.6);
+}
+#stage[data-level-style="outpost"] .tj-zone:not(.active) .tj-base { opacity: 0.8; }
+#stage[data-level-style="outpost"] .tj-zone:not(.active) .tj-knob { opacity: 0.9; }
+#stage[data-level-style="outpost"] .tj-zone.tj-right .tj-base { border-color: rgba(150, 30, 20, 0.7); }
+#stage[data-level-style="outpost"] .tj-zone.tj-right .tj-knob { border-color: rgba(170, 40, 25, 0.95); }
+#stage[data-level-style="outpost"] .tbtn {
+  background: rgba(12, 18, 28, 0.62);
+  border-color: rgba(20, 35, 55, 0.85);
+  box-shadow: 0 0 0 0.25cqh rgba(255, 255, 255, 0.3), 0 0.4cqh 1.2cqh rgba(0, 0, 0, 0.45);
+}
+#stage[data-level-style="outpost"] .tbtn.pressed { background: rgba(40, 60, 85, 0.75); border-color: #ffffff; }

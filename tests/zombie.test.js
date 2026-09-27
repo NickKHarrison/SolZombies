@@ -1115,3 +1115,374 @@ test('WO7 downed-player rule applies to minions and the boss (melee, charge and 
   assert.equal(dmg.length, 0);
   assert.equal(s.player.health, 150);
 });
+
+// ---------------------------------------------------------------------------
+// WO9 (Agent E): frost (THE WENDIGO) and tide (THE DROWNED KING) boss abilities
+// ---------------------------------------------------------------------------
+
+function wo9State(ability, seed = 90, w = 40, h = 24) {
+  const s = fakeState(seed);
+  s.map = roomMap(w, h);
+  s.level = { index: ability === 'frost' ? 4 : 5, def: { boss: { name: 'BOSS', tint: '#ffffff', ability } } };
+  return s;
+}
+const setTile = (m, tx, ty, code) => { m.tiles[ty * m.cols + tx] = code; };
+const PIT = Number.isFinite(map.TILE_PIT) ? map.TILE_PIT : 12;
+
+test('WO9 boss ability: frost / tide from the level def get their state objects', () => {
+  const s = wo9State('frost');
+  const f = spawnZombie(s, { x: 100, y: 100 }, { kind: 'boss' });
+  assert.equal(f.ability, 'frost');
+  assert.deepEqual(f.frost, { timer: BOSS.frost.every, phase: 'idle', t: 0, angle: 0, hit: false });
+  assert.equal(f.charge.phase, 'idle', 'frost boss keeps an idle charge object (render-safe)');
+  s.level.def.boss.ability = 'tide';
+  const t = spawnZombie(s, { x: 100, y: 100 }, { kind: 'boss' });
+  assert.equal(t.ability, 'tide');
+  assert.equal(t.tide.phase, 'idle'); assert.equal(t.tide.radius, 0); assert.equal(t.tide.timer, BOSS.tide.every);
+  assert.equal(spawnZombie(s, { x: 100, y: 100 }, { kind: 'boss', ability: 'frost' }).ability, 'frost');
+  assert.equal(zombie.bossAbilityOf(s, { ability: 'nope' }), 'charge');
+  assert.equal(zombie.bossAbilityOf(s), 'tide');
+});
+
+test('WO9 frost cadence: boss:frost every BOSS.frost.every s, still telegraph + breath, never charges', { skip: mapStub }, () => {
+  const s = wo9State('frost', 91, 60, 16);
+  s.player = fakePlayer(56 * TILE, 8 * TILE); // far out of range: no hit
+  const frosts = record('boss:frost');
+  const charges = record('boss:charge');
+  const b = spawnZombie(s, { x: 3 * TILE, y: 8 * TILE }, { kind: 'boss' });
+  const dt = 1 / 60;
+  let t = 0;
+  while (frosts.length === 0 && t < 20) { updateZombies(s, dt); t += dt; }
+  assert.ok(Math.abs(t - BOSS.frost.every) < 2 * dt, `first breath at ${t}`);
+  assert.equal(b.frost.phase, 'telegraph');
+  assert.equal(frosts[0].x, b.x); assert.equal(frosts[0].y, b.y);
+  assert.ok(Math.abs(frosts[0].angle) < 1e-9, 'aimed at the player (east)');
+  assert.equal(b.frost.angle, frosts[0].angle);
+  const x0 = b.x;
+  t = 0;
+  while (b.frost.phase === 'telegraph' && t < 2) { updateZombies(s, dt); t += dt; }
+  assert.ok(Math.abs(t - BOSS.frost.telegraph) < 2 * dt, `telegraph ${t}`);
+  assert.equal(b.frost.phase, 'breath');
+  t = 0;
+  while (b.frost.phase === 'breath' && t < 2) { updateZombies(s, dt); t += dt; }
+  assert.ok(Math.abs(t - zombie.FROST_BREATH) < 2 * dt, `breath ${t}`);
+  assert.equal(b.x, x0, 'still during telegraph and breath');
+  t = 0;
+  while (frosts.length === 1 && t < 20) { updateZombies(s, dt); t += dt; }
+  assert.ok(b.x > x0, 'hunts between breaths');
+  assert.ok(Math.abs(t - BOSS.frost.every) < 3 * dt, `period ${t}`);
+  assert.equal(charges.length, 0);
+  assert.equal(s.player.health, 150);
+});
+
+test('WO9 inFrostCone: edge distance, widened half-angle, line of sight (walls block, pits do not)', () => {
+  const m = roomMap(40, 24);
+  const F = BOSS.frost;
+  const bx = 10 * TILE + 20, by = 12 * TILE + 20;
+  const at = (d, a, r = 14) => ({ x: bx + Math.cos(a) * d, y: by + Math.sin(a) * d, radius: r });
+  assert.ok(zombie.inFrostCone(m, bx, by, 0, at(150, 0), F));
+  assert.ok(zombie.inFrostCone(m, bx, by, 0, at(F.range + 13, 0), F), 'edge within range');
+  assert.ok(!zombie.inFrostCone(m, bx, by, 0, at(F.range + 15, 0), F), 'edge out of range');
+  const widen = Math.asin(14 / 150);
+  assert.ok(zombie.inFrostCone(m, bx, by, 0, at(150, F.halfAngle + widen - 0.01), F), 'edge inside the cone');
+  assert.ok(!zombie.inFrostCone(m, bx, by, 0, at(150, F.halfAngle + widen + 0.01), F), 'edge outside the cone');
+  assert.ok(!zombie.inFrostCone(m, bx, by, 0, at(150, Math.PI), F), 'behind');
+  assert.ok(zombie.inFrostCone(m, bx, by, Math.PI / 2, at(150, Math.PI / 2), F), 'other directions');
+  assert.ok(zombie.inFrostCone(m, bx, by, 0, at(5, 2), F), 'overlapping the boss centre');
+  // A wall tile between boss and player blocks the breath; a pit tile does not.
+  const wallM = roomMap(40, 24);
+  setTile(wallM, 13, 12, 1);
+  assert.ok(!zombie.inFrostCone(wallM, bx, by, 0, at(200, 0), F), 'wall blocks');
+  const pitM = roomMap(40, 24);
+  setTile(pitM, 13, 12, PIT);
+  assert.ok(zombie.inFrostCone(pitM, bx, by, 0, at(200, 0), F), 'breath crosses a pit');
+});
+
+function frostDuel(seed, px, py, prep) {
+  const s = wo9State('frost', seed);
+  s.player = fakePlayer(px, py);
+  s.player.slowT = 0;
+  const b = spawnZombie(s, { x: 10 * TILE + 20, y: 12 * TILE + 20 }, { kind: 'boss' });
+  b.frost.timer = 1e-3;
+  if (prep) prep(s, b);
+  const dmg = record('player:damaged');
+  const dt = 1 / 60;
+  updateZombies(s, dt);
+  let t = 0;
+  while (b.frost.phase !== 'idle' && t < 3) { updateZombies(s, dt); t += dt; }
+  return { s, b, dmg };
+}
+
+test('WO9 frost breath: damage + slow once per breath for a player in the cone', { skip: mapStub || playerStub }, () => {
+  const { s, dmg } = frostDuel(92, 10 * TILE + 20 + 180, 12 * TILE + 20);
+  assert.equal(dmg.length, 1, 'one hit per breath');
+  assert.equal(dmg[0].amount, BOSS.frost.damage);
+  assert.equal(s.player.health, 150 - BOSS.frost.damage);
+  assert.equal(s.player.slowT, BOSS.frost.slowSeconds);
+  // A longer slow already running is kept (max).
+  const r = frostDuel(93, 10 * TILE + 20 + 180, 12 * TILE + 20, (st) => { st.player.slowT = 5; });
+  assert.equal(r.s.player.slowT, 5);
+});
+
+test('WO9 frost breath misses behind a wall, out of the locked cone, and while invulnerable', { skip: mapStub || playerStub }, () => {
+  const wall = frostDuel(94, 10 * TILE + 20 + 180, 12 * TILE + 20, (s) => setTile(s.map, 13, 12, 1));
+  assert.equal(wall.dmg.length, 0); assert.equal(wall.s.player.slowT, 0);
+  // Cone locked at telegraph start: sidestepping during the telegraph dodges it.
+  const dodge = frostDuel(95, 10 * TILE + 20 + 180, 12 * TILE + 20, (s, b) => {
+    const dt = 1 / 60;
+    updateZombies(s, dt);
+    assert.equal(b.frost.phase, 'telegraph');
+    s.player.y += 200;
+  });
+  assert.equal(dodge.dmg.length, 0); assert.equal(dodge.s.player.slowT, 0);
+  const god = frostDuel(96, 10 * TILE + 20 + 180, 12 * TILE + 20, (s) => { s.player.invulnerable = true; });
+  assert.equal(god.dmg.length, 0); assert.equal(god.s.player.slowT, 0);
+  for (const field of ['invulnT', 'downT']) {
+    const r = frostDuel(97, 10 * TILE + 20 + 180, 12 * TILE + 20, (s, b) => {
+      updateZombies(s, 1 / 60); // telegraph starts
+      s.player[field] = 5;
+    });
+    assert.equal(r.dmg.length, 0, field); assert.equal(r.s.player.slowT, 0, field);
+  }
+});
+
+test('WO9 frost / tide cooldowns pause while the player is untargetable', { skip: mapStub }, () => {
+  for (const ability of ['frost', 'tide']) {
+    for (const field of ['invulnT', 'downT']) {
+      const s = wo9State(ability, 98);
+      s.player = fakePlayer(30 * TILE, 12 * TILE);
+      s.player[field] = 5;
+      const ev = record(`boss:${ability}`);
+      const b = spawnZombie(s, { x: 5 * TILE, y: 12 * TILE }, { kind: 'boss' });
+      b[ability].timer = 0.5;
+      for (let t = 0; t < 1; t += 1 / 60) updateZombies(s, 1 / 60);
+      assert.equal(b[ability].timer, 0.5, `${ability}/${field}: timer frozen`);
+      assert.equal(b[ability].phase, 'idle');
+      assert.equal(ev.length, 0);
+      s.player[field] = 0;
+      for (let t = 0; t < 0.6; t += 1 / 60) updateZombies(s, 1 / 60);
+      assert.equal(ev.length, 1, `${ability}/${field}: resumes`);
+    }
+  }
+});
+
+test('WO9 tideBandHits: swept band test', () => {
+  const B = BOSS.tide.band;
+  assert.ok(zombie.tideBandHits(100, 90, 95, B));
+  assert.ok(zombie.tideBandHits(100, 0, 100 - B + 1, B));
+  assert.ok(!zombie.tideBandHits(100, 0, 100 - B, B));
+  assert.ok(!zombie.tideBandHits(100, 100 + B, 140, B), 'ring already past');
+  assert.ok(zombie.tideBandHits(100, 20, 300, B), 'a big step never skips the player');
+});
+
+test('WO9 tide cadence: boss:tide every BOSS.tide.every s, still telegraph, ring grows at speed to maxRadius', { skip: mapStub }, () => {
+  const s = wo9State('tide', 100, 60, 16);
+  s.player = fakePlayer(56 * TILE, 8 * TILE); // out of the ring's reach
+  const tides = record('boss:tide');
+  const charges = record('boss:charge');
+  const b = spawnZombie(s, { x: 3 * TILE, y: 8 * TILE }, { kind: 'boss' });
+  const dt = 1 / 60;
+  let t = 0;
+  while (tides.length === 0 && t < 20) { updateZombies(s, dt); t += dt; }
+  assert.ok(Math.abs(t - BOSS.tide.every) < 2 * dt, `first wave at ${t}`);
+  assert.deepEqual(tides[0], { x: b.x, y: b.y });
+  assert.equal(b.tide.phase, 'telegraph');
+  const x0 = b.x;
+  t = 0;
+  while (b.tide.phase === 'telegraph' && t < 2) { updateZombies(s, dt); t += dt; }
+  assert.ok(Math.abs(t - BOSS.tide.telegraph) < 2 * dt, `telegraph ${t}`);
+  assert.equal(b.x, x0, 'still during the telegraph');
+  assert.equal(b.tide.phase, 'wave');
+  assert.equal(b.tide.x, x0);
+  for (let i = 0; i < 30; i++) updateZombies(s, dt);
+  assert.ok(Math.abs(b.tide.radius - BOSS.tide.speed * 30 * dt) < 1e-6, `radius ${b.tide.radius}`);
+  assert.ok(b.x > x0, 'hunts while the wave rolls');
+  assert.equal(b.tide.x, x0, 'wave centre stays put');
+  t = 30 * dt;
+  while (b.tide.phase === 'wave' && t < 5) { updateZombies(s, dt); t += dt; }
+  assert.ok(Math.abs(t - BOSS.tide.maxRadius / BOSS.tide.speed) < 2 * dt, `wave lasted ${t}`);
+  assert.equal(b.tide.radius, 0);
+  assert.equal(b.tide.timer, BOSS.tide.every);
+  assert.equal(charges.length, 0);
+  assert.equal(s.player.health, 150);
+});
+
+function tideDuel(seed, bx, px, prep) {
+  const s = wo9State('tide', seed);
+  s.player = fakePlayer(px, 12 * TILE + 20);
+  s.player.health = s.player.maxHealth = 1e6;
+  const b = spawnZombie(s, { x: bx, y: 12 * TILE + 20 }, { kind: 'boss' });
+  b.tide.timer = 1e-3;
+  if (prep) prep(s, b);
+  const dmg = record('player:damaged');
+  const dt = 1 / 60;
+  updateZombies(s, dt);
+  let t = 0;
+  const x0 = s.player.x;
+  while (b.tide.phase === 'telegraph' && t < 3) { updateZombies(s, dt); t += dt; }
+  while (b.tide.phase === 'wave' && t < 5) { updateZombies(s, dt); t += dt; }
+  return { s, b, dmg, x0 };
+}
+
+test('WO9 tide wave: hits once per wave, 40 damage, 120 px knockback away from the centre', { skip: mapStub || playerStub }, () => {
+  const { s, dmg, x0 } = tideDuel(101, 20 * TILE, 20 * TILE + 200);
+  assert.equal(dmg.length, 1, 'once per wave (the knocked player is not hit again)');
+  assert.equal(dmg[0].amount, BOSS.tide.damage);
+  assert.ok(Math.abs(s.player.x - (x0 + BOSS.tide.knockback)) < 1e-6, `knocked to ${s.player.x}`);
+  assert.equal(s.player.y, 12 * TILE + 20);
+});
+
+test('WO9 tide wave: blocked by walls, not by pits; out of reach; untargetable player', { skip: mapStub || playerStub }, () => {
+  const wall = tideDuel(102, 20 * TILE, 20 * TILE + 200, (s) => { for (let y = 8; y <= 16; y++) setTile(s.map, 22, y, 1); });
+  assert.equal(wall.dmg.length, 0); assert.equal(wall.s.player.x, wall.x0);
+  const pit = tideDuel(103, 20 * TILE, 20 * TILE + 200, (s) => { for (let y = 8; y <= 16; y++) setTile(s.map, 22, y, PIT); });
+  assert.equal(pit.dmg.length, 1, 'the wave rolls over water');
+  const far = tideDuel(104, 5 * TILE, 5 * TILE + BOSS.tide.maxRadius + BOSS.tide.band + 20);
+  assert.equal(far.dmg.length, 0);
+  for (const field of ['invulnT', 'downT']) {
+    const r = tideDuel(105, 20 * TILE, 20 * TILE + 200, (s) => { s.player[field] = 0; });
+    assert.equal(r.dmg.length, 1, `${field} baseline`);
+    const q = tideDuel(106, 20 * TILE, 20 * TILE + 200, (s, b) => {
+      updateZombies(s, 1 / 60); // telegraph starts
+      assert.equal(b.tide.phase, 'telegraph');
+      s.player[field] = 10;
+    });
+    assert.equal(q.dmg.length, 0, field); assert.equal(q.s.player.x, q.x0, `${field}: no knockback`);
+  }
+});
+
+test('WO9 tide knockback is wall-safe (resolveCircle)', { skip: mapStub || playerStub }, () => {
+  // East wall inner face at x = 39 * TILE; the player starts 60 px from it.
+  const { s, dmg } = tideDuel(107, 30 * TILE, 39 * TILE - 60);
+  assert.equal(dmg.length, 1);
+  assert.ok(s.player.x <= 39 * TILE - s.player.radius + 1e-6, `stays out of the wall: ${s.player.x}`);
+  assert.ok(s.player.x > 39 * TILE - 60, 'pushed toward the wall');
+});
+
+test('WO9 killZombie resets frost / tide phases', () => {
+  const s = wo9State('frost', 108);
+  const f = spawnZombie(s, { x: 100, y: 100 }, { kind: 'boss' });
+  f.frost.phase = 'breath'; f.frost.t = 0.2;
+  killZombie(s, f, 'debug');
+  assert.equal(f.frost.phase, 'idle');
+  s.level.def.boss.ability = 'tide';
+  const t = spawnZombie(s, { x: 100, y: 100 }, { kind: 'boss' });
+  t.tide.phase = 'wave'; t.tide.radius = 200;
+  killZombie(s, t, 'debug');
+  assert.equal(t.tide.phase, 'idle'); assert.equal(t.tide.radius, 0);
+});
+
+// ---------------------------------------------------------------------------
+// WO9 FIX-3 (QA outpost #1, temple #1): large-zombie clearance flow + unstick watchdog
+// ---------------------------------------------------------------------------
+import { buildFlowField } from '../src/pathfinding.js';
+
+// 30 x 16 room split by a wall at row 7. `wideGap`: a 3-tile gap at x 2..4 (a detour the boss fits
+// through); always a 1-tile gap at x 15, right on the straight line between boss and player.
+function gapMap(wideGap = true) {
+  const w = 30, h = 16;
+  const tiles = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let wall = x === 0 || y === 0 || x === w - 1 || y === h - 1;
+      if (y === 7) wall = !(x === 15 || (wideGap && x >= 2 && x <= 4));
+      tiles[y * w + x] = wall ? 1 : 0;
+    }
+  }
+  return { cols: w, rows: h, width: w * TILE, height: h * TILE, tiles, walls: [], barricades: [],
+    spawnPoints: [], wallBuys: [], box: null, playerStart: { x: 15.5 * TILE, y: 11.5 * TILE } };
+}
+
+function gapDuel(seed, wideGap) {
+  const s = fakeState(seed);
+  s.map = gapMap(wideGap);
+  s.player = fakePlayer(15.5 * TILE, 11.5 * TILE);
+  s.flow = buildFlowField(s.map, s.player.x, s.player.y);
+  const b = spawnZombie(s, { x: 15.5 * TILE, y: 3.5 * TILE }, { kind: 'boss' });
+  b.charge.timer = 1e9; // no dash: pure hunting
+  return { s, b };
+}
+
+test('WO9 FIX-3 fatMask / circleFits / nearestFitPoint: 1-tile gaps close for the boss, 2-wide lanes stay open', { skip: mapStub }, () => {
+  const m = gapMap(true);
+  const R = BOSS.radius;
+  assert.ok(R > TILE / 2 && zombie.isLargeZombie({ radius: R }) && !zombie.isLargeZombie({ radius: ZOMBIE.radius }));
+  const mask = zombie.fatMask(m, R);
+  assert.equal(mask[7 * m.cols + 15], 0, '1-tile gap is closed');
+  assert.equal(mask[7 * m.cols + 3], 1, '3-tile gap centre is open');
+  assert.equal(mask[7 * m.cols + 2], 1, '3-tile gap side (fits on its edge with the centre tile)');
+  assert.equal(mask[3 * m.cols + 15], 1, 'open floor');
+  assert.equal(mask[1 * m.cols + 1], 1, 'room corner tile (its inner corner point fits)');
+  assert.equal(mask[0], 0, 'wall');
+  // 2-wide lane: both tiles open (the shared edge midpoint is 40 px from each wall)
+  const lane = gapMap(false);
+  lane.tiles[7 * lane.cols + 16] = 0;
+  const lm = zombie.fatMask(lane, R);
+  assert.equal(lm[7 * lane.cols + 15], 1); assert.equal(lm[7 * lane.cols + 16], 1);
+  assert.ok(zombie.circleFits(m, 15.5 * TILE, 3.5 * TILE, R));
+  assert.ok(!zombie.circleFits(m, 15.5 * TILE, 7.5 * TILE, R), 'boss does not fit in the 1-tile gap');
+  assert.ok(zombie.circleFits(m, 15.5 * TILE, 7.5 * TILE, ZOMBIE.radius), 'a normal zombie does');
+  const g = zombie.nearestFitPoint(m, 15.5 * TILE, 6.4 * TILE, R);
+  assert.ok(g && zombie.circleFits(m, g.x, g.y, R));
+  assert.ok(g.y <= 6.4 * TILE, 'nearest fitting point is back in the north room');
+});
+
+test('WO9 FIX-3 boss takes the wide detour instead of wedging in a 1-tile gap', { skip: mapStub }, () => {
+  const { s, b } = gapDuel(301, true);
+  const dt = 1 / 60;
+  let reached = false, minY = Infinity;
+  for (let t = 0; t < 30 && !reached; t += dt) {
+    updateZombies(s, dt);
+    if (b.y > 7 * TILE && b.x < 6 * TILE) minY = Math.min(minY, b.y);
+    if (b.mode === 'attacking') reached = true;
+  }
+  assert.ok(reached, `boss reached the player (at ${b.x.toFixed(1)}, ${b.y.toFixed(1)})`);
+  assert.ok(minY < Infinity, 'went through the west gap');
+  assert.ok(!b.unstick || b.unstick.count === 0, 'never needed the watchdog');
+});
+
+test('WO9 FIX-3 watchdog: a boss pinned at a gap it cannot fit through never stands still for long', { skip: mapStub }, () => {
+  // No detour: the clearance field has no route, so the boss falls back to the shared flow, which
+  // leads into the 1-tile gap. Without the watchdog it stays pinned there for good.
+  const { s, b } = gapDuel(302, false);
+  const dt = 1 / 60;
+  let still = 0, maxStill = 0, lx = b.x, ly = b.y, stages = new Set();
+  for (let t = 0; t < 12; t += dt) {
+    updateZombies(s, dt);
+    if (b.unstick && b.unstick.mode) stages.add(b.unstick.mode);
+    if (Math.hypot(b.x - lx, b.y - ly) >= UNSTICK_MIN) { lx = b.x; ly = b.y; still = 0; } else still += dt;
+    maxStill = Math.max(maxStill, still);
+    assert.ok(Number.isFinite(b.x) && Number.isFinite(b.y));
+    assert.ok(b.y < 7 * TILE + 1, 'never squeezes through');
+  }
+  assert.ok(b.unstick && b.unstick.count >= 2, `watchdog fired (${b.unstick && b.unstick.count})`);
+  assert.ok(maxStill < zombie.UNSTICK.span + zombie.UNSTICK.steer + 0.2, `longest stand-still ${maxStill.toFixed(2)} s`);
+  assert.ok(stages.has('steer'), 'stage 1 steer');
+  assert.ok(stages.has('seek') || stages.has('nudge'), `escalates (${[...stages]})`);
+  // After an escape the boss rests where its circle fits.
+  for (let t = 0; t < 3; t += 1 / 60) {
+    updateZombies(s, 1 / 60);
+    if (b.unstick.mode === 'nudge') { updateZombies(s, 1 / 60); }
+  }
+  const r = map.resolveCircle(s.map, b.x, b.y, b.radius, true);
+  assert.ok(Math.hypot(r.x - b.x, r.y - b.y) < 1, 'resolved position');
+});
+const UNSTICK_MIN = 4;
+
+test('WO9 FIX-3 watchdog stays quiet while the boss swings, telegraphs or touches the player; normal zombies untouched', { skip: mapStub || playerStub }, () => {
+  const s = wo9State('frost', 303, 20, 20);
+  s.player = fakePlayer(10 * TILE, 10 * TILE);
+  s.player.invulnerable = true;
+  s.flow = buildFlowField(s.map, s.player.x, s.player.y);
+  const b = spawnZombie(s, { x: 10 * TILE + 50, y: 10 * TILE }, { kind: 'boss' });
+  const n = spawnZombie(s, { x: 3 * TILE, y: 3 * TILE });
+  let frosts = 0;
+  for (let t = 0; t < 14; t += 1 / 60) {
+    updateZombies(s, 1 / 60);
+    if (b.frost.phase !== 'idle') frosts++;
+    s.player.health = s.player.maxHealth;
+  }
+  assert.ok(frosts > 0, 'telegraphed / breathed at least once');
+  assert.ok(!b.unstick || b.unstick.count === 0, 'no false unstick');
+  assert.equal(n.unstick, undefined, 'radius-14 zombies never get the watchdog');
+});

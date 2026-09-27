@@ -121,3 +121,16 @@
 - `PERKS.list.mule.color` is now `#ff4fd8` (magenta), so Mule Kick no longer shares the
   Pack-a-Punch purple `#b44dff` (playtest #1). The perk machine and HUD bottle read the config
   colour.
+
+## WO9 (Agent E): frost slow
+- `createPlayer` adds `slowT: 0` (seconds of frost slow left; set by zombie.js frost breath as
+  `max(slowT, BOSS.frost.slowSeconds)`).
+- `updatePlayer`: after the `downT` branch, `slowed = slowT > 0` is sampled, then `slowT` counts down
+  by `dt` (also while standing still). Movement speed (walk and sprint) is multiplied by
+  `slowMult()` (exported, = `BOSS.frost.slowMult`, fallback 0.55) for that frame; it stacks
+  multiplicatively with Stamin-Up's `speedMult` / `sprintMult`.
+- Reset to 0 on Quick Revive (`revive`), and via `initPlayer` listeners on `game:restart`,
+  `level:descend` and `level:teleport` (main's restart also builds a fresh player).
+- HUD (I) can read `player.slowT > 0` for the frost indicator.
+- Tests: shape/`slowMult`, slowed walk + sprint then full speed, countdown while idle, Stamin-Up
+  stacking, resets on revive / restart / level events.

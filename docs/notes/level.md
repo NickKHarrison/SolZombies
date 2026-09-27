@@ -83,3 +83,17 @@ because map.js is rewritten concurrently). Main should never call it.
 - `startLevel`: when `returnPapWeapon` hands a gun back, a gold (`#ffd36b`, 2.5 s) floating text
   effect `{ type: 'text', text: '<UPGRADED NAME> RETURNED' }` is pushed just above the player
   (after the player is placed at the new start). No new event types; still no `pap:done`.
+
+## WO9 FIX-3 (QA kino #5, outpost #8; FIX-1 floorZones)
+- **Practice teleport points floor:** `teleportTo(state, index)` tops `player.points` up to
+  `teleportMinPoints(index)` (exported) = `LEVEL_SELECT.minPoints` (400, `config.js`) x `index`,
+  when the player has less (KINO 1200, OUTPOST 1600, TEMPLE 2000). It never lowers points, and
+  index 0 gets nothing. It emits `points:changed { delta, total }` for the HUD. The grant is not
+  added to `stats.pointsEarned`. It applies only on a teleport; `startLevel`, a descent and debug
+  `setLevel` never grant points. Practice runs are unranked (main sets `stats.practice`).
+- **loopTheme:** `floorZones` (KINO per-area floor overrides `[{ x0, y0, x1, y1, floor }]`, added
+  by FIX-1) is in `THEME_HINT_KEYS`. Array hint values are now copied one level deep: object entries
+  are shallow-cloned, so a loop theme never shares zone objects with its base.
+- **Tests** (`tests/level.test.js`): the teleport floor (top-up + event, no lowering, index 0,
+  descent and startLevel untouched, pointsEarned untouched), the floorZones copy, and the existing
+  teleport test now expects `max(1234, minPoints x 4)`.

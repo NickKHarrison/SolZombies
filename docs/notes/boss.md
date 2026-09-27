@@ -111,3 +111,16 @@ Headless check on the real level-1 map: 60 s of fight with a circling, invulnera
   audio/HUD should throttle hurt feedback (or treat amounts < 1 as a tick).
 - Constants: all from `BOSS.acid`; fallbacks (6 / 0.5 / 3 / 0.44 / 0.8 / 50 / 5 / 25) only if the
   config block is missing.
+
+## WO9 (Agent E): frost / tide bosses
+- No boss.js code change was needed: `startFight` spawns the boss through `zombie.spawnZombie`, which
+  reads `state.level.def.boss.ability` (`'frost'` THE WENDIGO, `'tide'` THE DROWNED KING) and builds
+  `z.frost` / `z.tide`. The abilities live in zombie.js (see zombie.md WO9) because they drive the boss
+  zombie's per-frame AI like charge and acid; they create no hazards, so `updateHazards` is unchanged.
+- Render (F) reads `bossZombie(state).frost` `{ phase, t, angle }` (cone: `BOSS.frost.range`,
+  `halfAngle`; breath lasts `zombie.FROST_BREATH`) and `.tide` `{ phase, t, radius, x, y }` (draw the
+  ring at `x, y`, the wave centre, not the moving boss). Audio (H) hooks `boss:frost` / `boss:tide`
+  (emitted at telegraph start).
+- Tests (`tests/boss.test.js`): `startFight` on frost / tide levels spawns the right ability; a 20 s
+  fight per ability uses it >= 2 times, never charges, and the knocked player stays finite and off the
+  wall ring.

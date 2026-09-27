@@ -5,7 +5,7 @@
 // progression index (0, 1, 2, ...). def = levelByIndex(index) (wraps), loop =
 // floor(index / LEVELS.length). nextLevelIndex(state) = index + 1, so the loop count
 // increments automatically when it wraps past LEVELS.length.
-import { LEVELS_CFG, ROUNDS, DOORS } from './config.js';
+import { LEVELS_CFG, ROUNDS, DOORS, LEVEL_SELECT } from './config.js';
 import * as events from './events.js';
 import { LEVELS, levelByIndex } from './levels/levels.js';
 // Siblings rewritten concurrently in WO5: namespace imports, called lazily and guarded.
@@ -122,16 +122,50 @@ export function loopTheme(base, loop) {
     torch: !!(b.torch || v.torch),
     flicker: !!b.flicker, // WO7: LABORATORY II+ keeps its failing fluorescent tubes
     variant: v.label,
+    // WO9 (INT): keep the render style dispatch + level-specific look hints (KINO II keeps its
+    // curtains / seats, OUTPOST II its snow, TEMPLE II its water...). Copied verbatim.
+    ...pickThemeHints(b),
   };
+}
+
+// WO9 (INT): non-colour-scheme theme keys that loop variants keep from their base theme.
+const THEME_HINT_KEYS = [
+  'style', 'wallStyle',
+  'curtainRow', 'seatRows', 'stageRows', 'curtain', 'seat', 'lamp', 'grain', // KINO
+  'snow', 'ice', 'iceDeep', 'hutWood',                                        // OUTPOST
+  'water', 'spores', 'waterDeep', 'waterLight', 'moss', 'vine', 'glyph',       // TEMPLE
+  'pit',
+  'floorZones', // WO9 FIX-3: KINO per-area floor overrides [{ x0, y0, x1, y1, floor }]
+];
+function pickThemeHints(b) {
+  const out = {};
+  for (const k of THEME_HINT_KEYS) {
+    if (b[k] === undefined) continue;
+    // Arrays are copied one level deep (floorZones entries are objects: copied too).
+    out[k] = Array.isArray(b[k]) ? b[k].map((v) => (v && typeof v === 'object' && !Array.isArray(v) ? { ...v } : v)) : b[k];
+  }
+  return out;
 }
 
 // WO7 FIX-3 (balance #4): loop levels sell upgraded wall guns (LEVELS_CFG.loopWallUpgrade, one
 // step per id, letters kept). Always a new object; the base def's wallbuys are never mutated.
 export function loopWallbuys(wallbuys) {
   const up = (LEVELS_CFG && LEVELS_CFG.loopWallUpgrade) || {};
+  const entries = Object.entries(wallbuys || {});
   const out = {};
-  for (const [k, id] of Object.entries(wallbuys || {})) {
+  for (const [k, id] of entries) {
     out[k] = (typeof id === 'string' && Object.prototype.hasOwnProperty.call(up, id) && up[id]) || id;
+  }
+  // WO9 (INT): never sell the same gun twice on one level. An upgrade whose target is already on
+  // the walls (authored or produced by an earlier upgrade) is skipped: that letter keeps its
+  // authored gun (e.g. LABORATORY II: icr1 -> gorgon / xr2 -> m8a7; KINO II: kn44 -> peacekeeper).
+  // Repeats until stable (a reverted gun could collide with another upgrade); deterministic.
+  for (let guard = 0; guard <= entries.length; guard++) {
+    const count = new Map();
+    for (const v of Object.values(out)) count.set(v, (count.get(v) || 0) + 1);
+    const hit = entries.find(([k, id]) => out[k] !== id && count.get(out[k]) > 1);
+    if (!hit) break;
+    out[hit[0]] = hit[1];
   }
   return out;
 }
@@ -200,8 +234,12 @@ export function megaDoorCost(index = 0) {
 // Keeps: player points / weapons / ammo, active power-ups, stats, state.time. Health: healed to
 // full when index > 0 (arrival relief, first break LEVELS_CFG.arrivalBreak).
 // Emits level:start { index, name, loop }. Returns state.level.
-export function startLevel(state, index = 0) {
+// WO9 (INT): optional `opts` { arrive: true } forces the arrival relief (heal + arrivalBreak) even
+// for index 0; { teleport: true } adds `teleport: true` to the level:start payload (the HUD then
+// shows the TELEPORTED banner instead of LEVEL n). Both are used by teleportTo.
+export function startLevel(state, index = 0, opts = null) {
   const idx = Math.max(0, Math.floor(Number(index) || 0));
+  const o = opts && typeof opts === 'object' ? opts : {};
   const lv = createLevelState(idx);
   state.level = lv; // set first so anything reading state.level during load sees the new level
 
@@ -236,11 +274,14 @@ export function startLevel(state, index = 0) {
   resetRoundsForLevel(state);
   // WO5 FIX-1 (QA playtest #4): arriving by descent (index > 0) gives a longer first break
   // (LEVELS_CFG.arrivalBreak) and a full heal. Index 0 (boot / restart) keeps firstRoundDelay.
-  const arriving = idx > 0;
+  const arriving = idx > 0 || !!o.arrive;
   if (arriving && Number.isFinite(LEVELS_CFG.arrivalBreak)) state.rounds.timer = LEVELS_CFG.arrivalBreak;
 
   const p = state.player;
   if (p && arriving && Number.isFinite(p.maxHealth)) p.health = p.maxHealth;
+  // WO9 (INT): per-level transient status does not follow the player to another level, on any
+  // entry path (descent, teleport, debug setLevel, restart): the frost slow from THE WENDIGO.
+  if (p && 'slowT' in p) p.slowT = 0;
   const start = state.map && state.map.playerStart;
   if (p && start) {
     p.x = start.x;
@@ -259,8 +300,45 @@ export function startLevel(state, index = 0) {
     });
   }
 
-  events.emit('level:start', { index: lv.index, name: lv.name, loop: lv.loop });
+  const payload = { index: lv.index, name: lv.name, loop: lv.loop };
+  if (o.teleport) payload.teleport = true;
+  events.emit('level:start', payload);
   return lv;
+}
+
+// WO9 3.5 (INT): level-select teleport. Loads level `index` (absolute progression index; the
+// level-select cards pass 0..LEVELS.length-1) fresh via startLevel with the arrival relief of a
+// descent (full heal, LEVELS_CFG.arrivalBreak) also for index 0; a gun inside the Pack-a-Punch
+// comes back upgraded exactly as on a descent. Cancels a running descent fade. Round counter,
+// weapons, points, perks and stats are kept. Emits level:teleport { from, to, name } after
+// level:start. The caller (main) sets stats.practice. Returns state.level (null without state).
+// WO9 FIX-3 (QA kino #5, outpost #8): teleporting to index > 0 tops the player up to at least
+// teleportMinPoints(index) = LEVEL_SELECT.minPoints x index points (never lowers them), so a
+// practice run can buy a door and a wall gun. Teleport only; a descent never grants points.
+export function teleportTo(state, index) {
+  if (!state) return null;
+  const from = state.level ? state.level.index : 0;
+  const to = Math.max(0, Math.floor(Number(index) || 0));
+  state.transition = null;
+  const lv = startLevel(state, to, { arrive: true, teleport: true });
+  const p = state.player;
+  const min = teleportMinPoints(to);
+  if (p && min > 0) {
+    const had = Number(p.points) || 0;
+    if (had < min) {
+      // A practice grant, not earned: stats.pointsEarned is untouched. HUD gets the usual event.
+      p.points = min;
+      events.emit('points:changed', { delta: min - had, total: min });
+    }
+  }
+  events.emit('level:teleport', { from, to, name: lv.name });
+  return lv;
+}
+
+export function teleportMinPoints(index) {
+  const i = Math.max(0, Math.floor(Number(index) || 0));
+  const per = LEVEL_SELECT && Number.isFinite(LEVEL_SELECT.minPoints) ? LEVEL_SELECT.minPoints : 0;
+  return Math.max(0, per * i);
 }
 
 // WO8 1.1 (INT): leaving the level with a gun inside the Pack-a-Punch machine loses nothing. A
